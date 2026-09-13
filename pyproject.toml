@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "journal-analyzer"
+version = "0.2.0"
+description = "Ask questions about an Obsidian-style Markdown journal using local Ollama models."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "IDGBAN" }]
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12,<1.0",
+    "pydantic>=2.7,<3.0",
+    "rich>=13.0,<15.0",
+    "watchdog>=4.0,<7.0",
+    "ollama>=0.4,<1.0",
+    "httpx>=0.27,<1.0",
+    "sqlite-vec>=0.1.6,<0.2",
+    "flashrank>=0.2.0,<0.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/IDGBAN/Commonplace"
+Repository = "https://github.com/IDGBAN/Commonplace"
+Issues = "https://github.com/IDGBAN/Commonplace/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "ruff>=0.6,<1.0",
+    "mypy>=1.11,<3.0",
+]
+
+[project.scripts]
+journal = "journal_analyzer.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["journal_analyzer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["error::DeprecationWarning:journal_analyzer.*"]
+
+[tool.ruff]
+line-length = 92
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # import sorting
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "BLE",       # blind except
+    "SIM",       # simplify
+    "RUF",       # ruff-specific
+]
+ignore = [
+    "E501",      # line length is the formatter's job
+    "B008",      # typer.Option() calls in signatures
+    "SIM905",    # "a b c".split() word lists
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SLF001"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["journal_analyzer"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+# no type hints shipped
+module = ["sqlite_vec", "flashrank"]
+ignore_missing_imports = true

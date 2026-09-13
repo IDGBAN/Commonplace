@@ -1,0 +1,52 @@
+# Copy this to config.toml and edit it. Paths can use ~ and are turned into
+# absolute paths when the config loads.
+
+[vault]
+path = "~/Vault/Journal"          # journal root
+daily_note_glob = "**/*.md"       # which files are journal entries
+date_source = "filename"          # "filename" | "frontmatter" | "heading"
+date_format = "%Y-%m-%d"          # for filename and heading dates
+frontmatter_date_key = "date"     # used when date_source = "frontmatter"
+split_heading_regex = ""          # set to split one file into several entries at matching headings
+# Folders and files to skip. Names without a "/" match anywhere in the tree,
+# patterns with a "/" match the path from the vault root. * and ? work.
+ignore_patterns = [".stversions", ".stfolder", ".smart-env", ".obsidian"]
+
+[ollama]
+host = "http://localhost:11434"
+fast_model = "llama3.2:3b"
+precise_model = "qwen3:14b"
+fast_model_think = false
+precise_model_think = true
+embed_model = "qwen3-embedding:0.6b"
+embed_num_ctx = 8192
+request_timeout_seconds = 120
+
+[db]
+path = "~/.journal_analyzer/journal.db"
+
+[indexing]
+watch_debounce_seconds = 45
+mood_scale_max = 10               # mood_score goes from 1 to this
+
+[reranking]
+# Reorders search hits before answering, which gives better results. The model
+# is downloaded the first time it's used, so set enabled = false to stay offline.
+enabled = true
+model = "ms-marco-MiniLM-L-12-v2"
+
+[insights]
+# `journal insights` only reports a tag, person or weekly/seasonal pattern once
+# it has at least min_sample_size mood-scored entries, and only if its average
+# mood is at least mood_deviation_threshold away from your baseline (on the
+# 1..mood_scale_max scale). Lower them to see weaker patterns.
+min_sample_size = 3
+mood_deviation_threshold = 0.8
+
+[notes]
+# Folders (or single files) of undated notes about people, places, topics and
+# so on. An entry that [[links]] to one counts as mentioning it, and answers
+# can use the notes themselves. A note's kind is the folder right under one of
+# these paths, so Links/People/Sara.md is "people".
+paths = []                        # e.g. ["Links"]
+summarize_over_chars = 280        # shorter notes are their own summary; 0 summarizes every note

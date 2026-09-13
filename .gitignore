@@ -1,0 +1,35 @@
+# Local user configuration
+config.toml
+.env
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Derived data
+*.db
+*.sqlite
+*.sqlite3
+
+# SQLite sidecar files (WAL mode)
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
