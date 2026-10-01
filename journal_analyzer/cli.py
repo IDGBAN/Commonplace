@@ -16,7 +16,18 @@ from rich.markup import escape
 from rich.status import Status
 from rich.table import Table
 
-from . import db, embedder, export, ingester, insights, prompts, query, rollups, store
+from . import (
+    browse,
+    db,
+    embedder,
+    export,
+    ingester,
+    insights,
+    prompts,
+    query,
+    rollups,
+    store,
+)
 from .config import Config, load_config
 from .models import JournalError, OllamaUnavailableError
 from .ollama_client import OllamaClient, same_model
@@ -91,11 +102,12 @@ def _parse_range(since: str | None, until: str | None) -> tuple[date | None, dat
     return date_from, date_to
 
 
-def _open(config_path: Path | None) -> tuple[Config, sqlite3.Connection]:
+@contextmanager
+def _open(config_path: Path | None) -> Iterator[tuple[Config, sqlite3.Connection]]:
     cfg = load_config(config_path)
-    conn = db.connect(cfg)
-    db.init_schema(conn)
-    return cfg, conn
+    with closing(db.connect(cfg)) as conn:
+        db.init_schema(conn)
+        yield cfg, conn
 
 
 def _mood_str(mood: object) -> str:
@@ -142,8 +154,7 @@ def _note_table(
 @app.command()
 def init(config: ConfigOpt = None) -> None:
     """Create the cache database and check the embedding size."""
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         console.print(f"Schema ready at {escape(str(cfg.db.path))}")
         try:
             with _working("Asking the embedding model for its vector size..."):
@@ -170,8 +181,7 @@ def index(
     ] = False,
 ) -> None:
     """Index the vault. Unchanged files are skipped, so re-running is cheap."""
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         if vault is not None:
             cfg = cfg.model_copy(deep=True)
             cfg.vault.path = vault.expanduser().resolve()
@@ -181,8 +191,7 @@ def index(
 @app.command()
 def watch(config: ConfigOpt = None) -> None:
     """Keep indexing files as they change, until Ctrl-C."""
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         ingester.run_watch(cfg, conn)
 
 
@@ -192,12 +201,10 @@ def ask(
     config: ConfigOpt = None,
 ) -> None:
     """Ask a question about your journal."""
-    with _guard():
-        cfg, conn = _open(config)
-        with _working("Thinking...") as status:
-            result = query.answer(
-                question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status)
-            )
+    with _guard(), _open(config) as (cfg, conn), _working("Thinking...") as status:
+        result = query.answer(
+            question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status)
+        )
     console.print(escape(result.text))
     console.print(f"[dim](answered by stage: {result.stage_used})[/dim]")
 
@@ -210,8 +217,7 @@ def rollup(
     ] = False,
 ) -> None:
     """Write any missing or outdated week, month and year digests."""
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         counts = rollups.generate_rollups(
             cfg, conn, OllamaClient(cfg), only_stale=not rebuild_all
         )
@@ -224,8 +230,7 @@ def rollup(
 @app.command()
 def stats(config: ConfigOpt = None) -> None:
     """Show counts, the date range, failed files and the cache size."""
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         s = store.stats(conn)
         size_mb = cfg.db.path.stat().st_size / BYTES_PER_MB if cfg.db.path.exists() else 0
         kinds = ", ".join(f"{r['kind']} {r['n']}" for r in store.notes_by_kind(conn))
@@ -259,8 +264,7 @@ def search(
 ) -> None:
     """Search entries and notes by keyword and meaning."""
     date_from, date_to = _parse_range(since, until)
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         with _working("Searching..."):
             results = query.search(
                 text, cfg, conn, OllamaClient(cfg),
@@ -285,8 +289,7 @@ def show(
 ) -> None:
     """Show what's stored for one day."""
     d = _parse_date(day, "DATE")
-    with _guard():
-        _, conn = _open(config)
+    with _guard(), _open(config) as (_, conn):
         rows = store.entries_in_range(conn, d, d)
         if not rows:
             console.print(f"No indexed entry on {d}.")
@@ -322,8 +325,7 @@ def note(
     ] = 10,
 ) -> None:
     """Show a reference note and the entries that link to it."""
-    with _guard():
-        _, conn = _open(config)
+    with _guard(), _open(config) as (_, conn):
         matches = store.find_notes(conn, name)
         if not matches:
             console.print(
@@ -385,8 +387,7 @@ def tags(
 ) -> None:
     """List the most used tags."""
     date_from, date_to = _parse_range(since, until)
-    with _guard():
-        _, conn = _open(config)
+    with _guard(), _open(config) as (_, conn):
         rows = store.top_tags(conn, date_from, date_to, limit=limit)
     if not rows:
         console.print("No tags yet. Run 'journal index' first.")
@@ -412,8 +413,7 @@ def entities(
 ) -> None:
     """List the notes your entries link to most."""
     date_from, date_to = _parse_range(since, until)
-    with _guard():
-        _, conn = _open(config)
+    with _guard(), _open(config) as (_, conn):
         rows = store.top_entities(conn, date_from, date_to, limit=limit, entity_type=type_)
         kinds = ", ".join(r["kind"] for r in store.notes_by_kind(conn))
     if not rows:
@@ -442,8 +442,7 @@ def mood(
 ) -> None:
     """Average mood per month."""
     date_from, date_to = _parse_range(since, until)
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         rows = store.monthly_mood(conn, date_from, date_to)
     if not any(r["avg_mood"] is not None for r in rows):
         console.print("No mood-scored entries in this range yet.")
@@ -465,8 +464,7 @@ def mood(
 @app.command()
 def streaks(config: ConfigOpt = None) -> None:
     """Writing streaks and word counts."""
-    with _guard():
-        _, conn = _open(config)
+    with _guard(), _open(config) as (_, conn):
         s = store.writing_stats(conn)
     if not s.entries:
         console.print("No entries indexed yet. Run 'journal index' first.")
@@ -492,8 +490,7 @@ def on_this_day(
 ) -> None:
     """What you wrote on this date in earlier years."""
     anchor = _parse_date(day, "--date") if day is not None else date.today()
-    with _guard():
-        _, conn = _open(config)
+    with _guard(), _open(config) as (_, conn):
         rows = [
             r for r in store.entries_on_month_day(conn, anchor.month, anchor.day)
             if r["entry_date"] != anchor.isoformat()
@@ -515,8 +512,7 @@ def similar(
 ) -> None:
     """Find entries similar to the one on a given day."""
     d = _parse_date(day, "DATE")
-    with _guard():
-        _, conn = _open(config)
+    with _guard(), _open(config) as (_, conn):
         day_rows = store.entries_in_range(conn, d, d)
         if not day_rows:
             console.print(f"No indexed entry on {d}.")
@@ -541,6 +537,27 @@ def similar(
         console.print(_entry_table(conn, rows))
 
 
+@app.command(name="browse")
+def browse_cmd(
+    config: ConfigOpt = None,
+    port: Annotated[
+        int, typer.Option("--port", min=0, max=65535, help="Port on 127.0.0.1.")
+    ] = browse.DEFAULT_PORT,
+    no_open: Annotated[
+        bool, typer.Option("--no-open", help="Don't open a browser window.")
+    ] = False,
+) -> None:
+    """Browse everything the cache knows in a local, read-only web page."""
+    with _guard():
+        cfg = load_config(config)
+
+        def ready(url: str) -> None:
+            console.print(f"Journal browser running at [bold cyan]{url}[/bold cyan]")
+            console.print("[dim]Read-only. Press Ctrl-C to stop.[/dim]")
+
+        browse.serve(cfg, port=port, open_browser=not no_open, on_ready=ready)
+
+
 @app.command(name="export")
 def export_cmd(
     config: ConfigOpt = None,
@@ -559,8 +576,7 @@ def export_cmd(
 ) -> None:
     """Export entries as JSON or Markdown."""
     date_from, date_to = _parse_range(since, until)
-    with _guard():
-        cfg, conn = _open(config)
+    with _guard(), _open(config) as (cfg, conn):
         entries = export.collect_entries(conn, date_from, date_to, include_raw=include_raw)
     if not entries:
         console.print("No entries in the requested range.")
@@ -597,12 +613,10 @@ def insights_cmd(
 ) -> None:
     """Look for mood patterns across tags, people and time."""
     date_from, date_to = _parse_range(since, until)
-    with _guard():
-        cfg, conn = _open(config)
-        with _working("Looking for patterns..."):
-            text, found = insights.generate_insights(
-                cfg, conn, OllamaClient(cfg), date_from, date_to
-            )
+    with _guard(), _open(config) as (cfg, conn), _working("Looking for patterns..."):
+        text, found = insights.generate_insights(
+            cfg, conn, OllamaClient(cfg), date_from, date_to
+        )
     console.print(escape(text))
     if found.findings:
         console.print("\n[dim]Signals considered:[/dim]")
@@ -613,9 +627,11 @@ def insights_cmd(
 @app.command()
 def chat(config: ConfigOpt = None) -> None:
     """Ask questions with follow-ups."""
-    with _guard():
-        cfg, conn = _open(config)
-    client = OllamaClient(cfg)
+    with _guard(), _open(config) as (cfg, conn):
+        _chat_loop(cfg, conn, OllamaClient(cfg))
+
+
+def _chat_loop(cfg: Config, conn: sqlite3.Connection, client: OllamaClient) -> None:
     console.print(
         "Follow-ups like 'what about the month after that?' work. "
         "Type 'exit' or Ctrl-D to quit."
@@ -663,12 +679,14 @@ def prompt(
     ] = 4,
 ) -> None:
     """Suggest things to write about, based on recent entries."""
-    with _guard():
-        cfg, conn = _open(config)
-        with _working("Reading your recent entries..."):
-            suggestions = prompts.generate_prompts(
-                cfg, conn, OllamaClient(cfg), days=days, count=count
-            )
+    with (
+        _guard(),
+        _open(config) as (cfg, conn),
+        _working("Reading your recent entries..."),
+    ):
+        suggestions = prompts.generate_prompts(
+            cfg, conn, OllamaClient(cfg), days=days, count=count
+        )
     if not suggestions:
         console.print(f"No entries in the last {days} days to draw prompts from.")
         return
@@ -691,7 +709,7 @@ def doctor(config: ConfigOpt = None) -> None:
 def _report_ollama(cfg: Config) -> bool:
     try:
         available = OllamaClient(cfg).list_models()
-    except OllamaUnavailableError as exc:
+    except JournalError as exc:
         console.print(f"[red]FAIL[/red] {escape(str(exc))}")
         return False
     console.print(f"[green]OK[/green] Ollama reachable at {escape(cfg.ollama.host)}")

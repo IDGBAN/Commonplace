@@ -1,11 +1,13 @@
 import io
+import sqlite3
 import sys
 from datetime import date, timedelta
 
+import pytest
 from conftest import add_entry, invoke_cli
 
-from journal_analyzer import cli, query
-from journal_analyzer.models import OllamaUnavailableError, QueryPlan
+from journal_analyzer import cli, db, query
+from journal_analyzer.models import ModelRequestError, OllamaUnavailableError, QueryPlan
 
 
 def _flat(output: str) -> str:
@@ -37,6 +39,40 @@ def test_doctor_still_checks_sqlite_vec_when_ollama_is_down(tmp_path, config, mo
     output = _flat(result.output)
     assert "FAIL Cannot reach Ollama" in output
     assert "OK sqlite-vec extension loads" in output
+
+
+def test_doctor_keeps_going_when_ollama_rejects_the_model_list(
+    tmp_path, config, monkeypatch
+):
+    class Rejecting:
+        def list_models(self):
+            raise ModelRequestError("Ollama rejected the request: internal error")
+
+    monkeypatch.setattr(cli, "OllamaClient", lambda cfg: Rejecting())
+    result = invoke_cli(tmp_path, config, "doctor")
+    assert result.exit_code == 1
+    output = _flat(result.output)
+    assert "FAIL Ollama rejected the request" in output
+    assert "OK sqlite-vec extension loads" in output
+
+
+def test_commands_close_the_cache_when_they_finish(tmp_path, config, conn, monkeypatch):
+    opened: list[sqlite3.Connection] = []
+    real_connect = db.connect
+
+    def tracking(cfg):
+        opened.append(real_connect(cfg))
+        return opened[-1]
+
+    monkeypatch.setattr(db, "connect", tracking)
+    add_entry(conn, date(2024, 1, 15))
+    assert invoke_cli(tmp_path, config, "tags").exit_code == 0
+    # exits early, from inside the open block
+    assert invoke_cli(tmp_path, config, "show", "1999-01-01").exit_code == 1
+    assert len(opened) == 2
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
 
 def test_redirected_output_is_utf8_whatever_the_code_page(monkeypatch):

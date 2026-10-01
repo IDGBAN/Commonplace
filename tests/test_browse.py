@@ -1,0 +1,363 @@
+import http.client
+import json
+import re
+import sqlite3
+import threading
+from datetime import date, timedelta
+from urllib.parse import quote
+
+import pytest
+from conftest import add_entry, add_note
+
+from journal_analyzer import browse, db, store
+from journal_analyzer.models import DatabaseError, OllamaUnavailableError
+
+
+class Browser:
+    def __init__(self, port: int):
+        self.port = port
+
+    def request(
+        self, path: str, method: str = "GET", host: str | None = None
+    ) -> http.client.HTTPResponse:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {"Host": host} if host is not None else {}
+        conn.request(method, path, headers=headers)
+        return conn.getresponse()
+
+    def get(self, path: str, status: int = 200) -> dict:
+        response = self.request(path)
+        body = response.read()
+        assert response.status == status, body
+        assert response.getheader("Content-Type").startswith("application/json")
+        return json.loads(body)
+
+
+@pytest.fixture
+def journal(conn):
+    add_note(conn, "Sara Miller", kind="people", text="Friend from <b>school</b>.",
+             aliases=["Sara"], properties={"Relationship": "Friend"}, links=["Bear Mountain"])
+    add_note(conn, "Bear Mountain", kind="locations", summary="A hill we climb.")
+    add_entry(conn, date(2024, 1, 15), text="Hiked Bear Mountain with Sara Miller.",
+              mood=8.0, tags=["hiking", "friends"], links=["Sara Miller", "Bear Mountain"],
+              summary="Hiked with Sara and felt calmer after", path="/vault/2024-01-15.md")
+    add_entry(conn, date(2024, 1, 16), text="Rainy day inside with <script>x</script>.",
+              mood=4.0, tags=["rain"], links=["Nobody Yet"],
+              summary="Stayed in while it rained", path="/vault/2024-01-16.md")
+    store.upsert_file(conn, "/vault/broken.md", "h", "error", "unreadable: bad bytes")
+    store.upsert_rollup(conn, "month", "2024-01", "A calm January.", '["hiking"]', 6.0, 2)
+    return conn
+
+
+@pytest.fixture
+def browser(config, journal, fake_client):
+    config.reranking.enabled = False
+    server = browse.make_server(config, port=0, make_client=lambda cfg: fake_client)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield Browser(server.port)
+    server.shutdown()
+    server.server_close()
+
+
+def entry_id(conn, day: str) -> int:
+    return conn.execute("SELECT id FROM entries WHERE entry_date = ?", (day,)).fetchone()["id"]
+
+
+def note_id(conn, title: str) -> int:
+    return conn.execute("SELECT id FROM notes WHERE title = ?", (title,)).fetchone()["id"]
+
+
+def test_readonly_connection_cannot_write(config, journal):
+    ro = db.connect_readonly(config)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ro.execute("DELETE FROM entries")
+        assert ro.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 2
+    finally:
+        ro.close()
+
+
+def test_readonly_connection_explains_a_missing_cache(config):
+    with pytest.raises(DatabaseError, match="journal init && journal index"):
+        db.connect_readonly(config)
+    assert not config.db.path.exists()
+
+
+def test_readonly_connection_refuses_other_cache_formats(config, conn):
+    conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
+    conn.commit()
+    with pytest.raises(DatabaseError, match="newer version"):
+        db.connect_readonly(config)
+
+
+def test_period_bounds():
+    assert store.period_bounds("week", "2024-W03") == (date(2024, 1, 15), date(2024, 1, 21))
+    assert store.period_bounds("month", "2024-02") == (date(2024, 2, 1), date(2024, 2, 29))
+    assert store.period_bounds("month", "2024-12") == (date(2024, 12, 1), date(2024, 12, 31))
+    assert store.period_bounds("year", "2023") == (date(2023, 1, 1), date(2023, 12, 31))
+    with pytest.raises(ValueError):
+        store.period_bounds("month", "March")
+
+
+def test_serves_the_page_with_a_strict_content_policy(browser):
+    response = browser.request("/")
+    body = response.read()
+    assert response.status == 200
+    assert b'<script src="/app.js"' in body
+    assert "default-src 'self'" in response.getheader("Content-Security-Policy")
+    assert response.getheader("X-Content-Type-Options") == "nosniff"
+    for asset in ("/app.js", "/app.css", "/favicon.svg"):
+        assert browser.request(asset).status == 200
+
+
+def test_only_listed_static_files_are_served(browser):
+    for path in ("/../pyproject.toml", "/browse.py", "/browse_static/app.js", "/nope"):
+        response = browser.request(path)
+        response.read()
+        assert response.status == 404
+
+
+def test_refuses_requests_for_another_host_name(browser):
+    response = browser.request("/api/overview", host="attacker.example:80")
+    assert response.status == 403
+    assert "Sara" not in response.read().decode()
+
+
+def test_is_read_only(browser):
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        response = browser.request("/api/entries", method=method)
+        response.read()
+        assert response.status == 405
+        assert response.getheader("Allow") == "GET"
+
+
+def test_overview_reports_counts_problems_and_setup(browser):
+    data = browser.get("/api/overview")
+    assert data["counts"]["entries"] == 2
+    assert data["counts"]["notes"] == 2
+    assert data["counts"]["errored_files"] == 1
+    assert data["errored_files"][0]["error"] == "unreadable: bad bytes"
+    assert data["baseline_mood"] == 6.0
+    assert data["setup"]["embed_model"] == "fake-embed"
+    assert {k["kind"] for k in data["note_kinds"]} == {"people", "locations"}
+
+
+def test_catalog_lists_everything_the_jump_box_needs(browser):
+    data = browser.get("/api/catalog")
+    assert [e["date"] for e in data["entries"]] == ["2024-01-15", "2024-01-16"]
+    sara = next(n for n in data["notes"] if n["title"] == "Sara Miller")
+    assert sara["aliases"] == ["Sara"]
+    assert {t["name"] for t in data["tags"]} == {"hiking", "friends", "rain"}
+
+
+def test_entry_shows_what_was_extracted_and_what_it_links(browser, journal):
+    first = entry_id(journal, "2024-01-15")
+    data = browser.get(f"/api/entries/{first}")
+    assert data["mood"] == 8.0
+    assert data["summary"] == "Hiked with Sara and felt calmer after"
+    assert data["tags"] == ["friends", "hiking"]
+    assert {n["title"] for n in data["notes"]} == {"Sara Miller", "Bear Mountain"}
+    assert data["unresolved_links"] == []
+    assert data["model_used"] == "m"
+    assert data["prev"] is None
+    assert data["next"]["date"] == "2024-01-16"
+    assert data["obsidian_url"].startswith("obsidian://open?path=")
+    month = next(d for d in data["digests"] if d["type"] == "month")
+    assert month == {"type": "month", "key": "2024-01", "exists": True, "stale": False,
+                     "summary": "A calm January."}
+    assert next(d for d in data["digests"] if d["type"] == "year")["exists"] is False
+
+    second = browser.get(f"/api/entries/{data['next']['id']}")
+    assert second["unresolved_links"] == ["nobody yet"]
+    # markup in journal text is data, handed over untouched for textContent
+    assert "<script>x</script>" in second["raw_text"]
+
+
+def test_links_to_other_days_point_at_those_entries(browser, journal):
+    add_entry(journal, date(2024, 1, 20), links=["2024-01-15", "Someone"], path="/vault/20.md")
+    later = browser.get(f"/api/entries/{entry_id(journal, '2024-01-20')}")
+    assert [d["date"] for d in later["links_to_days"]] == ["2024-01-15"]
+    assert later["unresolved_links"] == ["someone"]
+
+    earlier = browser.get(f"/api/entries/{entry_id(journal, '2024-01-15')}")
+    assert [d["date"] for d in earlier["linked_from_days"]] == ["2024-01-20"]
+    unresolved = {link["target"] for link in browser.get("/api/notes")["unresolved_links"]}
+    assert unresolved == {"nobody yet", "someone"}
+
+
+def test_similar_entries_use_stored_vectors(browser, journal):
+    first, second = entry_id(journal, "2024-01-15"), entry_id(journal, "2024-01-16")
+    store.save_entry_vector(journal, first, [1.0] * 8)
+    store.save_entry_vector(journal, second, [0.9] * 8)
+    data = browser.get(f"/api/entries/{first}")
+    assert data["embedded"] is True
+    assert [e["id"] for e in data["similar"]] == [second]
+
+
+def test_missing_entry_is_a_404(browser):
+    assert "no indexed entry" in browser.get("/api/entries/9999", status=404)["error"]
+    assert browser.get("/api/nope", status=404)["error"] == "No such API route."
+
+
+def test_ids_past_the_sqlite_range_are_a_404(browser):
+    assert "no indexed entry" in browser.get(f"/api/entries/{2**63}", status=404)["error"]
+    assert "no indexed note" in browser.get(f"/api/notes/{'9' * 5000}", status=404)["error"]
+
+
+def test_a_bug_in_a_route_still_answers_in_json(browser, monkeypatch):
+    def broken(req):
+        raise KeyError("month")
+
+    monkeypatch.setattr(browse, "_ROUTES", [(re.compile(r"/api/overview"), broken)])
+    assert "KeyError" in browser.get("/api/overview", status=500)["error"]
+
+
+def test_entries_filter_by_tag_note_text_and_dates(browser, journal):
+    assert browser.get("/api/entries")["total"] == 2
+    assert [e["date"] for e in browser.get("/api/entries?order=oldest")["items"]] == [
+        "2024-01-15", "2024-01-16"]
+    assert [e["date"] for e in browser.get("/api/entries?tag=rain")["items"]] == ["2024-01-16"]
+    sara = note_id(journal, "Sara Miller")
+    by_note = browser.get(f"/api/entries?note={sara}")
+    assert by_note["total"] == 1
+    assert by_note["note"]["title"] == "Sara Miller"
+    assert browser.get("/api/entries?q=rained")["total"] == 1
+    assert browser.get("/api/entries?q=100%25")["total"] == 0
+    assert browser.get("/api/entries?from=2024-01-16")["total"] == 1
+    page = browser.get("/api/entries?limit=1&offset=1")
+    assert page["total"] == 2 and len(page["items"]) == 1
+    assert "date like" in browser.get("/api/entries?from=soon", status=400)["error"]
+
+
+def test_notes_list_and_detail(browser, journal):
+    data = browser.get("/api/notes")
+    sara = next(n for n in data["notes"] if n["title"] == "Sara Miller")
+    assert sara["mentions"] == 1
+    assert data["unresolved_links"][0]["target"] == "nobody yet"
+
+    detail = browser.get(f"/api/notes/{sara['id']}")
+    assert detail["properties"] == {"Relationship": "Friend"}
+    assert detail["raw_text"] == "Friend from <b>school</b>."
+    assert detail["summary_source"] is None
+    assert [o["title"] for o in detail["outlinks"]] == ["Bear Mountain"]
+    assert [e["date"] for e in detail["entries"]] == ["2024-01-15"]
+    assert detail["avg_mood"] == 8.0
+    assert detail["by_year"] == [{"year": "2024", "n": 1}]
+
+    mountain = browser.get(f"/api/notes/{note_id(journal, 'Bear Mountain')}")
+    assert mountain["summary_source"] == "own_text"
+    assert [b["title"] for b in mountain["backlinks"]] == ["Sara Miller"]
+
+
+def test_tags_and_tag_detail(browser):
+    data = browser.get("/api/tags")
+    hiking = next(t for t in data["tags"] if t["name"] == "hiking")
+    assert hiking["n"] == 1 and hiking["avg_mood"] == 8.0
+
+    detail = browser.get("/api/tags/hiking")
+    assert detail["total"] == 1
+    assert detail["entries_capped"] is False
+    assert [c["name"] for c in detail["cooccurring"]] == ["friends"]
+    assert browser.get("/api/tags/unknown", status=404)["error"]
+
+
+def test_mood_averages_cover_entries_past_the_listed_ones(browser, journal, monkeypatch):
+    monkeypatch.setattr(browse, "TAG_ENTRIES_LIMIT", 1)
+    monkeypatch.setattr(browse, "NOTE_ENTRIES_LIMIT", 1)
+    add_entry(journal, date(2024, 2, 1), mood=2.0, tags=["hiking"],
+              links=["Sara Miller"], path="/vault/2024-02-01.md")
+
+    tag = browser.get("/api/tags/hiking")
+    assert (tag["total"], len(tag["entries"]), tag["entries_capped"]) == (2, 1, True)
+    assert tag["avg_mood"] == 5.0
+
+    note = browser.get(f"/api/notes/{note_id(journal, 'Sara Miller')}")
+    assert (len(note["entries"]), note["entries_capped"]) == (1, True)
+    assert note["avg_mood"] == 5.0
+
+
+def test_tag_names_with_slashes_and_spaces(browser, journal):
+    add_entry(journal, date(2024, 2, 1), tags=["work/side project"], path="/vault/w.md")
+    assert browser.get(f"/api/tags/{quote('work/side project', safe='')}")["total"] == 1
+
+
+def test_digests_and_digest_detail(browser):
+    data = browser.get("/api/digests")
+    assert [d["key"] for d in data["digests"]["month"]] == ["2024-01"]
+    month = data["digests"]["month"][0]
+    assert month["tags"] == ["hiking"]
+    assert (month["start"], month["end"]) == ("2024-01-01", "2024-01-31")
+
+    detail = browser.get("/api/digests/month/2024-01")
+    assert detail["digest"]["summary"] == "A calm January."
+    assert len(detail["entries"]) == 2
+
+    week = browser.get("/api/digests/week/2024-W03")
+    assert week["digest"] is None and len(week["entries"]) == 2
+    assert browser.get("/api/digests/month/1999-01", status=404)["error"]
+    assert browser.get("/api/digests/month/March", status=400)["error"]
+
+
+def test_files_show_status_and_what_each_became(browser, journal):
+    files = {f["path"]: f for f in browser.get("/api/files")["files"]}
+    assert files["/vault/broken.md"]["status"] == "error"
+    assert files["/vault/2024-01-15.md"]["entries"] == 1
+    assert files["/vault/2024-01-15.md"]["entry_id"] == entry_id(journal, "2024-01-15")
+    sara = next(f for f in files.values() if f["note_id"] == note_id(journal, "Sara Miller"))
+    assert sara["entries"] == 0
+    # problems first
+    assert next(iter(files)) == "/vault/broken.md"
+
+
+def test_keyword_search_needs_no_model(browser, fake_client):
+    data = browser.get("/api/search?q=rainy&mode=keyword")
+    assert data["mode"] == "keyword"
+    assert fake_client.embed_calls == []
+    data = browser.get(f"/api/search?q={quote('Sara Miller')}&mode=keyword")
+    assert [e["date"] for e in data["entries"]] == ["2024-01-15"]
+    assert data["notes"][0]["title"] == "Sara Miller"
+    assert browser.get("/api/search?q=%20", status=400)["error"]
+
+
+def test_meaning_search_uses_the_embedding(browser, journal, fake_client):
+    for day in ("2024-01-15", "2024-01-16"):
+        store.save_entry_vector(journal, entry_id(journal, day), [0.5] * 8)
+    data = browser.get("/api/search?q=calm+walk&mode=meaning")
+    assert data["mode"] == "meaning"
+    assert data["notice"] is None
+    assert fake_client.embed_calls
+    assert len(data["entries"]) == 2
+
+
+def test_meaning_search_falls_back_to_keywords_when_ollama_is_down(browser, fake_client):
+    def down(model, text, options=None):
+        raise OllamaUnavailableError("Cannot reach Ollama at http://localhost:11434")
+
+    fake_client.embed = down
+    data = browser.get("/api/search?q=rainy&mode=meaning")
+    assert data["mode"] == "keyword"
+    assert "Cannot reach Ollama" in data["notice"]
+    assert [e["date"] for e in data["entries"]] == ["2024-01-16"]
+
+
+def test_sees_changes_written_while_it_runs(browser, journal):
+    assert browser.get("/api/entries")["total"] == 2
+    add_entry(journal, date.today() + timedelta(days=400), path="/vault/typo.md")
+    assert browser.get("/api/entries")["total"] == 3
+    assert len(browser.get("/api/overview")["future_entries"]) == 1
+
+
+def test_cache_errors_come_back_as_json(browser, config, journal):
+    journal.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
+    journal.commit()
+    assert "newer version" in browser.get("/api/overview", status=503)["error"]
+
+
+def test_port_in_use_is_explained(config, journal):
+    first = browse.make_server(config, port=0)
+    try:
+        with pytest.raises(Exception, match="--port"):
+            browse.make_server(config, port=first.port)
+    finally:
+        first.server_close()
