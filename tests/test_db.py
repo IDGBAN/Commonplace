@@ -48,6 +48,23 @@ def test_a_cache_from_a_newer_version_is_refused(config):
     conn.close()
 
 
+def test_existing_caches_pick_up_new_indexes(config):
+    conn = db.connect(config)
+    db.init_schema(conn)
+    conn.execute("DROP INDEX idx_entries_file_path")
+    conn.execute("DROP INDEX idx_entry_tags_tag")
+    conn.commit()
+    db.init_schema(conn)
+    plan = " ".join(
+        r["detail"]
+        for r in conn.execute("EXPLAIN QUERY PLAN SELECT id FROM entries WHERE file_path = 'x'")
+    )
+    assert "idx_entries_file_path" in plan
+    names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "idx_entry_tags_tag" in names
+    conn.close()
+
+
 def test_the_schema_has_note_and_vector_tables(conn):
     names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master")}
     assert {"entries_vec", "notes_vec", "notes_fts", "entry_links", "note_names"} <= names

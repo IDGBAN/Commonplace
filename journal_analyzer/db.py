@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS entries (
   extracted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(entry_date);
+-- Without it every re-index, and every cascade from files, scans all entries.
+-- Added to existing caches by init_schema, so no format bump.
+CREATE INDEX IF NOT EXISTS idx_entries_file_path ON entries(file_path);
 
 CREATE TABLE IF NOT EXISTS tags (
   id   INTEGER PRIMARY KEY,
@@ -45,6 +48,7 @@ CREATE TABLE IF NOT EXISTS entry_tags (
   tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
   PRIMARY KEY (entry_id, tag_id)
 );
+CREATE INDEX IF NOT EXISTS idx_entry_tags_tag ON entry_tags(tag_id);
 
 CREATE TABLE IF NOT EXISTS notes (
   id           INTEGER PRIMARY KEY,
@@ -186,6 +190,37 @@ def connect(config: Config) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(config: Config) -> sqlite3.Connection:
+    """For `journal browse`: never creates, migrates or writes the cache."""
+    db_path: Path = config.db.path
+    if not db_path.is_file():
+        raise DatabaseError(
+            f"There is no cache database at {db_path}. "
+            "Run 'journal init && journal index' first."
+        )
+    try:
+        conn = sqlite3.connect(
+            f"{db_path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
+        )
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Could not open the cache database at {db_path}: {exc}.") from exc
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA query_only = ON")
+        load_vec(conn)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version != SCHEMA_VERSION:
+            raise _version_error(conn, version)
+    except sqlite3.Error as exc:
+        conn.close()
+        raise DatabaseError(f"Could not read the cache database at {db_path}: {exc}.") from exc
+    except DatabaseError:
+        conn.close()
+        raise
+    return conn
+
+
 def load_vec(conn: sqlite3.Connection) -> None:
     try:
         conn.enable_load_extension(True)
@@ -204,20 +239,30 @@ def _rebuild_hint(conn: sqlite3.Connection) -> str:
     return f"delete {path} and re-run 'journal init && journal index' to rebuild it"
 
 
+def _is_populated(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'"
+    ).fetchone() is not None
+
+
+def _version_error(conn: sqlite3.Connection, version: int) -> DatabaseError:
+    if not _is_populated(conn):
+        return DatabaseError(
+            "The cache database is empty. Run 'journal init && journal index' first."
+        )
+    age = "an older" if version < SCHEMA_VERSION else "a newer"
+    return DatabaseError(
+        f"This cache was built by {age} version of journal-analyzer "
+        f"(format {version}, this version reads format {SCHEMA_VERSION}). "
+        f"To use this version, {_rebuild_hint(conn)}."
+    )
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     # the vec tables need the embedding size, so ensure_vec_table makes those
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != SCHEMA_VERSION:
-        populated = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'"
-        ).fetchone()
-        if populated:
-            age = "an older" if version < SCHEMA_VERSION else "a newer"
-            raise DatabaseError(
-                f"This cache was built by {age} version of journal-analyzer "
-                f"(format {version}, this version reads format {SCHEMA_VERSION}). "
-                f"To use this version, {_rebuild_hint(conn)}."
-            )
+    if version != SCHEMA_VERSION and _is_populated(conn):
+        raise _version_error(conn, version)
     conn.executescript(SCHEMA)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
