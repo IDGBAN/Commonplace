@@ -24,9 +24,9 @@ from importlib import resources
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import db, fields, parser, query, store, unlinked
+from . import db, fields, parser, query, serialize, store, unlinked
 from .config import Config
-from .models import Answer, JournalError
+from .models import JournalError
 from .ollama_client import OllamaClient
 from .parser import relative_path
 
@@ -117,43 +117,6 @@ def _vault_path(req: Request, path: str) -> str:
     return relative_path(path, req.config.vault.path)
 
 
-def _entry_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json]:
-    tags = store.tags_for_entries(conn, [r["id"] for r in rows])
-    return [
-        {
-            "id": r["id"],
-            "date": r["entry_date"],
-            "mood": r["mood_score"],
-            "words": r["word_count"],
-            "summary": r["summary"],
-            "tags": tags.get(r["id"], []),
-        }
-        for r in rows
-    ]
-
-
-def _note_ref(row: sqlite3.Row | dict[str, Any]) -> Json:
-    return {"id": row["id"], "title": row["title"], "kind": row["kind"]}
-
-
-def _note_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json]:
-    mentions = store.mention_stats(conn, [r["id"] for r in rows])
-    out = []
-    for r in rows:
-        m = mentions.get(r["id"])
-        out.append(
-            {
-                **_note_ref(r),
-                "aliases": json.loads(r["aliases"]),
-                "summary": r["summary"],
-                "mentions": m.count if m else 0,
-                "first": m.first if m else None,
-                "last": m.last if m else None,
-            }
-        )
-    return out
-
-
 def _has_vector(conn: sqlite3.Connection, table: str, id_column: str, row_id: int) -> bool:
     try:
         return conn.execute(
@@ -161,44 +124,6 @@ def _has_vector(conn: sqlite3.Connection, table: str, id_column: str, row_id: in
         ).fetchone() is not None
     except sqlite3.OperationalError:
         return False  # the vec tables are created by the first index run
-
-
-def _rollup_json(row: sqlite3.Row) -> Json:
-    try:
-        tags = json.loads(row["dominant_tags"] or "[]")
-    except json.JSONDecodeError:
-        tags = []
-    try:
-        start, end = store.period_bounds(row["period_type"], row["period_key"])
-        bounds: list[str | None] = [start.isoformat(), end.isoformat()]
-    except ValueError:
-        bounds = [None, None]
-    return {
-        "type": row["period_type"],
-        "key": row["period_key"],
-        "summary": row["summary"],
-        "tags": tags,
-        "mood": row["avg_mood"],
-        "entries": row["entry_count"],
-        "stale": bool(row["stale"]),
-        "generated_at": row["generated_at"],
-        "start": bounds[0],
-        "end": bounds[1],
-    }
-
-
-def _note_digest_json(row: sqlite3.Row | None) -> Json | None:
-    if row is None:
-        return None
-    return {
-        "summary": row["summary"],
-        "stale": bool(row["stale"]),
-        "generated_at": row["generated_at"],
-        "entries": row["entry_count"],
-        "mood": row["avg_mood"],
-        "first": row["first_date"],
-        "last": row["last_date"],
-    }
 
 
 # Routes
@@ -231,7 +156,7 @@ def overview(req: Request) -> Json:
             {"date": r["entry_date"], "vault_path": _vault_path(req, r["file_path"])}
             for r in store.entries_dated_after(conn, today)
         ],
-        "on_this_day": _entry_briefs(conn, on_this_day),
+        "on_this_day": serialize.entry_briefs(conn, on_this_day),
         "setup": {
             "vault": str(cfg.vault.path),
             "notes_paths": cfg.notes.paths,
@@ -258,7 +183,7 @@ def catalog(req: Request) -> Json:
             for r in store.entry_days(conn)
         ],
         "notes": [
-            {**_note_ref(r), "aliases": json.loads(r["aliases"])}
+            {**serialize.note_ref(r), "aliases": json.loads(r["aliases"])}
             for r in store.all_notes(conn)
         ],
         "tags": [{"name": r["name"], "n": r["n"]} for r in store.tag_stats(conn)],
@@ -286,8 +211,8 @@ def entries(req: Request) -> Json:
         "total": total,
         "offset": offset,
         "limit": limit,
-        "note": _note_ref(note[0]) if note else None,
-        "items": _entry_briefs(req.conn, rows),
+        "note": serialize.note_ref(note[0]) if note else None,
+        "items": serialize.entry_briefs(req.conn, rows),
     }
 
 
@@ -350,7 +275,7 @@ def entry(req: Request, entry_id: str) -> Json:
             for r in store.entries_linking_to_day(conn, row)
         ],
         "embedded": _has_vector(conn, "entries_vec", "entry_id", row["id"]),
-        "similar": _entry_briefs(conn, similar),
+        "similar": serialize.entry_briefs(conn, similar),
         "digests": digests,
         "prev": {"id": before["id"], "date": before["entry_date"]} if before else None,
         "next": {"id": after["id"], "date": after["entry_date"]} if after else None,
@@ -368,7 +293,7 @@ def notes(req: Request) -> Json:
     )
     return {
         "kinds": [dict(r) for r in store.notes_by_kind(conn)],
-        "notes": _note_briefs(conn, store.all_notes(conn)),
+        "notes": serialize.note_briefs(conn, store.all_notes(conn)),
         "gone_quiet": [
             {"id": r.note_id, "title": r.title, "kind": r.kind, "n": r.count, "last": r.last}
             for r in quiet
@@ -387,7 +312,7 @@ def note(req: Request, note_id: str) -> Json:
         raise ApiError(HTTPStatus.NOT_FOUND, _NO_NOTE)
     row = rows[0]
     parsed = store.note_from_row(row, req.config.vault.path)
-    linking = _entry_briefs(conn, store.entries_mentioning(conn, row["id"], NOTE_ENTRIES_LIMIT))
+    linking = serialize.entry_briefs(conn, store.entries_mentioning(conn, row["id"], NOTE_ENTRIES_LIMIT))
     mentions = store.mention_stats(conn, [row["id"]]).get(row["id"])
     if row["model_used"]:
         summary_source = "model"
@@ -396,7 +321,7 @@ def note(req: Request, note_id: str) -> Json:
     else:
         summary_source = None
     return {
-        **_note_ref(row),
+        **serialize.note_ref(row),
         "aliases": parsed.aliases,
         "properties": parsed.properties,
         "summary": row["summary"],
@@ -414,10 +339,10 @@ def note(req: Request, note_id: str) -> Json:
         "avg_mood": store.browse_mood(conn, note_id=row["id"]),
         "baseline_mood": store.overall_mood(conn, None, None)[0],
         "mood_scale": req.config.indexing.mood_scale_max,
-        "digest": _note_digest_json(store.get_note_digest(conn, row["link_key"])),
+        "digest": serialize.note_digest_json(store.get_note_digest(conn, row["link_key"])),
         "digest_min_mentions": req.config.rollups.note_min_mentions,
-        "outlinks": [_note_ref(r) for r in store.note_outlinks(conn, row["id"])],
-        "backlinks": [_note_ref(r) for r in store.note_backlinks(conn, row["id"])],
+        "outlinks": [serialize.note_ref(r) for r in store.note_outlinks(conn, row["id"])],
+        "backlinks": [serialize.note_ref(r) for r in store.note_backlinks(conn, row["id"])],
         "entries": linking,
         "entries_capped": bool(mentions and mentions.count > len(linking)),
         "unlinked": [
@@ -449,7 +374,7 @@ def tag(req: Request, name: str) -> Json:
         "cooccurring": [
             dict(r) for r in store.tags_cooccurring_with(conn, name, COOCCURRING_LIMIT)
         ],
-        "entries": _entry_briefs(conn, rows),
+        "entries": serialize.entry_briefs(conn, rows),
         "entries_capped": total > len(rows),
     }
 
@@ -457,10 +382,10 @@ def tag(req: Request, name: str) -> Json:
 def digests(req: Request) -> Json:
     grouped: dict[str, list[Json]] = {"year": [], "month": [], "week": []}
     for row in store.all_rollups(req.conn):
-        grouped.setdefault(row["period_type"], []).append(_rollup_json(row))
+        grouped.setdefault(row["period_type"], []).append(serialize.rollup_json(row))
     notes = [
-        {**_note_ref({"id": r["note_id"], "title": r["title"], "kind": r["kind"]}),
-         **(_note_digest_json(r) or {})}
+        {**serialize.note_ref({"id": r["note_id"], "title": r["title"], "kind": r["kind"]}),
+         **(serialize.note_digest_json(r) or {})}
         for r in store.all_note_digests(req.conn)
     ]
     return {
@@ -489,8 +414,8 @@ def digest(req: Request, period_type: str, period_key: str) -> Json:
         "start": start.isoformat(),
         "end": end.isoformat(),
         "mood_scale": req.config.indexing.mood_scale_max,
-        "digest": _rollup_json(row) if row else None,
-        "entries": _entry_briefs(conn, members),
+        "digest": serialize.rollup_json(row) if row else None,
+        "entries": serialize.entry_briefs(conn, members),
     }
 
 
@@ -538,8 +463,8 @@ def search(req: Request) -> Json:
         "q": text,
         "mode": mode,
         "notice": notice,
-        "entries": _entry_briefs(req.conn, results.entries),
-        "notes": _note_briefs(req.conn, results.notes),
+        "entries": serialize.entry_briefs(req.conn, results.entries),
+        "notes": serialize.note_briefs(req.conn, results.notes),
     }
 
 
@@ -563,26 +488,6 @@ def _ask_params(params: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
         raise ApiError(HTTPStatus.BAD_REQUEST, "The conversation so far couldn't be read.")
     history = [(q, a) for q, a in raw][-query.CHAT_HISTORY_TURNS:]
     return question, history
-
-
-def _answer_json(conn: sqlite3.Connection, answer: Answer) -> Json:
-    dates = []
-    for day in answer.cited_dates:
-        rows = store.entries_in_range(conn, day, day)
-        dates.append({"date": day.isoformat(), "id": rows[0]["id"] if rows else None})
-    notes = []
-    for title in answer.cited_notes:
-        found = store.find_notes(conn, title)
-        notes.append({"title": title, "id": found[0]["id"] if found else None})
-    read = store.entries_by_ids(conn, answer.read_entry_ids)
-    return {
-        "text": answer.text,
-        "body": answer.body,
-        "stage": answer.stage_used,
-        "sources": {"dates": dates, "notes": notes},
-        "entries": _entry_briefs(conn, read),
-        "notes": _note_briefs(conn, store.notes_by_ids(conn, answer.read_note_ids)),
-    }
 
 
 Handler = Callable[..., Json]
@@ -682,7 +587,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         def send(event: str, data: Json) -> None:
-            body = json.dumps(data, default=_json_default, ensure_ascii=False)
+            body = json.dumps(data, default=serialize.json_default, ensure_ascii=False)
             self.wfile.write(f"event: {event}\ndata: {body}\n\n".encode())
             self.wfile.flush()
 
@@ -702,7 +607,7 @@ class _Handler(BaseHTTPRequestHandler):
                         on_stage=lambda stage: send("stage", {"text": stage}),
                         on_text=lambda text: send("text", {"text": text}),
                     )
-                    send("answer", {"question": standalone, **_answer_json(conn, result)})
+                    send("answer", {"question": standalone, **serialize.answer_json(conn, result)})
             except JournalError as exc:
                 send("problem", {"error": str(exc)})
             except sqlite3.Error as exc:
@@ -727,7 +632,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_json(
         self, status: HTTPStatus, payload: Json, extra: dict[str, str] | None = None
     ) -> None:
-        body = json.dumps(payload, default=_json_default, ensure_ascii=False).encode()
+        body = json.dumps(payload, default=serialize.json_default, ensure_ascii=False).encode()
         self._send(status, body, "application/json; charset=utf-8", extra)
 
     def _send(
@@ -744,12 +649,6 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
-
-
-def _json_default(value: object) -> str:
-    if isinstance(value, date):
-        return value.isoformat()
-    raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
 
 class BrowseServer(ThreadingHTTPServer):

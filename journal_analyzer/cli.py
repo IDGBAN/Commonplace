@@ -6,11 +6,12 @@ import re
 import sqlite3
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext, redirect_stdout
+from dataclasses import asdict
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
@@ -33,6 +34,7 @@ from . import (
     query,
     review,
     rollups,
+    serialize,
     store,
     unlinked,
 )
@@ -70,10 +72,20 @@ AboutOpt = Annotated[
     typer.Option("--about", help="Only entries that link this note (its title or an alias)."),
 ]
 TagOpt = Annotated[str | None, typer.Option("--tag", help="Only entries with this tag.")]
+JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON instead of tables.")]
+
+
+class _Output:
+    # set by each command that takes --json, so errors come out in the same form
+    as_json = False
+
+
+OUT = _Output()
 
 
 @app.callback()
 def _utf8_output() -> None:
+    OUT.as_json = False
     # Windows encodes redirected output in the ANSI code page, so
     # `journal export > out.json` crashed on the first emoji.
     for stream in (sys.stdout, sys.stderr):
@@ -81,13 +93,31 @@ def _utf8_output() -> None:
             stream.reconfigure(encoding="utf-8")
 
 
+def _emit(data: object) -> None:
+    # plain print: rich would read [brackets] as markup and rewrap long lines
+    print(json.dumps(data, ensure_ascii=False, indent=2, default=serialize.json_default))
+
+
+def _fail(message: str, extra: dict[str, object] | None = None, red: bool = True) -> NoReturn:
+    if OUT.as_json:
+        _emit({"error": message, **(extra or {})})
+    elif red:
+        console.print(f"[red]{escape(message)}[/red]")
+    else:
+        console.print(escape(message))
+    raise typer.Exit(1)
+
+
 @contextmanager
 def _guard() -> Iterator[None]:
     try:
         yield
     except JournalError as exc:
-        # escaped, or a config key like [db] gets eaten as markup
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        if OUT.as_json:
+            _emit({"error": str(exc)})
+        else:
+            # escaped, or a config key like [db] gets eaten as markup
+            console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
 
@@ -103,19 +133,33 @@ def _parse_date(value: str, flag: str) -> date:
     try:
         return date.fromisoformat(value)
     except ValueError:
-        console.print(
-            f"[red]{flag} must be an ISO date (YYYY-MM-DD), got '{escape(value)}'.[/red]"
-        )
-        raise typer.Exit(1) from None
+        _fail(f"{flag} must be an ISO date (YYYY-MM-DD), got '{value}'.")
 
 
 def _parse_range(since: str | None, until: str | None) -> tuple[date | None, date | None]:
     date_from = _parse_date(since, "--since") if since is not None else None
     date_to = _parse_date(until, "--until") if until is not None else None
     if date_from and date_to and date_from > date_to:
-        console.print(f"[red]--since {date_from} is after --until {date_to}.[/red]")
-        raise typer.Exit(1)
+        _fail(f"--since {date_from} is after --until {date_to}.")
     return date_from, date_to
+
+
+_NO_NOTE = "No reference note called '{name}'. Notes come from the folders listed in notes.paths in config.toml."
+
+
+def _one_note(conn: sqlite3.Connection, name: str, red: bool = True) -> sqlite3.Row:
+    """The note a title or alias names, or a clear failure when it names none or several."""
+    matches = store.find_notes(conn, name)
+    if not matches:
+        _fail(_NO_NOTE.format(name=name), red=red)
+    if len(matches) > 1:
+        message = f"'{name}' matches {len(matches)} notes; use a full title"
+        if OUT.as_json:
+            _fail(message, {"matches": [serialize.note_ref(m) for m in matches]})
+        console.print(f"{escape(message)}:")
+        console.print(_note_table(conn, matches))
+        raise typer.Exit(1)
+    return matches[0]
 
 
 def _entry_filter(
@@ -123,23 +167,19 @@ def _entry_filter(
 ) -> store.EntryFilter | None:
     note_ids: tuple[int, ...] = ()
     if about is not None:
-        matches = store.find_notes(conn, about)
-        if not matches:
-            console.print(
-                f"[red]No reference note called '{escape(about)}'. Notes come from the "
-                "folders listed in notes.paths in config.toml.[/red]"
-            )
-            raise typer.Exit(1)
-        if len(matches) > 1:
-            console.print(f"'{escape(about)}' matches {len(matches)} notes; use a full title:")
-            console.print(_note_table(conn, matches))
-            raise typer.Exit(1)
-        note_ids = (matches[0]["id"],)
+        note_ids = (_one_note(conn, about)["id"],)
     name = tag.strip().lstrip("#").strip().lower() if tag is not None else None
     if name is not None and not store.tag_exists(conn, name):
-        console.print(f"[red]No entry is tagged '{escape(name)}'. 'journal tags' lists them.[/red]")
-        raise typer.Exit(1)
+        _fail(f"No entry is tagged '{name}'. 'journal tags' lists them.")
     return store.EntryFilter(name, note_ids) if name or note_ids else None
+
+
+def _filter_json(conn: sqlite3.Connection, only: store.EntryFilter | None) -> dict[str, object]:
+    return {
+        "about": [serialize.note_ref(r) for r in store.notes_by_ids(conn, list(only.note_ids))]
+        if only else [],
+        "tag": only.tag if only else None,
+    }
 
 
 def _filter_label(conn: sqlite3.Connection, only: store.EntryFilter | None) -> str:
@@ -406,21 +446,27 @@ def ask(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    as_json: JsonOpt = False,
 ) -> None:
     """Ask a question about your journal.
 
     --since, --until, --about and --tag replace whatever the question's wording
     suggests, so use them when you know the dates or the person.
     """
+    OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag)
         with _working("Thinking...") as status:
-            stream = _Streamed(status)
+            stream = None if as_json else _Streamed(status)
             result = query.answer(
                 question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status),
                 since=date_from, until=date_to, only=only, on_text=stream,
             )
+        if as_json:
+            _emit({"question": question, **serialize.answer_json(conn, result)})
+            return
+        assert stream is not None
         _print_answer(conn, result, "answered by stage", streamed=stream.started)
         if sources:
             _print_reading(conn, result)
@@ -548,27 +594,38 @@ def digest_cmd(
         bool,
         typer.Option("--refresh", help="Write it first if it's missing or out of date."),
     ] = False,
+    as_json: JsonOpt = False,
 ) -> None:
     """Show the digest for one week, month or year."""
+    OUT.as_json = as_json
     kind, key, start, end = _parse_period(period)
     title = _period_title(kind, key, start)
     with _guard(), _open(config) as (cfg, conn):
         members = store.entries_in_range(conn, start, end)
         row = store.get_rollup(conn, kind, key)
         if not members and row is None:
-            console.print(f"No entries in {title} ({start} to {end}).")
-            raise typer.Exit(1)
+            _fail(f"No entries in {title} ({start} to {end}).", red=False)
         if refresh:
             kinds = ("month", "year") if kind == "year" else (kind,)
             plan = rollups.plan_rollups(cfg, conn, kinds, True, start, end)
-            if not plan:
-                console.print("[dim]Already up to date.[/dim]")
-            else:
-                console.print(f"[dim]Writing {_count(len(plan), 'digest')}...[/dim]")
-                rollups.generate_rollups(cfg, conn, OllamaClient(cfg), kinds, True, start, end)
+            # progress goes to stderr when stdout is the JSON
+            with redirect_stdout(sys.stderr) if as_json else nullcontext():
+                if not plan:
+                    console.print("[dim]Already up to date.[/dim]")
+                else:
+                    console.print(f"[dim]Writing {_count(len(plan), 'digest')}...[/dim]")
+                    rollups.generate_rollups(cfg, conn, OllamaClient(cfg), kinds, True, start, end)
             row = store.get_rollup(conn, kind, key)
-        console.print(f"[bold cyan]{escape(title)}[/bold cyan]  {start} .. {end}")
         moods = [r["mood_score"] for r in members if r["mood_score"] is not None]
+        if as_json:
+            _emit({
+                "type": kind, "key": key, "title": title, "start": start, "end": end,
+                "entries": len(members),
+                "mood": round(sum(moods) / len(moods), 2) if moods else None,
+                "digest": serialize.rollup_json(row) if row else None,
+            })
+            return
+        console.print(f"[bold cyan]{escape(title)}[/bold cyan]  {start} .. {end}")
         avg = f"{sum(moods) / len(moods):.2f}".rstrip("0").rstrip(".") if moods else "-"
         console.print(f"  {_count(len(members), 'entry', 'entries')}, mood {avg}")
         if row is None:
@@ -589,10 +646,26 @@ def digest_cmd(
 
 
 @app.command()
-def stats(config: ConfigOpt = None) -> None:
+def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """Show counts, the date range, failed files and the cache size."""
+    OUT.as_json = as_json
     with _guard(), _open(config) as (cfg, conn):
         s = store.stats(conn)
+        if as_json:
+            _emit({
+                **asdict(s),
+                "db_path": str(cfg.db.path),
+                "db_bytes": cfg.db.path.stat().st_size if cfg.db.path.exists() else 0,
+                "note_kinds": [dict(r) for r in store.notes_by_kind(conn)],
+                "errored_files": [
+                    {"path": r["path"], "error": r["error_message"]} for r in store.errored_files(conn)
+                ],
+                "future_entries": [
+                    {"date": r["entry_date"], "path": r["file_path"]}
+                    for r in store.entries_dated_after(conn, date.today())
+                ],
+            })
+            return
         size_mb = cfg.db.path.stat().st_size / BYTES_PER_MB if cfg.db.path.exists() else 0
         kinds = ", ".join(f"{r['kind']} {r['n']}" for r in store.notes_by_kind(conn))
         console.print(f"Entries indexed : {s.entries} ({s.words:,} words)")
@@ -624,8 +697,10 @@ def search(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    as_json: JsonOpt = False,
 ) -> None:
     """Search entries and notes by keyword and meaning."""
+    OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag)
@@ -634,6 +709,13 @@ def search(
                 text, cfg, conn, OllamaClient(cfg),
                 limit=limit, date_from=date_from, date_to=date_to, only=only,
             )
+        if as_json:
+            _emit({
+                "query": text,
+                "entries": serialize.entry_briefs(conn, results.entries),
+                "notes": serialize.note_briefs(conn, results.notes),
+            })
+            return
         if not results.entries and not results.notes:
             console.print("No matching entries or notes.")
             return
@@ -650,14 +732,18 @@ def show(
     raw: Annotated[
         bool, typer.Option("--raw", help="Also print the stored entry text.")
     ] = False,
+    as_json: JsonOpt = False,
 ) -> None:
     """Show what's stored for one day."""
+    OUT.as_json = as_json
     d = _parse_date(day, "DATE")
     with _guard(), _open(config) as (cfg, conn):
         rows = store.entries_in_range(conn, d, d)
         if not rows:
-            console.print(f"No indexed entry on {d}.")
-            raise typer.Exit(1)
+            _fail(f"No indexed entry on {d}.", red=False)
+        if as_json:
+            _emit({"date": d, "entries": [_entry_json(cfg, conn, r, raw) for r in rows]})
+            return
         for r in rows:
             own = fields.frontmatter_mood(store.file_frontmatter(conn, r["file_path"]), cfg)
             source = " (yours, from the frontmatter)" if own is not None else ""
@@ -684,6 +770,23 @@ def show(
                 console.print(escape(r["raw_text"]))
 
 
+def _entry_json(cfg: Config, conn: sqlite3.Connection, row: sqlite3.Row, raw: bool) -> dict[str, object]:
+    own = fields.frontmatter_mood(store.file_frontmatter(conn, row["file_path"]), cfg)
+    data: dict[str, object] = {
+        **serialize.entry_briefs(conn, [row])[0],
+        "path": row["file_path"],
+        "mood_from_frontmatter": own is not None,
+        "notes": [
+            {"id": e["id"], "title": e["name"], "kind": e["type"]}
+            for e in store.entities_for_entry(conn, row["id"])
+        ],
+        "metrics": store.metrics_for_entries(conn, [row["id"]]).get(row["id"], {}),
+    }
+    if raw:
+        data["raw_text"] = row["raw_text"]
+    return data
+
+
 @app.command()
 def note(
     name: Annotated[str, typer.Argument(help="Note title or alias.")],
@@ -694,23 +797,29 @@ def note(
     limit: Annotated[
         int, typer.Option("--limit", min=1, help="How many linking entries to list.")
     ] = 10,
+    as_json: JsonOpt = False,
 ) -> None:
     """Show a reference note and the entries that link to it."""
+    OUT.as_json = as_json
     with _guard(), _open(config) as (cfg, conn):
-        matches = store.find_notes(conn, name)
-        if not matches:
-            console.print(
-                f"No reference note called '{escape(name)}'. Notes come from the "
-                "folders listed in notes.paths in config.toml."
-            )
-            raise typer.Exit(1)
-        if len(matches) > 1:
-            console.print(
-                f"'{escape(name)}' matches {len(matches)} notes; use a full title:"
-            )
-            console.print(_note_table(conn, matches))
-            raise typer.Exit(1)
-        _print_note(cfg, conn, matches[0], raw=raw, limit=limit)
+        row = _one_note(conn, name, red=False)
+        if as_json:
+            parsed = store.note_from_row(row)
+            data: dict[str, object] = {
+                **serialize.note_briefs(conn, [row])[0],
+                "path": row["file_path"],
+                "properties": parsed.properties,
+                "by_year": [dict(r) for r in store.mentions_by_year(conn, row["id"])],
+                "outlinks": [serialize.note_ref(r) for r in store.note_outlinks(conn, row["id"])],
+                "backlinks": [serialize.note_ref(r) for r in store.note_backlinks(conn, row["id"])],
+                "digest": serialize.note_digest_json(store.get_note_digest(conn, row["link_key"])),
+                "entries": serialize.entry_briefs(conn, store.entries_mentioning(conn, row["id"], limit)),
+            }
+            if raw:
+                data["raw_text"] = parsed.raw_text
+            _emit(data)
+            return
+        _print_note(cfg, conn, row, raw=raw, limit=limit)
 
 
 def _print_note(
@@ -772,15 +881,30 @@ def tags(
         bool,
         typer.Option("--similar", help="List tags that look like the same thing, to merge."),
     ] = False,
+    as_json: JsonOpt = False,
 ) -> None:
     """List the most used tags."""
+    OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     if similar:
         with _guard(), _open(config) as (_, conn):
-            _print_similar_tags(fields.similar_tags(store.tag_stats(conn)))
+            pairs = fields.similar_tags(store.tag_stats(conn))
+        if as_json:
+            _emit({
+                "similar": [
+                    {"tag": rare, "entries": n_rare, "like": common, "like_entries": n_common}
+                    for rare, n_rare, common, n_common in pairs
+                ],
+                "merge": _merge_table(pairs),
+            })
+            return
+        _print_similar_tags(pairs)
         return
     with _guard(), _open(config) as (_, conn):
         rows = store.top_tags(conn, date_from, date_to, limit=limit)
+    if as_json:
+        _emit({"tags": [{"name": r["name"], "n": r["n"]} for r in rows]})
+        return
     if not rows:
         console.print("No tags yet. Run 'journal index' first.")
         return
@@ -808,14 +932,16 @@ def _print_similar_tags(pairs: list[tuple[str, int, str, int]]) -> None:
         "\nTo count them as one, add the ones you agree with to config.toml and run "
         "'journal index' (no model calls needed):\n"
     )
-    seen: set[str] = set()
-    lines = []
-    for rare, _, common, _ in pairs:
-        if rare not in seen:
-            seen.add(rare)
-            lines.append(f'{_toml_key(rare)} = "{common}"')
+    lines = [f'{_toml_key(rare)} = "{common}"' for rare, common in _merge_table(pairs).items()]
     # plain print so the [tags] header isn't read as markup
     print("[tags]\nmerge = { " + ", ".join(lines) + " }")
+
+
+def _merge_table(pairs: list[tuple[str, int, str, int]]) -> dict[str, str]:
+    merge: dict[str, str] = {}
+    for rare, _, common, _ in pairs:
+        merge.setdefault(rare, common)
+    return merge
 
 
 def _toml_key(name: str) -> str:
@@ -834,12 +960,17 @@ def unlinked_cmd(
         typer.Option("--type", help="Only notes of this kind, meaning their folder (e.g. people)."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many rows.")] = 20,
+    as_json: JsonOpt = False,
 ) -> None:
     """Entries that name a note without linking it, so its numbers miss them."""
+    OUT.as_json = as_json
     with _guard(), _open(config) as (_, conn):
         if name is None:
             with _working("Reading entries for names..."):
                 found = unlinked.by_note(conn, type_)
+            if as_json:
+                _emit({"notes": [asdict(row) for row in found[:limit]], "total": len(found)})
+                return
             if not found:
                 console.print("Every entry that names a note also links it.")
                 return
@@ -855,16 +986,15 @@ def unlinked_cmd(
                 f"[dim]{len(found)} notes in all. 'journal unlinked NAME' lists one note's entries.[/dim]"
             )
             return
-        matches = store.find_notes(conn, name)
-        if not matches:
-            console.print(f"No reference note called '{escape(name)}'.")
-            raise typer.Exit(1)
-        if len(matches) > 1:
-            console.print(f"'{escape(name)}' matches {len(matches)} notes; use a full title:")
-            console.print(_note_table(conn, matches))
-            raise typer.Exit(1)
-        note = matches[0]
+        note = _one_note(conn, name, red=False)
         found_entries = unlinked.for_note(conn, note["id"])
+        if as_json:
+            _emit({
+                "note": serialize.note_ref(note),
+                "entries": [asdict(m) for m in found_entries[:limit]],
+                "total": len(found_entries),
+            })
+            return
         if not found_entries:
             console.print(f"Every entry that names {escape(note['title'])} also links it.")
             return
@@ -892,12 +1022,17 @@ def entities(
     ] = None,
     since: SinceOpt = None,
     until: UntilOpt = None,
+    as_json: JsonOpt = False,
 ) -> None:
     """List the notes your entries link to most."""
+    OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (_, conn):
         rows = store.top_entities(conn, date_from, date_to, limit=limit, entity_type=type_)
         kinds = ", ".join(r["kind"] for r in store.notes_by_kind(conn))
+    if as_json:
+        _emit({"notes": [{"name": r["name"], "kind": r["type"], "n": r["n"]} for r in rows]})
+        return
     if not rows:
         if type_ and kinds:
             console.print(f"No linked notes of kind '{escape(type_)}'. Kinds: {escape(kinds)}.")
@@ -923,13 +1058,22 @@ def mood(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    as_json: JsonOpt = False,
 ) -> None:
     """Average mood per month."""
+    OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag)
         rows = store.monthly_mood(conn, date_from, date_to, only)
         label = _filter_label(conn, only)
+        if as_json:
+            _emit({
+                "scale": cfg.indexing.mood_scale_max,
+                **_filter_json(conn, only),
+                "months": [dict(r) for r in rows],
+            })
+            return
     if not any(r["avg_mood"] is not None for r in rows):
         console.print("No mood-scored entries in this range yet.")
         return
@@ -957,12 +1101,17 @@ def metric(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    as_json: JsonOpt = False,
 ) -> None:
     """Numbers you record in entry frontmatter, like sleep: 7, by month."""
+    OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (_, conn):
         known = store.metric_keys(conn)
-        if not known:
+        if as_json and key is None:
+            _emit({"metrics": [dict(r) for r in known]})
+            return
+        if not known and not as_json:
             console.print(
                 "No numbers found in your entries' frontmatter. Add one like 'sleep: 7' "
                 "to a daily note and run 'journal index'."
@@ -981,16 +1130,20 @@ def metric(
                 )
             console.print(table)
             return
+        assert key is not None
         name = key.strip().casefold()
         if name not in {r["key"] for r in known}:
-            console.print(
-                f"[red]No entry records '{escape(name)}'. Known: "
-                f"{escape(', '.join(r['key'] for r in known))}.[/red]"
+            names = [r["key"] for r in known]
+            _fail(
+                f"No entry records '{name}'. Known: {', '.join(names) or 'none yet'}.",
+                {"known": names},
             )
-            raise typer.Exit(1)
         only = _entry_filter(conn, about, tag)
         rows = store.monthly_metric(conn, name, date_from, date_to, only)
         label = _filter_label(conn, only)
+        if as_json:
+            _emit({"metric": name, **_filter_json(conn, only), "months": [dict(r) for r in rows]})
+            return
     if not rows:
         console.print(f"No entries record '{escape(name)}' in this range.")
         return
@@ -1024,15 +1177,29 @@ def lapsed(
         int, typer.Option("--quiet", min=1, help="Months without a link, counted back from your latest entry.")
     ] = LAPSED_QUIET_MONTHS,
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many notes.")] = 20,
+    as_json: JsonOpt = False,
 ) -> None:
     """People and places you used to write about often and haven't lately."""
+    OUT.as_json = as_json
     with _guard(), _open(config) as (_, conn):
         _, latest = store.date_bounds(conn, None, None)
         if latest is None:
-            console.print("No entries indexed yet. Run 'journal index' first.")
+            if as_json:
+                _emit({"anchor": None, "min": min_links, "quiet_months": quiet, "notes": []})
+            else:
+                console.print("No entries indexed yet. Run 'journal index' first.")
             return
         anchor = date.fromisoformat(latest)
         rows = store.lapsed_notes(conn, min_links, store.months_before(anchor, quiet), type_)
+    if as_json:
+        _emit({
+            "anchor": anchor, "min": min_links, "quiet_months": quiet,
+            "notes": [
+                {**asdict(r), "months_quiet": _months_between(date.fromisoformat(r.last), anchor)}
+                for r in rows[:limit]
+            ],
+        })
+        return
     if not rows:
         console.print(
             f"Nothing you linked {min_links} or more times has gone "
@@ -1058,10 +1225,14 @@ def lapsed(
 
 
 @app.command()
-def streaks(config: ConfigOpt = None) -> None:
+def streaks(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """Writing streaks and word counts."""
+    OUT.as_json = as_json
     with _guard(), _open(config) as (_, conn):
         s = store.writing_stats(conn)
+    if as_json:
+        _emit(asdict(s))
+        return
     if not s.entries:
         console.print("No entries indexed yet. Run 'journal index' first.")
         return
@@ -1083,14 +1254,19 @@ def on_this_day(
         str | None,
         typer.Option("--date", help="Anchor date (YYYY-MM-DD); default today."),
     ] = None,
+    as_json: JsonOpt = False,
 ) -> None:
     """What you wrote on this date in earlier years."""
+    OUT.as_json = as_json
     anchor = _parse_date(day, "--date") if day is not None else date.today()
     with _guard(), _open(config) as (_, conn):
         rows = [
             r for r in store.entries_on_month_day(conn, anchor.month, anchor.day)
             if r["entry_date"] != anchor.isoformat()
         ]
+        if as_json:
+            _emit({"date": anchor, "entries": serialize.entry_briefs(conn, rows)})
+            return
         if not rows:
             console.print(
                 f"Nothing written on {anchor.strftime('%B %d')} in other years."
@@ -1105,14 +1281,15 @@ def similar(
     day: Annotated[str, typer.Argument(help="Entry date (YYYY-MM-DD).")],
     config: ConfigOpt = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="Max results.")] = 5,
+    as_json: JsonOpt = False,
 ) -> None:
     """Find entries similar to the one on a given day."""
+    OUT.as_json = as_json
     d = _parse_date(day, "DATE")
     with _guard(), _open(config) as (_, conn):
         day_rows = store.entries_in_range(conn, d, d)
         if not day_rows:
-            console.print(f"No indexed entry on {d}.")
-            raise typer.Exit(1)
+            _fail(f"No indexed entry on {d}.", red=False)
         day_ids = {r["id"] for r in day_rows}
         seen: dict[int, None] = {}
         for r in day_rows:
@@ -1120,6 +1297,12 @@ def similar(
                 if eid not in day_ids:
                     seen.setdefault(eid, None)
         ids = list(seen)[:limit]
+        if as_json:
+            found = store.entries_by_ids(conn, ids)
+            order = {eid: i for i, eid in enumerate(ids)}
+            found.sort(key=lambda r: order[r["id"]])
+            _emit({"date": d, "entries": serialize.entry_briefs(conn, found)})
+            return
         if not ids:
             console.print(
                 "No similar entries found. If the entry is new, run 'journal index' "
