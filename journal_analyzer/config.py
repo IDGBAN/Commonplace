@@ -81,11 +81,22 @@ class OllamaConfig(BaseModel):
 
 class DbConfig(BaseModel):
     path: Path = Path("~/.journal_analyzer/journal.db")
+    # keep model results so rebuilding the cache doesn't redo them
+    memo: bool = True
+    # empty means next to the cache, e.g. journal-memo.db
+    memo_path: Path | None = None
 
     @field_validator("path")
     @classmethod
     def _abs_path(cls, v: Path) -> Path:
         return _expand(v)
+
+    @field_validator("memo_path", mode="before")
+    @classmethod
+    def _memo_path(cls, v: object) -> Path | None:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return _expand(Path(str(v)))
 
 
 class IndexingConfig(BaseModel):

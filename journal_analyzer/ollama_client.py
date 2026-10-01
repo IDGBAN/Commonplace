@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import itertools
+import json
 import re
 import time
 from collections.abc import Callable, Iterator
@@ -11,8 +14,14 @@ import httpx
 import ollama
 from pydantic import BaseModel, ValidationError
 
+from . import memo
 from .config import Config
-from .models import ModelRequestError, OllamaUnavailableError, StructuredOutputError
+from .models import (
+    JournalError,
+    ModelRequestError,
+    OllamaUnavailableError,
+    StructuredOutputError,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -154,6 +163,12 @@ def _options(
     return opts
 
 
+def _memo_options(opts: dict[str, Any]) -> dict[str, Any]:
+    # the window only changes the reply when a prompt wouldn't fit, and then
+    # it's raised to fit, so a different window setting still gives the same one
+    return {k: v for k, v in opts.items() if k != "num_ctx"}
+
+
 def _require_every_field(schema: type[BaseModel]) -> dict[str, Any]:
     # Pydantic makes fields with defaults optional, and models then skip them
     # (entities went missing this way). Nullable fields can still be null.
@@ -169,6 +184,29 @@ class OllamaClient:
             timeout=config.ollama.request_timeout_seconds,
         )
         self._context_lengths: dict[str, int | None] = {}
+        self._memo = memo.open_for(config)
+        self._weights: dict[str, str] | None = None
+
+    def _model_weights(self, model: str) -> str:
+        # A re-pulled model keeps its name but gets new weights, and results
+        # from the old ones shouldn't come back.
+        if self._weights is None:
+            self._weights = {}
+            with contextlib.suppress(JournalError):
+                listed = self._call("(list)", self._client.list)
+                for m in getattr(listed, "models", None) or []:
+                    name, digest = getattr(m, "model", None), getattr(m, "digest", None)
+                    if isinstance(name, str) and isinstance(digest, str):
+                        self._weights[_canonical_model(name)] = digest
+        return self._weights.get(_canonical_model(model), "")
+
+    def _memo_key(self, kind: str, model: str, **parts: Any) -> str:
+        blob = json.dumps(
+            {"kind": kind, "model": _canonical_model(model),
+             "weights": self._model_weights(model), **parts},
+            sort_keys=True, ensure_ascii=False, default=str,
+        )
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     def _unavailable(self, exc: Exception) -> OllamaUnavailableError:
         settings = self._config.ollama
@@ -233,6 +271,16 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
     ) -> str:
         opts = _options(messages, options, self._fixed_ctx(model))
+        think = self._think(model)
+        key = None
+        # only replies that come out the same every time are worth keeping
+        if self._memo is not None and opts.get("temperature") == 0:
+            key = self._memo_key(
+                "chat", model, messages=messages, options=_memo_options(opts), think=think
+            )
+            kept = self._memo.get_text(key)
+            if kept is not None:
+                return kept
         response = self._call(
             model,
             partial(
@@ -240,10 +288,13 @@ class OllamaClient:
                 model=model,
                 messages=messages,
                 options=opts,
-                think=self._think(model),
+                think=think,
             ),
         )
-        return strip_thinking(response["message"]["content"])
+        text = strip_thinking(response["message"]["content"])
+        if key is not None and self._memo is not None:
+            self._memo.put_text(key, "chat", model, text)
+        return text
 
     def chat_stream(
         self,
@@ -305,9 +356,39 @@ class OllamaClient:
         messages: list[dict[str, str]],
         schema: type[T],
         options: dict[str, Any] | None = None,
+        memo_key: object = None,
     ) -> T:
+        """`memo_key` stands in for the messages when the memo is checked, for
+        callers whose prompt carries something that shouldn't count."""
         think = self._think(model)
         json_schema = _require_every_field(schema)
+        key = None
+        if self._memo is not None:
+            base = {"temperature": 0, **(options or {})}
+            if base.get("temperature") == 0:
+                key = self._memo_key(
+                    "structured", model,
+                    messages=memo_key if memo_key is not None else messages,
+                    schema=json_schema, options=_memo_options(base), think=think,
+                )
+                kept = self._memo.get_text(key)
+                if kept is not None:
+                    with contextlib.suppress(ValidationError):
+                        return schema.model_validate_json(kept)
+        result = self._chat_structured(model, messages, schema, options, think, json_schema)
+        if key is not None and self._memo is not None:
+            self._memo.put_text(key, "structured", model, result.model_dump_json())
+        return result
+
+    def _chat_structured(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        schema: type[T],
+        options: dict[str, Any] | None,
+        think: bool | None,
+        json_schema: dict[str, Any],
+    ) -> T:
         convo = list(messages)
         last_error: Exception | None = None
         for _ in range(2):
@@ -352,6 +433,12 @@ class OllamaClient:
     def embed(
         self, model: str, text: str, options: dict[str, Any] | None = None
     ) -> list[float]:
+        key = None
+        if self._memo is not None:
+            key = self._memo_key("embed", model, text=text, options=options or {})
+            kept = self._memo.get_vector(key)
+            if kept is not None:
+                return kept
         response = self._call(
             model,
             partial(self._client.embed, model=model, input=text, options=options),
@@ -361,7 +448,10 @@ class OllamaClient:
             raise ModelRequestError(
                 f"Embedding model '{model}' returned no vector for the input."
             )
-        return list(embeddings[0])
+        vector = list(embeddings[0])
+        if key is not None and self._memo is not None:
+            self._memo.put_vector(key, model, vector)
+        return vector
 
     def list_models(self) -> list[str]:
         data = self._call("(list)", self._client.list)

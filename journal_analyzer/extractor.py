@@ -94,17 +94,23 @@ def _in_writers_voice(
     model: str,
     messages: list[dict[str, str]],
     schema: type[_Summarized],
+    memo_messages: list[dict[str, str]] | None = None,
 ) -> _Summarized:
+    """`memo_messages` is what the memo keys on instead of `messages`, if given."""
     # One retry. If that's still off it's kept, not worth failing the file over.
-    result = client.chat_structured(model=model, messages=messages, schema=schema)
+    result = client.chat_structured(
+        model=model, messages=messages, schema=schema, memo_key=memo_messages
+    )
     if not _DETACHED_OPENING_RE.match(result.summary):
         return result
-    retry = [
-        *messages,
+    tail: list[dict[str, str]] = [
         {"role": "assistant", "content": result.model_dump_json()},
         {"role": "user", "content": _VOICE_CORRECTION},
     ]
-    return client.chat_structured(model=model, messages=retry, schema=schema)
+    retry_key = memo_messages + tail if memo_messages is not None else None
+    return client.chat_structured(
+        model=model, messages=messages + tail, schema=schema, memo_key=retry_key
+    )
 
 
 def _room_for_links(config: Config, messages: list[dict[str, str]]) -> int:
@@ -129,9 +135,10 @@ def extract(
     if not text:
         return Extraction(mood_score=None, summary="(empty entry)", tags=literal_tags)
 
-    system = _SYSTEM_PROMPT.format(
+    base_system = _SYSTEM_PROMPT.format(
         mood_max=config.indexing.mood_scale_max, summary_max=SUMMARY_MAX_CHARS
     )
+    system = base_system
     if known_tags:
         system += _KNOWN_TAGS.format(tags=", ".join(known_tags))
 
@@ -146,6 +153,9 @@ def extract(
         shown = fit(list(linked), room - len(_LINKED_HEADER))
         if shown:
             user += f"\n\n{_LINKED_HEADER}\n" + "\n".join(shown)
+    # The tag list grows while a journal is indexed, so a rebuild would show
+    # the model a different one; it's left out of the memo key so the rebuild
+    # can reuse what the model said the first time.
     result = _in_writers_voice(
         client,
         config.ollama.fast_model,
@@ -154,6 +164,10 @@ def extract(
             {"role": "user", "content": user},
         ],
         Extraction,
+        memo_messages=[
+            {"role": "system", "content": base_system},
+            {"role": "user", "content": user},
+        ],
     )
 
     # small models go out of range sometimes

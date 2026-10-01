@@ -64,7 +64,7 @@ class FakeOllamaClient:
             on_text(piece)
         return full
 
-    def chat_structured(self, model, messages, schema: type[BaseModel], options=None):
+    def chat_structured(self, model, messages, schema: type[BaseModel], options=None, memo_key=None):
         self.structured_calls.append((model, schema.__name__))
         source = self.structured[schema.__name__]
         result = source(model, messages) if callable(source) else source

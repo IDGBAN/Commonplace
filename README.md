@@ -57,7 +57,7 @@ Then open `config.toml` and set these:
 - `[notes] paths` points at the folders with your undated reference notes, e.g. `["Links"]`. See [Reference notes](#reference-notes).
 - `[ollama]` has the host, the three model names, whether the fast and precise models think before answering (`fast_model_think`, `precise_model_think`), the embedding context window (`embed_num_ctx`) and the request timeout. The precise model runs at Ollama's default context window unless you set `precise_num_ctx`. When a prompt won't fit (a very long entry, a big pile of digests), the request asks for a bigger window instead of letting the prompt get cut, and Ollama reloads the model at that size. Thinking is off for the fast model by default, because on a reasoning model it makes extraction a lot slower without helping much. If you change `embed_model` later you'll have to rebuild the cache, since vectors from different models can't be compared.
   `fast_num_ctx` (8192 by default) gives the fast model one fixed window, so Ollama loads it once and there's room for the notes an entry links to; `precise_num_ctx` does the same for the precise model and is off (0) by default. A prompt bigger than the window still gets a bigger one. `[indexing] linked_note_chars` caps how much of each linked note goes along with an entry, and `[rollups] linked_notes_chars` how much room the linked notes get in each digest. Entries indexed before this only get their linked notes when you run `journal index --force`.
-- `[db] path` is where the SQLite cache goes.
+- `[db] path` is where the SQLite cache goes. `memo` keeps model results in a second file next to it so rebuilds don't redo them; see [Starting over](#starting-over).
 - `[reranking]` is a cross-encoder that reorders search results before they're used for an answer. It makes results more relevant, but it downloads its model from the internet the first time it runs. If that fails, searches fall back to the fusion ranking and print a warning once. Set `enabled = false` to turn it off.
 
 Every command takes `--config PATH` and defaults to `./config.toml`.
@@ -73,7 +73,7 @@ journal init              # create the DB schema and detect the embedding size
 
 # indexing (safe to stop and re-run)
 journal index             # index the vault, skipping unchanged files
-journal index --force     # re-process everything
+journal index --force     # re-process everything (model results it's seen before are reused)
 journal index --dry-run   # what would be indexed, which files won't parse, how many model calls
 journal stats             # entries, notes, links, date range, DB size, errored and future-dated files
 
@@ -233,6 +233,10 @@ journal init && journal index && journal rollup --rebuild-all
 ```
 
 If an upgrade changes the cache format, commands will say so and tell you which file to delete, instead of misreading the old one.
+
+A rebuild doesn't have to redo the model work. Next to the cache there's a second file, `journal-memo.db`, that keeps what the models returned for entry readings, note summaries, digests, the profile and embeddings, keyed by everything that went into each one: the model and its exact weights, the prompt, and the options. When the same input comes round again, after a rebuild or with `journal index --force`, the kept result is used instead of a model call, so a rebuild of an unchanged journal takes minutes. Anything that would change the result (an edited entry, another model, a re-pulled model, a new prompt in an upgrade) misses and goes to the model. Answers to questions are left out, since they're written at a higher temperature to read naturally. The list of tags shown to the model doesn't count toward an entry's key, because it grows during a first index and would otherwise make every rebuild miss.
+
+To have the models read everything again, add `--no-memo` to `index`, `watch`, `rollup`, `digest` or `profile`, or delete the memo file. `[db] memo = false` turns it off and `memo_path` moves it. `journal stats` shows its size. It holds summaries of your journal, so it gets the same private permissions as the cache.
 
 ## Tests and linting
 

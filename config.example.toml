@@ -40,6 +40,10 @@ request_timeout_seconds = 120
 
 [db]
 path = "~/.journal_analyzer/journal.db"
+# Keeps what the models returned, so a rebuild or `index --force` reuses it
+# instead of asking again. Empty memo_path puts it next to the cache.
+memo = true
+memo_path = ""
 
 [indexing]
 watch_debounce_seconds = 45

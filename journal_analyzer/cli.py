@@ -29,6 +29,7 @@ from . import (
     fields,
     ingester,
     insights,
+    memo,
     parser,
     profile,
     prompts,
@@ -74,6 +75,16 @@ AboutOpt = Annotated[
 ]
 TagOpt = Annotated[str | None, typer.Option("--tag", help="Only entries with this tag.")]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON instead of tables.")]
+NoMemoOpt = Annotated[
+    bool,
+    typer.Option("--no-memo", help="Ask the models again instead of reusing their kept results."),
+]
+
+
+def _memo(cfg: Config, no_memo: bool) -> Config:
+    if not no_memo:
+        return cfg
+    return cfg.model_copy(update={"db": cfg.db.model_copy(update={"memo": False})})
 
 
 class _Output:
@@ -280,6 +291,7 @@ def index(
             help="Show what would be indexed and which files won't parse, without Ollama.",
         ),
     ] = False,
+    no_memo: NoMemoOpt = False,
 ) -> None:
     """Index the vault. Unchanged files are skipped, so re-running is cheap."""
     if dry_run:
@@ -296,7 +308,7 @@ def index(
                 )
         return
     with _guard(), _open(config) as (cfg, conn):
-        ingester.run_backfill(_with_vault(cfg, vault), conn, force=force)
+        ingester.run_backfill(_memo(_with_vault(cfg, vault), no_memo), conn, force=force)
 
 
 def _with_vault(cfg: Config, vault: Path | None) -> Config:
@@ -377,10 +389,10 @@ def _print_plan(plan: ingester.BackfillPlan, vault: Path, cache: bool) -> None:
 
 
 @app.command()
-def watch(config: ConfigOpt = None) -> None:
+def watch(config: ConfigOpt = None, no_memo: NoMemoOpt = False) -> None:
     """Keep indexing files as they change, until Ctrl-C."""
     with _guard(), _open(config) as (cfg, conn):
-        ingester.run_watch(cfg, conn)
+        ingester.run_watch(_memo(cfg, no_memo), conn)
 
 
 def _source_link(label: str, path: str | None) -> Text:
@@ -528,6 +540,7 @@ def rollup(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="List what would be written, without Ollama.")
     ] = False,
+    no_memo: NoMemoOpt = False,
 ) -> None:
     """Write any missing or outdated digests: your profile, months, years, often-linked notes, weeks."""
     date_from, date_to = _parse_range(since, until)
@@ -538,6 +551,7 @@ def rollup(
             reading = any(p.kind == "profile" for p in plan)
             _print_rollup_plan(plan, profile.scan_calls(cfg, conn) if reading else 0)
             return
+        cfg = _memo(cfg, no_memo)
         counts = rollups.generate_rollups(
             cfg, conn, OllamaClient(cfg), kinds, not rebuild_all, date_from, date_to
         )
@@ -601,6 +615,7 @@ def digest_cmd(
         typer.Option("--refresh", help="Write it first if it's missing or out of date."),
     ] = False,
     as_json: JsonOpt = False,
+    no_memo: NoMemoOpt = False,
 ) -> None:
     """Show the digest for one week, month or year."""
     OUT.as_json = as_json
@@ -620,7 +635,9 @@ def digest_cmd(
                     console.print("[dim]Already up to date.[/dim]")
                 else:
                     console.print(f"[dim]Writing {_count(len(plan), 'digest')}...[/dim]")
-                    rollups.generate_rollups(cfg, conn, OllamaClient(cfg), kinds, True, start, end)
+                    rollups.generate_rollups(
+                        cfg, conn, OllamaClient(_memo(cfg, no_memo)), kinds, True, start, end
+                    )
             row = store.get_rollup(conn, kind, key)
         moods = [r["mood_score"] for r in members if r["mood_score"] is not None]
         if as_json:
@@ -657,9 +674,13 @@ def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     OUT.as_json = as_json
     with _guard(), _open(config) as (cfg, conn):
         s = store.stats(conn)
+        kept = memo.stats(cfg)
         if as_json:
             _emit({
                 **asdict(s),
+                "memo": None if kept is None else {
+                    "path": str(memo.memo_path(cfg)), "results": kept[0], "bytes": kept[1],
+                },
                 "db_path": str(cfg.db.path),
                 "db_bytes": cfg.db.path.stat().st_size if cfg.db.path.exists() else 0,
                 "note_kinds": [dict(r) for r in store.notes_by_kind(conn)],
@@ -682,6 +703,13 @@ def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
         console.print(f"Tags / links    : {s.tags} / {s.links}")
         console.print(f"Rollup digests  : {s.rollups} (and {s.note_digests} for notes)")
         console.print(f"DB size         : {size_mb:.2f} MB ({escape(str(cfg.db.path))})")
+        if kept is not None:
+            console.print(
+                f"Model memo      : {kept[0]:,} results, {kept[1] / BYTES_PER_MB:.2f} MB "
+                f"({escape(str(memo.memo_path(cfg)))})"
+            )
+        elif not cfg.db.memo:
+            console.print("Model memo      : off")
         for row in store.errored_files(conn):
             console.print(
                 f"  [red]error[/red] {escape(row['path'])}: "
@@ -1260,6 +1288,7 @@ def profile_cmd(
         typer.Option("--rescan", help="Forget the facts, read every entry again, and rebuild."),
     ] = False,
     as_json: JsonOpt = False,
+    no_memo: NoMemoOpt = False,
 ) -> None:
     """What your journal says about you: names, likes, habits and the like."""
     OUT.as_json = as_json
@@ -1269,7 +1298,7 @@ def profile_cmd(
         if rescan:
             store.forget_profile_scans(conn)
         if update or rebuild or rescan:
-            client = OllamaClient(cfg)
+            client = OllamaClient(_memo(cfg, no_memo))
             with redirect_stdout(sys.stderr) if as_json else nullcontext():
                 profile.forget_gone_entries(conn)
                 pending = profile.pending_entries(conn)
