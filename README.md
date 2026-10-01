@@ -16,7 +16,7 @@ The notes your entries link to go along as background wherever a model reads you
 
 Folder and file names count too. Any model that reads a file is told where it sits in the vault, like `Links/People/John Doe.md` or `Trips/Lisbon/2024-03-05.md`, so a note filed as a person is read as one even if its text never says so.
 
-There are three models. A fast one extracts entries, summarizes notes and routes questions. A precise one handles synthesis and digests. An embedding model produces the vectors.
+There are three models. A fast one extracts entries, summarizes notes, picks out facts about you for your profile and routes questions. A precise one handles synthesis, digests and the profile itself. An embedding model produces the vectors.
 
 ## Requirements
 
@@ -85,7 +85,7 @@ journal ask "How did my mood change over spring?"     # answered from SQL
 journal ask "What did we talk about?" --about "John Doe" --since 2024-03-01
 
 # digests
-journal rollup                # write missing or stale month, year, relationship, then week digests
+journal rollup                # update your profile, then write missing or stale month, year, relationship and week digests
 journal rollup --rebuild-all  # regenerate all of them
 journal rollup --since 2025-01-01 --only month,year   # just this year's months and year
 journal rollup --dry-run      # list what would be written, without Ollama
@@ -100,15 +100,17 @@ journal chat              # Q&A that remembers the last few turns
 journal insights          # mood, tag and timing patterns you didn't ask about
 journal prompt            # ideas for what to write next, from threads left open
 journal review 2025       # the year in review, as Markdown
+journal profile           # what your journal says about you
+journal profile --update  # read entries it hasn't yet and fold in what's new
 ```
 
 Before a long first run, or after changing `date_source`, `date_format` or `split_heading_regex`, run `journal index --dry-run`. It walks the vault the same way `journal index` does and parses every file it would index, without Ollama and without touching the cache. It lists files that would fail and why, files that split into several entries, entries dated in the future, files that would be dropped, and roughly how many model calls the real run would make. Add `--force` to check every file, not just new and changed ones.
 
-`journal rollup` shows a progress bar with the time left. `--since` and `--until` limit it to periods that overlap those dates and `--only` to some kinds (`month`, `year`, `note`, `week`); relationship digests cover the whole journal, so the dates don't apply to them. `--dry-run` lists what it would write and why (not written yet, out of date, or rewritten for `--rebuild-all`). To read one digest, or to write just the one you want instead of waiting for a full run, use `journal digest`. A year is written from its month digests, so refreshing a year writes any of its months that are missing first.
+`journal rollup` shows a progress bar with the time left. `--since` and `--until` limit it to periods that overlap those dates and `--only` to some kinds (`profile`, `month`, `year`, `note`, `week`); your profile and relationship digests cover the whole journal, so the dates don't apply to them. `--dry-run` lists what it would write and why (not written yet, out of date, or rewritten for `--rebuild-all`). To read one digest, or to write just the one you want instead of waiting for a full run, use `journal digest`. A year is written from its month digests, so refreshing a year writes any of its months that are missing first.
 
 Notes you link often (from 8 or more entries by default) also get a relationship digest: a few sentences on how that person, place or topic figures in your journal over the years. It's written from the note itself and the summaries of the entries that link to it, a sample of each year's when there are many. `journal note` shows it, so do the note's page and the Digests page in the browser, and answers that name the note read it. It goes out of date when an entry that links the note, or the note itself, changes. `[rollups] note_min_mentions` sets the threshold (0 turns them off) and `note_entries_per_year` caps how many entries from each year go in.
 
-Each digest is one call to the precise model, so on a CPU a full `journal rollup` can take hours. Month and year digests are written first because those are what answers use, so if you stop a run partway they're already there.
+Each digest is one call to the precise model, so on a CPU a full `journal rollup` can take hours. Your profile is updated first, since every digest is written with it, then month and year digests, because those are what answers use, so if you stop a run partway they're already there.
 
 `journal ask` shows which step it's on while it works, then prints the answer as the model writes it, so on a CPU you can start reading long before it finishes. The fast model's first try is held back for a moment until it's clear it isn't giving up (it answers INSUFFICIENT when the summaries aren't enough and the precise model takes over). At the end it says which stage produced the answer: `aggregate` (plain SQL), `fast_summary` (the fast model reading stored summaries and notes) or `precise_raw` (the precise model re-reading the full text of the cited entries and notes).
 
@@ -172,6 +174,16 @@ It opens the cache read-only and never touches your notes, so it's safe to leave
 `journal review 2025` puts a year on one page in Markdown: the year digest, writing numbers, mood by month, your best and hardest days by mood, the notes you linked most and the ones that first appear that year, your top tags against the year before, and tags that fell away. Days and notes are `[[links]]`, so it reads well pasted into Obsidian. It makes no model calls; if the year digest isn't written yet it says how to write it. Leave out the year for the latest one you wrote in, and add `--out FILE` to save it (outside the vault).
 
 `journal prompt` looks back over recent entries (14 days by default, or `--days N`) and suggests open-ended writing prompts that pick up loose threads, like a project you named, a person who keeps coming up, or a feeling you left unresolved. `--count N` sets how many. It only reads the cache and never touches your notes.
+
+## Your profile
+
+The app keeps a short profile of you, written in your voice: names and nicknames (yours, and the ones you use for people), personality, likes and dislikes, hobbies, routines, work, values, health. Answers, `journal chat`, every digest (including relationship digests), `journal insights` and `journal prompt` get it as background, so "my sister" or a nickname reads right and a digest knows what's usual for you. The step that asks your question's dates and names, and the step that rewrites a follow-up, only get the names part. Reading a single entry never uses it, so a wrong guess can't work its way into your summaries and then back into the profile.
+
+It's built in two steps. The fast model reads your entries a few at a time and pulls out lasting facts about you, each with the date of the entry it came from. The precise model then folds new facts into the profile, and when two facts disagree the later one wins ("I used to run, now I swim"). If you keep a note about yourself, point `[profile] note` at it; it's read as you wrote it and wins over anything inferred. A note marked private is left out.
+
+New entries are read for it as `journal index` and `journal watch` index them; watch waits until it's idle and rewrites the profile at most every 30 minutes (`watch_update_minutes`), since each rewrite is a precise-model call. Entries indexed before the profile existed are read by `journal profile --update` or by `journal rollup`, which updates the profile before writing any digest. That first read is one fast-model call per 8 entries (`scan_batch_entries`), so on a big journal and a CPU it takes a while; `journal rollup --dry-run` says how many calls.
+
+`journal profile` shows it, with when it was written and how many facts it's built from. `--facts` lists the facts with their dates, `--rebuild` writes it again from every fact in date order, and `--rescan` forgets what was read and reads every entry again. The browser's You page shows the profile next to the facts, each linked to its day, and `journal review` lists what was new about you that year. A profile change doesn't mark digests out of date; `journal rollup --rebuild-all` rewrites them with the current one.
 
 ## Metrics
 

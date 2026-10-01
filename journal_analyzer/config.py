@@ -160,6 +160,21 @@ class MetricsConfig(BaseModel):
         return [k.strip().casefold() for k in v if k.strip()]
 
 
+class ProfileConfig(BaseModel):
+    enabled: bool = True
+    # a note about yourself, from the vault root; it overrides what's inferred
+    note: str = ""
+    scan_batch_entries: int = Field(default=8, ge=1)
+    max_words: int = Field(default=350, ge=50)
+    # `journal watch` rewrites the profile at most this often
+    watch_update_minutes: float = Field(default=30, ge=0)
+
+    @field_validator("note")
+    @classmethod
+    def _relative(cls, v: str) -> str:
+        return v.strip().replace("\\", "/").strip("/")
+
+
 class NotesConfig(BaseModel):
     paths: list[str] = Field(default_factory=list)
     # 0 summarizes every non-empty note
@@ -182,6 +197,7 @@ class Config(BaseModel):
     notes: NotesConfig = NotesConfig()
     tags: TagsConfig = TagsConfig()
     metrics: MetricsConfig = MetricsConfig()
+    profile: ProfileConfig = ProfileConfig()
 
 
 def load_config(path: Path | str | None = None) -> Config:

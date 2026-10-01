@@ -21,6 +21,8 @@ NEW_NOTES = 10
 # and this year has half as many or fewer
 FELL_AWAY_MIN = 3
 FELL_AWAY_SHOWN = 5
+# facts the profile scan found in that year's entries
+NEW_ABOUT_YOU = 12
 BAR_WIDTH = 20
 
 
@@ -90,6 +92,7 @@ def build(config: Config, conn: sqlite3.Connection, year: int) -> YearReview | N
         tags=tags,
         fell_away=fell_away,
         has_earlier=first is not None and first < start.isoformat(),
+        extra=[("New about you", about)] if (about := _new_about_you(conn, start, end)) else [],
     )
 
 
@@ -102,6 +105,18 @@ def _day_lines(rows: list[sqlite3.Row]) -> list[str]:
         f"- [[{r['entry_date']}]] (mood {_mood(r['mood_score'])}): {r['summary'] or '(no summary)'}"
         for r in rows
     ]
+
+
+def _new_about_you(conn: sqlite3.Connection, start: date, end: date) -> list[str]:
+    seen: set[str] = set()
+    lines = []
+    for row in reversed(store.profile_facts(conn, 1000, start, end)):  # oldest first
+        key = row["fact"].casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {row['fact']} ([[{row['entry_date']}]])")
+    return lines[:NEW_ABOUT_YOU]
 
 
 def to_markdown(review: YearReview) -> str:

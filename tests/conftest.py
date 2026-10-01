@@ -22,6 +22,7 @@ from journal_analyzer.models import (
     ParsedNote,
     QueryPlan,
 )
+from journal_analyzer.profile import ProfileDigest, ScannedFacts
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EMBED_DIM = 8
@@ -39,6 +40,8 @@ class FakeOllamaClient:
                 tags=["Friends", "outdoors", "nature"],
             ),
             "NoteSummary": NoteSummary(summary="A canned note summary."),
+            "ScannedFacts": ScannedFacts(),
+            "ProfileDigest": ProfileDigest(names="I go by Al.", profile="I like long walks."),
         }
         self.chat_calls: list[tuple[str, list[dict]]] = []
         self.streamed_calls: list[str] = []

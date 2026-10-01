@@ -159,6 +159,22 @@ CREATE TABLE IF NOT EXISTS note_digests (
   generated_at TEXT
 );
 
+-- Lasting facts about the writer, pulled from entries for the profile.
+-- Keyed by the entry's text, which outlives entry ids across re-indexing.
+CREATE TABLE IF NOT EXISTS profile_facts (
+  id         INTEGER PRIMARY KEY,
+  text_hash  TEXT NOT NULL,
+  entry_date TEXT NOT NULL,
+  category   TEXT NOT NULL,
+  fact       TEXT NOT NULL,
+  folded     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_profile_facts_hash ON profile_facts(text_hash);
+CREATE TABLE IF NOT EXISTS profile_scans (
+  text_hash  TEXT PRIMARY KEY,
+  scanned_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

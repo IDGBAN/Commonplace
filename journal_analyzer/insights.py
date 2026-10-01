@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
 
-from . import store
+from . import profile, store
 from .config import Config
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
 
@@ -228,7 +228,10 @@ def compute_insights(
     return result
 
 
-def narrate(insights: Insights, config: Config, client: OllamaClient) -> str:
+def narrate(
+    insights: Insights, config: Config, client: OllamaClient, writer: str = ""
+) -> str:
+    """`writer` is profile.context, the background on who's writing."""
     span = "the whole journal"
     if insights.date_from or insights.date_to:
         span = f"{insights.date_from or 'start'} to {insights.date_to or 'now'}"
@@ -243,7 +246,7 @@ def narrate(insights: Insights, config: Config, client: OllamaClient) -> str:
     return client.chat(
         model=config.ollama.precise_model,
         messages=[
-            {"role": "system", "content": _NARRATE_SYSTEM},
+            {"role": "system", "content": _NARRATE_SYSTEM + writer},
             {"role": "user", "content": "\n".join(facts)},
         ],
         options={"temperature": SYNTHESIS_TEMPERATURE},
@@ -272,4 +275,4 @@ def generate_insights(
             "lower insights.mood_deviation_threshold.",
             insights,
         )
-    return narrate(insights, config, client), insights
+    return narrate(insights, config, client, profile.context(conn, config)), insights

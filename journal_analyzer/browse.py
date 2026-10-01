@@ -24,7 +24,7 @@ from importlib import resources
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import db, fields, parser, query, serialize, store, unlinked
+from . import db, fields, parser, profile, query, serialize, store, unlinked
 from .config import Config
 from .models import JournalError
 from .ollama_client import OllamaClient
@@ -42,6 +42,7 @@ UNRESOLVED_LINKS_LIMIT = 60
 LAPSED_MIN_LINKS = 5
 LAPSED_QUIET_MONTHS = 6
 COOCCURRING_LIMIT = 12
+PROFILE_FACTS_LIMIT = 300
 _MAX_ROWID = 2**63 - 1
 _NO_ENTRY = "There is no indexed entry with that id."
 _NO_NOTE = "There is no indexed note with that id."
@@ -419,6 +420,29 @@ def digest(req: Request, period_type: str, period_key: str) -> Json:
     }
 
 
+def profile_page(req: Request) -> Json:
+    conn, cfg = req.conn, req.config
+    found = profile.current(conn)
+    facts = profile.facts_json(conn, PROFILE_FACTS_LIMIT)
+    # facts keep the entry's date, which is enough to link to that day
+    days: dict[str, int | None] = {}
+    for f in facts:
+        day = str(f["date"])
+        if day not in days:
+            rows = store.entries_in_range(conn, date.fromisoformat(day), date.fromisoformat(day))
+            days[day] = rows[0]["id"] if rows else None
+    return {
+        "enabled": cfg.profile.enabled,
+        "note": cfg.profile.note or None,
+        "profile": None if found is None else {
+            "text": found.text, "names": found.names, "updated_at": found.updated_at,
+        },
+        **profile.summary_counts(conn),
+        "facts_count": store.profile_fact_count(conn),
+        "facts": [{**f, "entry_id": days.get(str(f["date"]))} for f in facts],
+    }
+
+
 def files(req: Request) -> Json:
     return {
         "files": [
@@ -504,6 +528,7 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/digests"), digests),
     (re.compile(r"/api/digests/(week|month|year)/([^/]+)"), digest),
     (re.compile(r"/api/files"), files),
+    (re.compile(r"/api/profile"), profile_page),
     (re.compile(r"/api/search"), search),
 ]
 
@@ -599,7 +624,9 @@ class _Handler(BaseHTTPRequestHandler):
                     standalone = question
                     if history:
                         send("stage", {"text": "Resolving your follow-up..."})
-                        standalone = query.contextualize_question(question, history, config, client)
+                        standalone = query.contextualize_question(
+                            question, history, config, client, profile.names(conn, config)
+                        )
                         if standalone != question:
                             send("rewritten", {"question": standalone})
                     result = query.answer(

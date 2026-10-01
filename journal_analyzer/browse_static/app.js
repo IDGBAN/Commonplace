@@ -1297,6 +1297,81 @@ async function askView(_, params) {
     thread, form, h("div", { class: "ask-foot" }, hint, reset));
 }
 
+// ---------------------------------------------------------------- you
+
+const FACT_LABELS = {
+  names: "Names", personality: "Personality", preferences: "Likes and dislikes",
+  hobbies: "Hobbies and interests", routines: "Routines", work: "Work and studies",
+  relationships: "People", values: "Values and goals", health: "Health", other: "Other",
+};
+
+async function youView() {
+  const data = await api("profile");
+  document.title = "You · Commonplace";
+  const head = pageHead({
+    eyebrow: "What your journal says about you",
+    title: "You",
+    lede: "A short profile the app keeps from your entries, in your own voice. Answers, digests, insights and writing prompts read it as background. Reading a single entry never uses it, so a wrong guess can't feed on itself.",
+  });
+  if (!data.enabled) {
+    return h("div", {}, head, empty("The profile is turned off. Set ", h("code", {}, "enabled = true"), " under ", h("code", {}, "[profile]"), " in config.toml to keep one."));
+  }
+
+  const waiting = [];
+  if (data.unread) waiting.push(plural(data.unread, "entry", "entries") + " not read yet");
+  if (data.unfolded) waiting.push(plural(data.unfolded, "new fact") + " not added yet");
+  const catchUp = waiting.length
+    ? h("div", { class: "notice info" }, h("span", { class: "notice-label" }, "Catching up"),
+      h("span", {}, `${waiting.join(", ")}. `, h("code", {}, "journal profile --update"), " or ", h("code", {}, "journal rollup"), " brings it up to date."))
+    : null;
+
+  const p = data.profile;
+  const profileSection = p
+    ? h("div", { class: "folio" },
+      h("article", {},
+        h("p", { class: "reading-label" }, "As the precise model wrote it from the facts below"),
+        h("div", { class: "raw" }, p.text)),
+      h("aside", { class: "margin", "aria-label": "About this profile" },
+        h("p", { class: "margin-title" }, "Where it comes from"),
+        p.names && gloss("Names", h("p", { class: "gloss-summary" }, p.names)),
+        gloss("Written", h("div", {}, stamp(p.updated_at)), h("div", { class: "quiet" }, `from ${plural(data.facts_count, "fact")}`)),
+        gloss("Your own note", data.note
+          ? [h("div", { class: "path" }, data.note), h("div", { class: "quiet" }, "Wins whenever it disagrees with what was inferred")]
+          : h("span", { class: "quiet" }, "None set. Point [profile] note at a note about yourself to correct or add to this."))))
+    : empty("No profile yet. Run ", h("code", {}, "journal profile --update"), ` to read your entries${data.unread ? ` (${plural(data.unread, "entry", "entries")})` : ""} and write one.`);
+
+  // the same fact turns up on many days; show it once, at its latest day
+  const groups = new Map();
+  for (const f of data.facts) {
+    if (!groups.has(f.category)) groups.set(f.category, new Map());
+    const byText = groups.get(f.category);
+    const key = f.fact.toLowerCase();
+    if (!byText.has(key)) byText.set(key, { ...f, days: 0, waiting: false });
+    const seen = byText.get(key);
+    seen.days += 1;
+    seen.waiting = seen.waiting || !f.folded;
+  }
+  const order = Object.keys(FACT_LABELS).filter((k) => groups.has(k));
+  const factSections = order.map((key) => {
+    const facts = [...groups.get(key).values()];
+    return h("section", { class: "kind-group" },
+      h("div", { class: "section-head" }, h("h2", {}, FACT_LABELS[key]), h("span", { class: "section-note" }, plural(facts.length, "fact"))),
+      h("ol", { class: "lines" }, facts.map((f) => h("li", {},
+        h(f.entry_id != null ? "a" : "div", { class: "line", href: f.entry_id != null ? href.entry(f.entry_id) : null },
+          h("span", { class: "line-date" }, mediumDate(f.date)),
+          h("span", { "aria-hidden": "true" }),
+          h("span", { class: "line-summary" }, f.fact),
+          h("span", { class: "line-tags" },
+            f.days > 1 ? `on ${plural(f.days, "day")}, latest shown` : null,
+            f.waiting && [f.days > 1 ? " · " : null, h("span", { class: "status pending" }, "not added yet")]))))));
+  });
+
+  return h("div", {}, head, catchUp, profileSection,
+    data.facts.length
+      ? section("What it's built from", factSections, { note: "newest first", intro: "Lasting facts the fast model found in your entries, each with the day it came from. When two disagree, the later one wins." })
+      : null);
+}
+
 function notFoundView() {
   document.title = "Not found · Commonplace";
   return h("div", {}, pageHead({ title: "There's no page here" }),
@@ -1328,6 +1403,7 @@ const routes = [
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],
+  [/^\/you$/, youView, "you"],
 ];
 
 let renderToken = 0;

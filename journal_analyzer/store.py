@@ -903,6 +903,99 @@ def prune_note_digests(conn: sqlite3.Connection, keep: set[str]) -> int:
     return len(doomed)
 
 
+def profile_scanned_hashes(conn: sqlite3.Connection) -> set[str]:
+    try:
+        return {r["text_hash"] for r in conn.execute("SELECT text_hash FROM profile_scans")}
+    except sqlite3.OperationalError:
+        return set()  # a read-only connection to a cache from before the table
+
+
+def save_profile_scan(
+    conn: sqlite3.Connection,
+    hashes: list[str],
+    facts: list[tuple[str, str, str, str]],
+) -> None:
+    """Entries read for the profile, and the (hash, date, category, fact) found in them."""
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO profile_scans(text_hash, scanned_at) VALUES (?, ?)",
+            [(h, _now()) for h in hashes],
+        )
+        conn.executemany(
+            "INSERT INTO profile_facts(text_hash, entry_date, category, fact) VALUES (?, ?, ?, ?)",
+            facts,
+        )
+
+
+def unfolded_profile_facts(
+    conn: sqlite3.Connection, limit: int | None = None
+) -> list[sqlite3.Row]:
+    sql = "SELECT * FROM profile_facts WHERE folded = 0 ORDER BY entry_date, id"
+    try:
+        if limit is not None:
+            return list(conn.execute(sql + " LIMIT ?", (limit,)).fetchall())
+        return list(conn.execute(sql).fetchall())
+    except sqlite3.OperationalError:
+        return []
+
+
+def mark_profile_facts_folded(conn: sqlite3.Connection, ids: list[int]) -> None:
+    if ids:
+        with conn:
+            conn.execute(
+                f"UPDATE profile_facts SET folded = 1 WHERE id IN ({_JSON_VALUES})",
+                (_json_list(ids),),
+            )
+
+
+def unfold_profile_facts(conn: sqlite3.Connection) -> None:
+    with conn:
+        conn.execute("UPDATE profile_facts SET folded = 0")
+
+
+def forget_profile_scans(conn: sqlite3.Connection) -> None:
+    with conn:
+        conn.execute("DELETE FROM profile_facts")
+        conn.execute("DELETE FROM profile_scans")
+
+
+def prune_profile(conn: sqlite3.Connection, live_hashes: set[str]) -> int:
+    live = _json_list(sorted(live_hashes))
+    with conn:
+        gone = conn.execute(
+            f"DELETE FROM profile_facts WHERE text_hash NOT IN ({_JSON_VALUES})", (live,)
+        ).rowcount
+        conn.execute(f"DELETE FROM profile_scans WHERE text_hash NOT IN ({_JSON_VALUES})", (live,))
+    return gone
+
+
+def profile_fact_count(conn: sqlite3.Connection) -> int:
+    try:
+        return conn.execute("SELECT COUNT(*) AS n FROM profile_facts").fetchone()["n"]
+    except sqlite3.OperationalError:
+        return 0
+
+
+def profile_facts(
+    conn: sqlite3.Connection,
+    limit: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[sqlite3.Row]:
+    """Newest first."""
+    clauses, params = _range_clauses(date_from, date_to)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    try:
+        return list(
+            conn.execute(
+                f"SELECT * FROM profile_facts {where} ORDER BY entry_date DESC, id DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
 _PERIOD_KEY_FN = {"week": week_key, "month": month_key, "year": year_key}
 
 

@@ -30,6 +30,7 @@ from . import (
     ingester,
     insights,
     parser,
+    profile,
     prompts,
     query,
     review,
@@ -492,7 +493,7 @@ def _parse_only(value: str | None) -> tuple[str, ...]:
 _REASONS = {"missing": "not written yet", "stale": "out of date", "rebuild": "rewriting"}
 
 
-def _print_rollup_plan(plan: list[rollups.PlannedDigest]) -> None:
+def _print_rollup_plan(plan: list[rollups.PlannedDigest], scan_calls: int = 0) -> None:
     console.print("[dim]Dry run: nothing is written and no model is called.[/dim]")
     if not plan:
         console.print("Every digest is up to date.")
@@ -504,7 +505,8 @@ def _print_rollup_plan(plan: list[rollups.PlannedDigest]) -> None:
     for item in plan:
         table.add_row(item.kind, escape(item.label), _REASONS[item.reason])
     console.print(table)
-    console.print(f"{_count(len(plan), 'call')} to the precise model.")
+    reading = f", and {_count(scan_calls, 'call')} to the fast model to read entries for your profile" if scan_calls else ""
+    console.print(f"{_count(len(plan), 'call')} to the precise model{reading}.")
 
 
 @app.command()
@@ -521,20 +523,20 @@ def rollup(
     ] = None,
     only: Annotated[
         str | None,
-        typer.Option("--only", help="Comma list of month, year, note, week. Default all."),
+        typer.Option("--only", help="Comma list of profile, month, year, note, week. Default all."),
     ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="List what would be written, without Ollama.")
     ] = False,
 ) -> None:
-    """Write any missing or outdated digests: months, years, often-linked notes, weeks."""
+    """Write any missing or outdated digests: your profile, months, years, often-linked notes, weeks."""
     date_from, date_to = _parse_range(since, until)
     kinds = _parse_only(only)
     with _guard(), _open(config) as (cfg, conn):
         if dry_run:
-            _print_rollup_plan(
-                rollups.plan_rollups(cfg, conn, kinds, not rebuild_all, date_from, date_to)
-            )
+            plan = rollups.plan_rollups(cfg, conn, kinds, not rebuild_all, date_from, date_to)
+            reading = any(p.kind == "profile" for p in plan)
+            _print_rollup_plan(plan, profile.scan_calls(cfg, conn) if reading else 0)
             return
         counts = rollups.generate_rollups(
             cfg, conn, OllamaClient(cfg), kinds, not rebuild_all, date_from, date_to
@@ -542,6 +544,7 @@ def rollup(
     console.print(
         f"Generated {counts['week']} week, {counts['month']} month, "
         f"{counts['year']} year and {counts['note']} relationship rollups."
+        + (" Your profile was rewritten." if counts["profile"] else "")
     )
 
 
@@ -1228,6 +1231,110 @@ def lapsed(
     console.print(table)
 
 
+def _profile_progress() -> tuple[Callable[[int, int], None], Callable[[], None]]:
+    status = console.status("[dim]Reading entries for your profile...[/dim]", spinner="line")
+    status.start()
+
+    def advance(done: int, total: int) -> None:
+        status.update(f"[dim]Reading entries for your profile ({done}/{total} batches)...[/dim]")
+
+    return advance, status.stop
+
+
+@app.command(name="profile")
+def profile_cmd(
+    config: ConfigOpt = None,
+    facts: Annotated[
+        bool, typer.Option("--facts", help="List the facts it was built from, newest first.")
+    ] = False,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="How many facts.")] = 50,
+    update: Annotated[
+        bool,
+        typer.Option("--update", help="Read any entries not read yet and fold in what's new."),
+    ] = False,
+    rebuild: Annotated[
+        bool, typer.Option("--rebuild", help="Write it again from all the facts, oldest first.")
+    ] = False,
+    rescan: Annotated[
+        bool,
+        typer.Option("--rescan", help="Forget the facts, read every entry again, and rebuild."),
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """What your journal says about you: names, likes, habits and the like."""
+    OUT.as_json = as_json
+    with _guard(), _open(config) as (cfg, conn):
+        if not cfg.profile.enabled:
+            _fail("The profile is turned off ([profile] enabled = false in config.toml).", red=False)
+        if rescan:
+            store.forget_profile_scans(conn)
+        if update or rebuild or rescan:
+            client = OllamaClient(cfg)
+            with redirect_stdout(sys.stderr) if as_json else nullcontext():
+                profile.forget_gone_entries(conn)
+                pending = profile.pending_entries(conn)
+                if pending:
+                    advance, stop = _profile_progress()
+                    try:
+                        found = profile.scan(cfg, conn, client, pending, advance)
+                    finally:
+                        stop()
+                    console.print(
+                        f"Read {_count(len(pending), 'entry', 'entries')}, "
+                        f"found {_count(found, 'new fact')}."
+                    )
+                with _working("Writing your profile..."):
+                    rewritten = profile.update(cfg, conn, client, rebuild=rebuild or rescan)
+                if not rewritten:
+                    console.print("[dim]Nothing new to add.[/dim]")
+        found_profile = profile.current(conn)
+        counts = profile.summary_counts(conn)
+        fact_rows = profile.facts_json(conn, limit) if facts or as_json else []
+    if as_json:
+        _emit({
+            "profile": None if found_profile is None else {
+                "text": found_profile.text, "names": found_profile.names,
+                "updated_at": found_profile.updated_at,
+            },
+            "note": cfg.profile.note or None,
+            **counts,
+            "recent_facts": fact_rows,
+        })
+        return
+    if facts:
+        if not fact_rows:
+            console.print("No facts yet. 'journal profile --update' reads your entries for them.")
+            return
+        table = Table(title="What your entries say about you, newest first")
+        table.add_column("Date", no_wrap=True)
+        table.add_column("About")
+        table.add_column("Fact")
+        for f in fact_rows:
+            table.add_row(str(f["date"]), str(f["category"]), escape(str(f["fact"])))
+        console.print(table)
+        return
+    if found_profile is None:
+        console.print(
+            "No profile yet. 'journal profile --update' reads your entries and writes one "
+            f"({_count(counts['unread'], 'entry', 'entries')} to read)."
+        )
+        return
+    console.print(escape(found_profile.text))
+    if found_profile.names:
+        console.print(f"\n[bold]Names[/bold]  {escape(found_profile.names)}")
+    console.print(
+        f"\n[dim]Written {_when(found_profile.updated_at)} from {_count(counts['facts'], 'fact')}"
+        + (f", with your note {escape(cfg.profile.note)}" if cfg.profile.note else "") + ".[/dim]"
+    )
+    waiting = []
+    if counts["unread"]:
+        waiting.append(f"{_count(counts['unread'], 'entry', 'entries')} not read yet")
+    if counts["unfolded"]:
+        waiting.append(f"{_count(counts['unfolded'], 'new fact')} not added yet")
+    if waiting:
+        console.print(f"[dim]{', '.join(waiting)}: 'journal profile --update' catches up.[/dim]")
+
+
 @app.command()
 def streaks(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """Writing streaks and word counts."""
@@ -1497,7 +1604,9 @@ def _chat_loop(
         try:
             with _working("Resolving your follow-up..." if history else "Thinking...") as status:
                 stream = _Streamed(status)
-                standalone = query.contextualize_question(question, history, cfg, client)
+                standalone = query.contextualize_question(
+                    question, history, cfg, client, profile.names(conn, cfg)
+                )
                 result = query.answer(
                     standalone, cfg, conn, client, on_stage=_show_stage(status),
                     since=since, until=until, only=only, on_text=stream,

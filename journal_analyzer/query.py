@@ -17,7 +17,7 @@ from typing import Any
 
 from rich.console import Console
 
-from . import db, embedder, parser, store
+from . import db, embedder, parser, profile, store
 from .config import Config
 from .models import Answer, AnswerStage, QueryPlan
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
@@ -91,7 +91,9 @@ def contextualize_question(
     history: list[tuple[str, str]],
     config: Config,
     client: OllamaClient,
+    names: str = "",
 ) -> str:
+    """`names` is profile.names: who the writer and the people they mention are."""
     if not history:
         return question
     lines = []
@@ -102,7 +104,7 @@ def contextualize_question(
     rewritten = client.chat(
         model=config.ollama.fast_model,
         messages=[
-            {"role": "system", "content": _CONTEXTUALIZE_SYSTEM},
+            {"role": "system", "content": _CONTEXTUALIZE_SYSTEM + names},
             {
                 "role": "user",
                 "content": (
@@ -116,11 +118,13 @@ def contextualize_question(
     return rewritten or question
 
 
-def _plan(question: str, config: Config, client: OllamaClient, today: date) -> QueryPlan:
+def _plan(
+    question: str, config: Config, client: OllamaClient, today: date, names: str = ""
+) -> QueryPlan:
     return client.chat_structured(
         model=config.ollama.fast_model,
         messages=[
-            {"role": "system", "content": _ROUTER_SYSTEM.format(today=today.isoformat())},
+            {"role": "system", "content": _ROUTER_SYSTEM.format(today=today.isoformat()) + names},
             {"role": "user", "content": question},
         ],
         schema=QueryPlan,
@@ -328,6 +332,7 @@ def _answer_aggregate(
     named: list[int],
     only: store.EntryFilter | None = None,
     on_text: TextSink | None = None,
+    writer: str = "",
 ) -> Answer:
     mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
     tag_rows = store.top_tags(
@@ -365,7 +370,7 @@ def _answer_aggregate(
                 "content": (
                     "Answer the question about the asker's own journal using "
                     "ONLY the statistics provided. Do not invent numbers. Be "
-                    f"concise. {_READER_VOICE}"
+                    f"concise. {_READER_VOICE}{writer}"
                 ),
             },
             {"role": "user", "content": f"Question: {question}\n\nStatistics:\n{fact_block}"},
@@ -764,6 +769,7 @@ def _fast_attempt(
     config: Config,
     client: OllamaClient,
     on_text: TextSink | None = None,
+    writer: str = "",
 ) -> str | None:
     hold = _HoldUntilAnswer(on_text) if on_text else None
     response = _chat(
@@ -781,7 +787,7 @@ def _fast_attempt(
                     "about. Mention the dates or [[note names]] your answer "
                     f"draws on. {_READER_VOICE} If the material does not "
                     "contain enough information to answer confidently, reply "
-                    "with exactly the single word INSUFFICIENT."
+                    f"with exactly the single word INSUFFICIENT.{writer}"
                 ),
             },
             {"role": "user", "content": f"Question: {question}\n\n{context}"},
@@ -805,6 +811,7 @@ def _precise_reanalysis(
     digests: dict[int, str] | None = None,
     on_text: TextSink | None = None,
     conn: sqlite3.Connection | None = None,
+    writer: str = "",
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     note_blocks: list[str] = []
     used_notes: list[sqlite3.Row] = []
@@ -862,7 +869,7 @@ def _precise_reanalysis(
                     "comes from; folder and file names can say what it is "
                     "about. Base the answer strictly on this material; mention "
                     f"the dates or [[note names]] it draws on. {_READER_VOICE} "
-                    "If it does not answer the question, say so."
+                    f"If it does not answer the question, say so.{writer}"
                 ),
             },
             {
@@ -898,8 +905,9 @@ def answer(
     override whatever the router reads into the question. With `on_text`, the
     answer is handed over piece by piece as the model writes it."""
     today = today or date.today()
+    writer = profile.context(conn, config)
     on_stage("Working out what you're asking...")
-    plan = _plan(question, config, client, today)
+    plan = _plan(question, config, client, today, profile.names(conn, config))
     if since is not None or until is not None:
         plan = plan.model_copy(update={"date_from": since, "date_to": until})
     named = notes_named_in(question, conn)
@@ -908,7 +916,9 @@ def answer(
 
     if plan.intent == "aggregate":
         on_stage("Putting the numbers into words...")
-        return _answer_aggregate(question, plan, config, conn, client, named, only, on_text)
+        return _answer_aggregate(
+            question, plan, config, conn, client, named, only, on_text, writer
+        )
 
     on_stage("Searching entries and notes...")
     about = _named_notes(conn, plan, named)
@@ -932,7 +942,7 @@ def answer(
     if not plan.needs_raw_text:
         on_stage("Answering from summaries...")
         context = _summary_context(candidates, notes, plan, config, conn, about)
-        fast_answer = _fast_attempt(question, context, config, client, on_text)
+        fast_answer = _fast_attempt(question, context, config, client, on_text, writer)
         if fast_answer is not None:
             return _finalize(
                 fast_answer,
@@ -949,6 +959,7 @@ def answer(
         digests=_relationship_digests(conn, config, about),
         on_text=on_text,
         conn=conn,
+        writer=writer,
     )
     return _finalize(
         text,

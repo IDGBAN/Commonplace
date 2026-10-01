@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -23,7 +24,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from . import context, store
+from . import context, profile, store
 from .config import Config
 from .ollama_client import OllamaClient
 
@@ -175,7 +176,7 @@ def _write_period(
     summary = client.chat(
         model=config.ollama.precise_model,
         messages=[
-            {"role": "system", "content": _WEEK_MONTH_PROMPT},
+            {"role": "system", "content": _WEEK_MONTH_PROMPT + profile.context(conn, config)},
             {"role": "user", "content": text},
         ],
     ).strip()
@@ -217,7 +218,7 @@ def _write_year(
     summary = client.chat(
         model=config.ollama.precise_model,
         messages=[
-            {"role": "system", "content": _YEAR_PROMPT},
+            {"role": "system", "content": _YEAR_PROMPT + profile.context(conn, config)},
             {"role": "user", "content": text},
         ],
     ).strip()
@@ -294,7 +295,7 @@ def _write_note_digest(
     summary = client.chat(
         model=config.ollama.precise_model,
         messages=[
-            {"role": "system", "content": _NOTE_PROMPT},
+            {"role": "system", "content": _NOTE_PROMPT + profile.context(conn, config)},
             {"role": "user", "content": text},
         ],
     ).strip()
@@ -302,10 +303,11 @@ def _write_note_digest(
     return True
 
 
-# Weeks go last. Most answers read months and years (weeks only cover spans
-# of a few weeks), and a run can take hours, so if it gets stopped those
-# should already be done. Years need their months written first.
-ORDER = ("month", "year", "note", "week")
+# The profile goes first because every digest is written with it. Weeks go
+# last: most answers read months and years (weeks only cover spans of a few
+# weeks), and a run can take hours, so if it gets stopped those should
+# already be done. Years need their months written first.
+ORDER = ("profile", "month", "year", "note", "week")
 Reason = Literal["missing", "stale", "rebuild"]
 
 
@@ -330,6 +332,33 @@ def _overlaps(kind: str, key: str, since: date | None, until: date | None) -> bo
     return (until is None or start <= until) and (since is None or end >= since)
 
 
+def _plan_profile(
+    config: Config, conn: sqlite3.Connection, only_stale: bool
+) -> PlannedDigest | None:
+    if not config.profile.enabled:
+        return None
+    unread = len(profile.pending_entries(conn))
+    has_facts = store.profile_fact_count(conn) > 0
+    if not unread and not profile.needs_update(conn, config) and (only_stale or not has_facts):
+        return None
+    label = f"you ({unread} entries to read)" if unread else "you"
+    if profile.current(conn) is None:
+        return PlannedDigest("profile", "profile", label, "missing")
+    return PlannedDigest("profile", "profile", label, "stale" if only_stale else "rebuild")
+
+
+def _write_profile(
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    rebuild: bool,
+    on_progress: Callable[[int, int], None],
+) -> bool:
+    profile.forget_gone_entries(conn)
+    profile.scan(config, conn, client, profile.pending_entries(conn), on_progress)
+    return profile.update(config, conn, client, rebuild=rebuild)
+
+
 def plan_rollups(
     config: Config,
     conn: sqlite3.Connection,
@@ -347,6 +376,11 @@ def plan_rollups(
     planned: list[PlannedDigest] = []
     for kind in ORDER:
         if kind not in period_types:
+            continue
+        if kind == "profile":
+            item = _plan_profile(config, conn, only_stale)
+            if item is not None:
+                planned.append(item)
             continue
         if kind == "note":
             minimum = config.rollups.note_min_mentions
@@ -397,7 +431,15 @@ def generate_rollups(
         task = progress.add_task("Writing digests", total=len(plan))
         for item in plan:
             progress.update(task, description=f"Writing the {item.kind} {escape(item.label)} digest")
-            if item.kind == "note":
+            if item.kind == "profile":
+
+                def reading(done: int, total: int) -> None:
+                    progress.update(
+                        task, description=f"Reading entries for your profile ({done}/{total})"
+                    )
+
+                written = _write_profile(config, conn, client, not only_stale, reading)
+            elif item.kind == "note":
                 written = _write_note_digest(item.key, config, conn, client)
             elif item.kind == "year":
                 written = _write_year(item.key, config, conn, client, groups["month"])

@@ -6,6 +6,7 @@ from conftest import invoke_cli, make_config
 from journal_analyzer import db as db_mod
 from journal_analyzer import fields, ingester, parser, store
 from journal_analyzer.models import DateParseError
+from journal_analyzer.profile import ScannedFacts
 
 
 def _flat(output: str) -> str:
@@ -108,9 +109,17 @@ def test_private_files_never_reach_a_model(tmp_path, fake_client):
     secret = _write(cfg, "2024-01-01.md", "Something only I should know. #private")
     _write(cfg, "Links/People/Ex.md", "---\nprivate: true\n---\n" + "Long story. " * 50)
     _write(cfg, "2024-01-02.md", "An ordinary day.")
+    scanned = []
+
+    def scan(model, messages):
+        scanned.append(messages[-1]["content"])
+        return ScannedFacts()
+
+    fake_client.structured["ScannedFacts"] = scan
     conn, counts = _indexed(cfg, fake_client)
     assert counts["private"] == 2 and counts["indexed"] == 1
-    assert len(fake_client.structured_calls) == 1
+    assert [name for _, name in fake_client.structured_calls].count("Extraction") == 1
+    assert scanned and all("only I should know" not in text for text in scanned)
     assert all("only I should know" not in t for t in fake_client.embed_calls)
     assert _status(conn, secret) == "private"
     assert store.stats(conn).private_files == 2

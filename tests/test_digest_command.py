@@ -58,7 +58,7 @@ def test_generate_writes_only_the_planned_periods(conn, config, fake_client):
     counts = rollups.generate_rollups(
         config, conn, fake_client, ("month",), True, date(2024, 3, 1), date(2024, 3, 31)
     )
-    assert counts == {"month": 1, "year": 0, "note": 0, "week": 0}
+    assert counts == {"profile": 0, "month": 1, "year": 0, "note": 0, "week": 0}
     assert [r["period_key"] for r in store.all_rollups(conn)] == ["2024-03"]
 
 

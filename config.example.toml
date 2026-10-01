@@ -80,6 +80,15 @@ known_in_prompt = 40              # most used tags shown to the model when it ta
 keys = []
 ignore = []
 
+[profile]
+# A short profile of you, kept from your entries and given to answers, digests,
+# insights and writing prompts (never to the step that reads single entries).
+enabled = true
+note = ""                         # a note about yourself, from the vault root, e.g. "Links/People/Me.md"
+scan_batch_entries = 8            # entries read per call when looking for facts about you
+max_words = 350                   # how long the profile may get
+watch_update_minutes = 30         # `journal watch` rewrites it at most this often
+
 [notes]
 # Folders (or single files) of undated notes about people, places, topics and
 # so on. An entry that [[links]] to one counts as mentioning it, and answers

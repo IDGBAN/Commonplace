@@ -19,9 +19,9 @@ from rich.progress import Progress
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import context, db, embedder, extractor, fields, parser, store
+from . import context, db, embedder, extractor, fields, parser, profile, store
 from .config import Config
-from .models import ConfigError, OllamaUnavailableError, ParsedEntry
+from .models import ConfigError, JournalError, OllamaUnavailableError, ParsedEntry
 from .ollama_client import OllamaClient
 
 console = Console()
@@ -354,12 +354,15 @@ def run_backfill(
     }
     _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
+    indexed: list[str] = []
     with Progress(console=console) as progress:
         task = progress.add_task("Indexing", total=len(files))
         for path in files:
             progress.update(task, description=f"Indexing {escape(path.name)}")
             result = process_file(path, config, conn, client, force=force)
             counts[result] += 1
+            if result == "indexed":
+                indexed.append(str(path))
             progress.advance(task)
     dropped = f", {counts['dropped']} dropped" if counts["dropped"] else ""
     private = f", {counts['private']} private" if counts["private"] else ""
@@ -367,7 +370,50 @@ def run_backfill(
         f"Done: {counts['indexed']} indexed, {counts['skipped']} skipped, "
         f"{counts['error']} errored{private}{dropped}."
     )
+    if _read_for_profile(config, conn, client, indexed):
+        _update_profile(config, conn, client)
     return counts
+
+
+def _read_for_profile(
+    config: Config, conn: sqlite3.Connection, client: OllamaClient, paths: list[str]
+) -> int:
+    """Reads the new entries in these files for the profile. Returns facts found.
+
+    A failure here leaves the entries indexed; they're read on a later run.
+    """
+    if not config.profile.enabled or not paths:
+        return 0
+    wanted = set(paths)
+    rows = [r for r in profile.pending_entries(conn) if r["file_path"] in wanted]
+    if not rows:
+        return 0
+    try:
+        with Progress(console=console, transient=True) as progress:
+            task = progress.add_task("Reading new entries for your profile", total=None)
+
+            def advance(done: int, total: int) -> None:
+                progress.update(task, total=total, completed=done)
+
+            found = profile.scan(config, conn, client, rows, advance)
+    except JournalError as exc:
+        console.print(f"[yellow]Couldn't read entries for your profile: {escape(str(exc))}[/yellow]")
+        return 0
+    if found:
+        console.print(f"Found {found} new {'thing' if found == 1 else 'things'} about you.")
+    return found
+
+
+def _update_profile(config: Config, conn: sqlite3.Connection, client: OllamaClient) -> bool:
+    try:
+        with console.status("[dim]Updating your profile...[/dim]", spinner="line"):
+            rewritten = profile.update(config, conn, client)
+    except JournalError as exc:
+        console.print(f"[yellow]Couldn't update your profile: {escape(str(exc))}[/yellow]")
+        return False
+    if rewritten:
+        console.print("Your profile is up to date ('journal profile' shows it).")
+    return rewritten
 
 
 def _private_now(path: Path, config: Config, stored_entries: int) -> bool | None:
@@ -544,14 +590,27 @@ def run_watch(
     console.print(
         f"Watching {config.vault.path} (debounce {debounce:g}s). Ctrl-C to stop."
     )
+    # new facts wait until the queue is empty, and the profile is rewritten at
+    # most every watch_update_minutes, since each rewrite is a precise-model call
+    facts_waiting = profile.needs_update(conn, config)
+    last_rewrite = float("-inf")
     try:
         while True:
             time.sleep(WATCH_POLL_SECONDS)
-            outage = _apply_due(handler, config, conn, client)
+            indexed: list[str] = []
+            outage = _apply_due(handler, config, conn, client, indexed)
             if outage is not None:
                 console.print(
                     f"[yellow]{escape(str(outage))}[/yellow]\n"
                     f"Changed files stay queued; retrying in {debounce:g}s."
+                )
+            if _read_for_profile(config, conn, client, indexed):
+                facts_waiting = True
+            gap = config.profile.watch_update_minutes * 60
+            if facts_waiting and not handler.pending and time.monotonic() - last_rewrite >= gap:
+                last_rewrite = time.monotonic()
+                facts_waiting = not _update_profile(config, conn, client) and profile.needs_update(
+                    conn, config
                 )
     except KeyboardInterrupt:
         pass
@@ -565,11 +624,14 @@ def _apply_due(
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
+    indexed: list[str] | None = None,
 ) -> OllamaUnavailableError | None:
+    """`indexed` collects the files that were indexed, when given."""
     due = handler.take_due(config.indexing.watch_debounce_seconds)
     for i, (path, kind) in enumerate(due):
         try:
-            _apply_event(path, kind, config, conn, client)
+            if _apply_event(path, kind, config, conn, client) == "indexed" and indexed is not None:
+                indexed.append(path)
         except OllamaUnavailableError as exc:
             # requeue the rest so restarting Ollama doesn't end the watch
             for queued_path, queued_kind in due[i:]:
@@ -584,18 +646,19 @@ def _apply_event(
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
-) -> None:
+) -> FileResult | None:
     if kind == "delete" or not Path(path).exists():
         # whole vault gone, probably an unplugged drive
         if not config.vault.path.is_dir():
-            return
+            return None
         # could be a folder, so drop anything under it that's really gone
         root = PurePath(path)
         for key in store.tracked_paths(conn):
             if PurePath(key).is_relative_to(root) and not Path(key).exists():
                 _forget_file(conn, key)
                 console.print(f"[yellow]removed[/yellow] {escape(key)}")
-        return
+        return None
     result = process_file(Path(path), config, conn, client)
     style = _RESULT_STYLE[result]
     console.print(f"[{style}]{result}[/{style}] {escape(path)}")
+    return result

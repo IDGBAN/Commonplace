@@ -498,3 +498,15 @@ def test_notes_page_lists_notes_that_went_quiet(browser, journal):
     data = browser.get("/api/notes")
     assert [(n["title"], n["n"], n["last"]) for n in data["gone_quiet"]] == [("Jun Park", 5, "2022-01-05")]
     assert data["gone_quiet_rule"] == {"min": 5, "months": 6}
+
+
+def test_the_you_page_shows_the_profile_and_its_facts(browser, journal):
+    empty = browser.get("/api/profile")
+    assert empty["profile"] is None and empty["enabled"] is True and empty["unread"] == 2
+    db.set_meta(journal, "profile_text", "I like hills.")
+    db.set_meta(journal, "profile_names", "Al")
+    store.save_profile_scan(journal, ["h"], [("h", "2024-01-15", "hobbies", "I hike.")])
+    data = browser.get("/api/profile")
+    assert data["profile"]["text"] == "I like hills." and data["facts_count"] == 1
+    assert data["facts"] == [{"date": "2024-01-15", "category": "hobbies", "fact": "I hike.",
+                              "folded": False, "entry_id": entry_id(journal, "2024-01-15")}]

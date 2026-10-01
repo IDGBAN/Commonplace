@@ -6,7 +6,7 @@ import re
 import sqlite3
 from datetime import date, timedelta
 
-from . import context, store
+from . import context, profile, store
 from .config import Config
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
 
@@ -74,7 +74,7 @@ def generate_prompts(
     text = client.chat(
         model=config.ollama.precise_model,
         messages=[
-            {"role": "system", "content": _SYSTEM.format(count=count)},
+            {"role": "system", "content": _SYSTEM.format(count=count) + profile.context(conn, config)},
             {
                 "role": "user",
                 "content": (
