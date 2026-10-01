@@ -4,6 +4,7 @@ import hashlib
 import re
 from datetime import date, datetime
 from pathlib import Path, PurePath, PurePosixPath
+from urllib.parse import quote
 
 from .config import Config
 from .models import DateParseError, FrontmatterValue, ParsedEntry, ParsedNote
@@ -49,6 +50,10 @@ def relative_path(path: Path | str, vault: Path) -> str:
         return pure.relative_to(vault).as_posix()
     except ValueError:
         return pure.name  # outside the vault
+
+
+def obsidian_url(path: Path | str) -> str:
+    return "obsidian://open?path=" + quote(str(path), safe="")
 
 
 def _unquote(value: str) -> str:

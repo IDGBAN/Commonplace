@@ -3,7 +3,7 @@ from datetime import date
 from conftest import add_entry, add_note, copy_fixtures, copy_note_fixtures, make_config
 
 from journal_analyzer import db as db_mod
-from journal_analyzer import ingester, query
+from journal_analyzer import ingester, query, store
 from journal_analyzer.models import QueryPlan
 
 TODAY = date(2024, 6, 1)
@@ -297,3 +297,37 @@ def test_note_names_in_questions_match_whole_words_longest_first(conn):
     assert query.notes_named_in("Did John Doe go to work?", conn) == [john_doe, work]
     assert query.notes_named_in("A trip to Johnstown", conn) == []
     assert set(query.notes_named_in("Just John today", conn)) == {john_doe, john_topic}
+
+
+def test_answers_record_what_the_model_read(tmp_path, fake_client):
+    cfg, conn = _indexed(tmp_path, fake_client, with_notes=True)
+    fake_client.chat_response = "You went hiking with John on 2024-01-15."
+    result = query.answer("When did I go hiking with John?", cfg, conn, fake_client, today=TODAY)
+    assert result.stage_used == "fast_summary"
+    read_dates = {r["entry_date"] for r in store.entries_by_ids(conn, result.read_entry_ids)}
+    assert "2024-01-15" in read_dates
+    titles = {r["title"] for r in store.notes_by_ids(conn, result.read_note_ids)}
+    assert "John Doe" in titles
+    assert result.body == "You went hiking with John on 2024-01-15."
+    assert result.text.startswith(result.body) and "Sources:" in result.text
+
+
+def test_precise_answers_record_only_what_fit(tmp_path, fake_client):
+    cfg, conn = _indexed(tmp_path, fake_client)
+    fake_client.chat_response = lambda model, messages: (
+        "INSUFFICIENT" if model == cfg.ollama.fast_model else "From the full text."
+    )
+    result = query.answer("When did I go hiking with John?", cfg, conn, fake_client, today=TODAY)
+    assert result.stage_used == "precise_raw"
+    read = store.entries_by_ids(conn, result.read_entry_ids)
+    assert sorted(date.fromisoformat(r["entry_date"]) for r in read) == result.cited_dates
+
+
+def test_aggregate_answers_read_no_entry_text(tmp_path, fake_client):
+    cfg, conn = _indexed(tmp_path, fake_client)
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="aggregate")
+    fake_client.chat_response = "Your mood averaged 7."
+    result = query.answer("How has my mood been?", cfg, conn, fake_client, today=TODAY)
+    assert result.stage_used == "aggregate"
+    assert result.read_entry_ids == []
+    assert result.body == "Your mood averaged 7."

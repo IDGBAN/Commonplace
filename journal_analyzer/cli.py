@@ -14,7 +14,9 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.status import Status
+from rich.style import Style
 from rich.table import Table
+from rich.text import Text
 
 from . import (
     browse,
@@ -24,13 +26,14 @@ from . import (
     fields,
     ingester,
     insights,
+    parser,
     prompts,
     query,
     rollups,
     store,
 )
 from .config import Config, load_config
-from .models import JournalError, OllamaUnavailableError
+from .models import Answer, JournalError, OllamaUnavailableError
 from .ollama_client import OllamaClient, same_model
 
 app = typer.Typer(help="Ask questions about an Obsidian journal using local Ollama models.")
@@ -115,9 +118,11 @@ def _mood_str(mood: object) -> str:
     return f"{mood:g}" if mood is not None else "-"
 
 
-def _entry_table(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> Table:
+def _entry_table(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row], title: str | None = None
+) -> Table:
     tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in rows])
-    table = Table(show_lines=False)
+    table = Table(show_lines=False, title=title)
     table.add_column("Date", style="cyan", no_wrap=True)
     table.add_column("Mood", justify="right")
     table.add_column("Tags")
@@ -196,18 +201,60 @@ def watch(config: ConfigOpt = None) -> None:
         ingester.run_watch(cfg, conn)
 
 
+def _source_link(label: str, path: str | None) -> Text:
+    return Text(label, style=Style(link=parser.obsidian_url(path)) if path else "")
+
+
+def _print_answer(conn: sqlite3.Connection, answer: Answer, stage_label: str) -> None:
+    console.print(escape(answer.body))
+    links: list[Text] = []
+    for day in answer.cited_dates:
+        rows = store.entries_in_range(conn, day, day)
+        links.append(_source_link(f"[[{day.isoformat()}]]", rows[0]["file_path"] if rows else None))
+    for title in answer.cited_notes:
+        notes = store.find_notes(conn, title)
+        links.append(_source_link(f"[[{title}]]", notes[0]["file_path"] if notes else None))
+    if links:
+        console.print()
+        console.print(Text(" ").join([Text("Sources:"), *links]))
+    console.print(f"[dim]({stage_label}: {answer.stage_used})[/dim]")
+
+
+def _print_reading(conn: sqlite3.Connection, answer: Answer) -> None:
+    entries = store.entries_by_ids(conn, answer.read_entry_ids)
+    notes = store.notes_by_ids(conn, answer.read_note_ids)
+    console.print()
+    if answer.stage_used == "aggregate":
+        console.print(
+            "Worked from statistics over your entries (mood by month, tags and how "
+            "often notes are linked), not from their text."
+        )
+    elif not entries and not notes:
+        console.print("Nothing matched, so the model read nothing.")
+    if entries:
+        console.print(_entry_table(conn, entries, title="Entries it read"))
+    if notes:
+        console.print(_note_table(conn, notes, title="Notes it read"))
+
+
 @app.command()
 def ask(
     question: Annotated[str, typer.Argument(help="The question, in plain words.")],
     config: ConfigOpt = None,
+    sources: Annotated[
+        bool,
+        typer.Option("--sources", help="Also list the entries and notes the answer was built from."),
+    ] = False,
 ) -> None:
     """Ask a question about your journal."""
-    with _guard(), _open(config) as (cfg, conn), _working("Thinking...") as status:
-        result = query.answer(
-            question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status)
-        )
-    console.print(escape(result.text))
-    console.print(f"[dim](answered by stage: {result.stage_used})[/dim]")
+    with _guard(), _open(config) as (cfg, conn):
+        with _working("Thinking...") as status:
+            result = query.answer(
+                question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status)
+            )
+        _print_answer(conn, result, "answered by stage")
+        if sources:
+            _print_reading(conn, result)
 
 
 @app.command()
@@ -636,10 +683,11 @@ def chat(config: ConfigOpt = None) -> None:
 
 def _chat_loop(cfg: Config, conn: sqlite3.Connection, client: OllamaClient) -> None:
     console.print(
-        "Follow-ups like 'what about the month after that?' work. "
-        "Type 'exit' or Ctrl-D to quit."
+        "Follow-ups like 'what about the month after that?' work. Type 'sources' to "
+        "see what the last answer read, and 'exit' or Ctrl-D to quit."
     )
     history: list[tuple[str, str]] = []
+    last: Answer | None = None
     while True:
         try:
             raw = console.input("[bold cyan]you>[/bold cyan] ")
@@ -651,6 +699,12 @@ def _chat_loop(cfg: Config, conn: sqlite3.Connection, client: OllamaClient) -> N
             continue
         if question.lower() in {"exit", "quit", ":q"}:
             break
+        if question.lower() in {"sources", ":sources"}:
+            if last is None:
+                console.print("Ask something first, then 'sources' lists what the answer read.")
+            else:
+                _print_reading(conn, last)
+            continue
         try:
             with _working("Resolving your follow-up..." if history else "Thinking...") as status:
                 standalone = query.contextualize_question(question, history, cfg, client)
@@ -664,8 +718,8 @@ def _chat_loop(cfg: Config, conn: sqlite3.Connection, client: OllamaClient) -> N
             # Ctrl-C drops this answer but keeps the chat
             console.print("[dim](cancelled)[/dim]")
             continue
-        console.print(escape(result.text))
-        console.print(f"[dim](stage: {result.stage_used})[/dim]")
+        _print_answer(conn, result, "stage")
+        last = result
         # keep the rewritten question so the next follow-up can build on it
         history.append((standalone, result.text))
         del history[: -query.CHAT_HISTORY_TURNS]

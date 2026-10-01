@@ -73,6 +73,7 @@ journal stats             # entries, notes, links, date range, DB size, errored 
 
 # questions
 journal ask "When did I go hiking with John?"
+journal ask "When did I go hiking with John?" --sources   # and what it read
 journal ask "Who is John, and when did I last see him?"
 journal ask "How did my mood change over spring?"     # answered from SQL
 
@@ -92,6 +93,8 @@ journal prompt            # ideas for what to write next, from threads left open
 Each digest is one call to the precise model, so on a CPU a full `journal rollup` can take hours. Month and year digests are written first because those are what answers use, so if you stop a run partway they're already there.
 
 `journal ask` shows which step it's on while it works. At the end it says which stage produced the answer: `aggregate` (plain SQL), `fast_summary` (the fast model reading stored summaries and notes) or `precise_raw` (the precise model re-reading the full text of the cited entries and notes).
+
+To check an answer, add `--sources`: it lists the entries (date, mood, tags, summary) and notes the model was given. In `journal chat`, type `sources` after an answer. The `Sources:` line links each day and note to its file, so in a terminal that supports links (Windows Terminal, iTerm2 and most Linux terminals) clicking one opens it in Obsidian.
 
 ### Browsing commands
 

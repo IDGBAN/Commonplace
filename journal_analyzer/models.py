@@ -73,10 +73,20 @@ class QueryPlan(BaseModel):
 
 
 class Answer(BaseModel):
-    text: str
+    text: str  # with the Sources line
     cited_dates: list[date] = Field(default_factory=list)
     cited_notes: list[str] = Field(default_factory=list)
     stage_used: AnswerStage
+    body: str = ""  # without it
+    # what the model was given, best first
+    read_entry_ids: list[int] = Field(default_factory=list)
+    read_note_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _body_defaults_to_text(self) -> Answer:
+        if not self.body:
+            self.body = self.text
+        return self
 
 
 class JournalError(Exception):

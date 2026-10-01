@@ -245,21 +245,32 @@ def _finalize(
     stage: AnswerStage,
     cited_dates: Iterable[date] = (),
     cited_notes: Iterable[str] = (),
+    read_entries: Iterable[int] = (),
+    read_notes: Iterable[int] = (),
 ) -> Answer:
     dates = sorted(set(cited_dates))
     notes = sorted(set(cited_notes), key=str.casefold)
+    body = text.rstrip()
     links = [f"[[{d.isoformat()}]]" for d in dates] + [f"[[{n}]]" for n in notes]
     if links:
-        text = f"{text.rstrip()}\n\nSources: {' '.join(links)}"
-    return Answer(text=text, cited_dates=dates, cited_notes=notes, stage_used=stage)
+        text = f"{body}\n\nSources: {' '.join(links)}"
+    return Answer(
+        text=text,
+        body=body,
+        cited_dates=dates,
+        cited_notes=notes,
+        stage_used=stage,
+        read_entry_ids=list(dict.fromkeys(read_entries)),
+        read_note_ids=list(dict.fromkeys(read_notes)),
+    )
 
 
 def _mention_facts(
     conn: sqlite3.Connection, plan: QueryPlan, named: list[int]
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[int]]:
     note_ids = _named_notes(conn, plan, named)[:MAX_CONTEXT_NOTES]
     if not note_ids:
-        return [], []
+        return [], [], []
     stats = store.mention_stats(conn, note_ids, plan.date_from, plan.date_to)
     facts: list[str] = []
     titles: list[str] = []
@@ -276,7 +287,7 @@ def _mention_facts(
             f"[[{title}]] ({kind}): linked from {mentions.count} entries, first "
             f"{mentions.first}, last {mentions.last}; by year {by_year}."
         )
-    return facts, titles
+    return facts, titles, note_ids
 
 
 def _answer_aggregate(
@@ -301,7 +312,7 @@ def _answer_aggregate(
         facts.append(f"- {r['month']}: mood {mood}, {r['entry_count']} entries")
     if tag_rows:
         facts.append("Top tags: " + ", ".join(f"{r['name']} ({r['n']})" for r in tag_rows))
-    note_facts, cited_notes = _mention_facts(conn, plan, named)
+    note_facts, cited_notes, note_ids = _mention_facts(conn, plan, named)
     facts.extend(note_facts)
     facts.append(f"Data covers {lo} to {hi}.")
     fact_block = "\n".join(facts)
@@ -322,7 +333,9 @@ def _answer_aggregate(
         options={"temperature": SYNTHESIS_TEMPERATURE},
     ).strip()
     cited = [date.fromisoformat(d) for d in (lo, hi) if d]
-    return _finalize(text, "aggregate", cited_dates=cited, cited_notes=cited_notes)
+    return _finalize(
+        text, "aggregate", cited_dates=cited, cited_notes=cited_notes, read_notes=note_ids
+    )
 
 
 def _rrf_merge(
@@ -648,7 +661,7 @@ def _precise_reanalysis(
     notes: list[sqlite3.Row],
     config: Config,
     client: OllamaClient,
-) -> tuple[str, list[date], list[sqlite3.Row]]:
+) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     note_blocks: list[str] = []
     used_notes: list[sqlite3.Row] = []
     note_chars = 0
@@ -709,7 +722,7 @@ def _precise_reanalysis(
         ],
         options={"temperature": SYNTHESIS_TEMPERATURE},
     ).strip() + omitted
-    return text, [date.fromisoformat(row["entry_date"]) for row, _ in used], used_notes
+    return text, [row for row, _ in used], used_notes
 
 
 def _no_progress(_stage: str) -> None:
@@ -760,15 +773,17 @@ def answer(
                 "fast_summary",
                 cited_dates=[date.fromisoformat(r["entry_date"]) for r in candidates],
                 cited_notes=_notes_used(fast_answer, notes, about),
+                read_entries=[r["id"] for r in candidates],
+                read_notes=[r["id"] for r in notes],
             )
 
     on_stage("Re-reading the full entries...")
-    text, cited_dates, used_notes = _precise_reanalysis(
-        question, candidates, notes, config, client
-    )
+    text, used, used_notes = _precise_reanalysis(question, candidates, notes, config, client)
     return _finalize(
         text,
         "precise_raw",
-        cited_dates=cited_dates,
+        cited_dates=[date.fromisoformat(r["entry_date"]) for r in used],
         cited_notes=_notes_used(text, used_notes, about),
+        read_entries=[r["id"] for r in used],
+        read_notes=[r["id"] for r in used_notes],
     )

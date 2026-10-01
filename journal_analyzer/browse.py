@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import db, fields, parser, query, store
 from .config import Config
@@ -109,10 +109,6 @@ def _row_id(digits: str, missing: str) -> int:
 
 def _vault_path(req: Request, path: str) -> str:
     return relative_path(path, req.config.vault.path)
-
-
-def _obsidian_url(path: str) -> str:
-    return "obsidian://open?path=" + quote(path, safe="")
 
 
 def _entry_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json]:
@@ -313,7 +309,7 @@ def entry(req: Request, entry_id: str) -> Json:
         "raw_text": row["raw_text"],
         "path": row["file_path"],
         "vault_path": _vault_path(req, row["file_path"]),
-        "obsidian_url": _obsidian_url(row["file_path"]),
+        "obsidian_url": parser.obsidian_url(row["file_path"]),
         "file": {
             "status": file["status"], "last_indexed": file["last_indexed"],
             "error": file["error_message"],
@@ -378,7 +374,7 @@ def note(req: Request, note_id: str) -> Json:
         "words": row["word_count"],
         "path": row["file_path"],
         "vault_path": parsed.rel_path,
-        "obsidian_url": _obsidian_url(row["file_path"]),
+        "obsidian_url": parser.obsidian_url(row["file_path"]),
         "embedded": _has_vector(conn, "notes_vec", "note_id", row["id"]),
         "mentions": asdict(mentions) if mentions else None,
         "by_year": [dict(r) for r in store.mentions_by_year(conn, row["id"])],

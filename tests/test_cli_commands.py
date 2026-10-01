@@ -163,3 +163,40 @@ def test_chat_follow_ups_build_on_the_rewritten_questions(
     assert len(transcripts) == 2
     assert "User: How was April 2024?" in transcripts[-1]
     assert "User: and April?" not in transcripts[-1]
+
+
+def test_ask_lists_what_the_answer_read(tmp_path, config, conn, fake_client, monkeypatch):
+    add_entry(conn, date(2024, 1, 15), summary="Hiked with John", path="/vault/2024-01-15.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "You hiked with John."
+    monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
+    result = invoke_cli(tmp_path, config, "ask", "When did I hike?", "--sources")
+    assert result.exit_code == 0, result.output
+    output = _flat(result.output)
+    assert "You hiked with John." in output
+    assert "Sources: [[2024-01-15]]" in output
+    assert "Entries it read" in output and "Hiked with John" in output
+
+    plain = _flat(invoke_cli(tmp_path, config, "ask", "When did I hike?").output)
+    assert "Entries it read" not in plain
+
+
+def test_chat_shows_the_last_answers_sources_on_request(
+    tmp_path, config, conn, fake_client, monkeypatch
+):
+    add_entry(conn, date(2024, 1, 15), summary="Hiked with John", path="/vault/2024-01-15.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "You hiked."
+    monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
+    result = invoke_cli(tmp_path, config, "chat", input="sources\nWhen?\nsources\nexit\n")
+    assert result.exit_code == 0, result.output
+    output = _flat(result.output)
+    assert "Ask something first" in output
+    assert "Entries it read" in output
+
+
+def test_sources_link_to_the_file_in_obsidian():
+    link = cli._source_link("[[2024-01-15]]", "C:/vault/2024-01-15.md")
+    assert link.plain == "[[2024-01-15]]"
+    assert link.style.link == "obsidian://open?path=C%3A%2Fvault%2F2024-01-15.md"
+    assert cli._source_link("[[Gone]]", None).style == ""
