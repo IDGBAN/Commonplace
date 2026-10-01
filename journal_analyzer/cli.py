@@ -32,6 +32,7 @@ from . import (
     query,
     rollups,
     store,
+    unlinked,
 )
 from .config import Config, load_config
 from .models import Answer, JournalError, OllamaUnavailableError
@@ -645,6 +646,66 @@ def _print_similar_tags(pairs: list[tuple[str, int, str, int]]) -> None:
 
 def _toml_key(name: str) -> str:
     return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else f'"{name}"'
+
+
+@app.command(name="unlinked")
+def unlinked_cmd(
+    name: Annotated[
+        str | None,
+        typer.Argument(help="A note's title or alias. Leave out to list every note with some."),
+    ] = None,
+    config: ConfigOpt = None,
+    type_: Annotated[
+        str | None,
+        typer.Option("--type", help="Only notes of this kind, meaning their folder (e.g. people)."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="How many rows.")] = 20,
+) -> None:
+    """Entries that name a note without linking it, so its numbers miss them."""
+    with _guard(), _open(config) as (_, conn):
+        if name is None:
+            with _working("Reading entries for names..."):
+                found = unlinked.by_note(conn, type_)
+            if not found:
+                console.print("Every entry that names a note also links it.")
+                return
+            table = Table(title="Notes named without a link")
+            table.add_column("Note", style="cyan")
+            table.add_column("Kind")
+            table.add_column("Entries", justify="right")
+            table.add_column("Latest", no_wrap=True)
+            for row in found[:limit]:
+                table.add_row(escape(row.title), escape(row.kind), str(row.count), row.latest)
+            console.print(table)
+            console.print(
+                f"[dim]{len(found)} notes in all. 'journal unlinked NAME' lists one note's entries.[/dim]"
+            )
+            return
+        matches = store.find_notes(conn, name)
+        if not matches:
+            console.print(f"No reference note called '{escape(name)}'.")
+            raise typer.Exit(1)
+        if len(matches) > 1:
+            console.print(f"'{escape(name)}' matches {len(matches)} notes; use a full title:")
+            console.print(_note_table(conn, matches))
+            raise typer.Exit(1)
+        note = matches[0]
+        found_entries = unlinked.for_note(conn, note["id"])
+        if not found_entries:
+            console.print(f"Every entry that names {escape(note['title'])} also links it.")
+            return
+        paths = {r["id"]: r["file_path"] for r in store.entries_by_ids(
+            conn, [m.entry_id for m in found_entries[:limit]])}
+        table = Table(title=f"Entries that name {escape(note['title'])} without linking it")
+        table.add_column("Date", no_wrap=True)
+        table.add_column("Named as", style="cyan")
+        table.add_column("Where")
+        for m in found_entries[:limit]:
+            table.add_row(_source_link(m.entry_date, paths.get(m.entry_id)), escape(m.name), escape(m.snippet))
+        console.print(table)
+        if len(found_entries) > limit:
+            console.print(f"[dim]{len(found_entries) - limit} more; raise --limit to see them.[/dim]")
+        console.print(f"[dim]Link them as [[{escape(note['title'])}]] in Obsidian and they count from the next index.[/dim]")
 
 
 @app.command()

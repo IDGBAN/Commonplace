@@ -115,6 +115,8 @@ journal note "John Doe"               # a reference note and the entries that li
 journal tags --limit 30                  # most used tags
 journal tags --similar                   # tags that look like the same thing, as a merge table
 journal entities --type people           # most-linked notes, optionally of one kind
+journal unlinked                         # notes your entries name without linking
+journal unlinked "John Doe"              # the entries that name John without a link
 journal mood --since 2023-01-01          # average mood per month, with a bar chart
 journal mood --about "John Doe"          # only the days you linked John
 journal streaks                          # days written, words, longest run
@@ -158,6 +160,8 @@ For each note, the cache keeps:
 - the links it and your entries make, resolved the way Obsidian does it: by file name, ignoring case, folders, headings and display text
 
 Entities come only from links. `journal entities`, the name filter in answers and the per-person mood patterns in `journal insights` all reflect exactly what you linked. A link to a note that doesn't exist yet starts counting as soon as you create the note. Links to attachments (images, video, PDFs) are ignored, and embedded attachments are left out of the indexed text.
+
+Because only links count, an entry that says "lunch with John" without `[[John Doe]]` is missing from John's numbers. `journal unlinked` lists the notes this happens to and how often, and `journal unlinked "John Doe"` shows each of those entries with the sentence that names him, so you can add the links in Obsidian. It matches titles and aliases as whole words, ignoring case, and skips a name inside another note's longer name. The browser lists them on each note's page too.
 
 If you add a folder to `paths` and run `journal index` again, the files in it switch from entries to notes even if they haven't changed.
 

@@ -24,7 +24,7 @@ from importlib import resources
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import db, fields, parser, query, store
+from . import db, fields, parser, query, store, unlinked
 from .config import Config
 from .models import Answer, JournalError
 from .ollama_client import OllamaClient
@@ -404,6 +404,10 @@ def note(req: Request, note_id: str) -> Json:
         "backlinks": [_note_ref(r) for r in store.note_backlinks(conn, row["id"])],
         "entries": linking,
         "entries_capped": bool(mentions and mentions.count > len(linking)),
+        "unlinked": [
+            {"id": m.entry_id, "date": m.entry_date, "name": m.name, "snippet": m.snippet}
+            for m in unlinked.for_note(conn, row["id"])
+        ],
     }
 
 

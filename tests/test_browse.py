@@ -464,3 +464,12 @@ def test_note_pages_carry_the_relationship_digest(browser, journal):
     assert detail["digest_min_mentions"] == 8
     listed = browser.get("/api/digests")["notes"]
     assert [(n["id"], n["title"], n["entries"]) for n in listed] == [(john, "John Doe", 1)]
+
+
+def test_note_pages_list_entries_that_name_it_without_a_link(browser, journal):
+    add_entry(journal, date(2024, 1, 20), text="Called John about the hike.", path="/vault/20.md")
+    detail = browser.get(f"/api/notes/{note_id(journal, 'John Doe')}")
+    assert detail["unlinked"] == [{
+        "id": entry_id(journal, "2024-01-20"), "date": "2024-01-20", "name": "John",
+        "snippet": "Called John about the hike.",
+    }]

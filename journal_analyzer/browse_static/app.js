@@ -804,7 +804,16 @@ async function noteView([id]) {
       h("div", {}, h("h3", {}, "Notes that link here"), h("div", { class: "chips" }, n.backlinks.length ? n.backlinks.map((o) => noteChip(o)) : empty("Nothing."))))) : null,
     section("Entries that link here", entryLines(n.entries, scale, { emptyText: "No indexed entry links to this note." }), {
       note: n.entries_capped ? `newest ${n.entries.length} shown` : n.entries.length ? h("a", { href: href.entries({ note: n.id }) }, "filter these") : null,
-    }));
+    }),
+    n.unlinked.length ? section("Named without a link", h("ol", { class: "lines" }, n.unlinked.map((u) =>
+      h("li", {}, h("a", { class: "line", href: href.entry(u.id) },
+        h("span", { class: "line-date" }, mediumDate(u.date)),
+        h("span", { "aria-hidden": "true" }),
+        h("span", { class: "line-summary" }, u.snippet),
+        h("span", { class: "line-tags" }, `as “${u.name}”`))))), {
+      note: plural(n.unlinked.length, "entry", "entries"),
+      intro: ["These entries name ", n.title, " but don't link it, so they're left out of the counts and moods above. Link them in Obsidian and they count from the next index."],
+    }) : null);
   for (const bar of node.querySelectorAll(".hbar[data-w]")) bar.style.width = `${Number(bar.dataset.w) * 100}%`;
   return node;
 }

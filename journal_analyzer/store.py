@@ -859,6 +859,20 @@ def fts_search(
     return [r["rowid"] for r in rows]
 
 
+def fts_phrase_ids(conn: sqlite3.Connection, phrase: str) -> list[int]:
+    """Every entry whose text has these words in a row."""
+    match = _match_expression([phrase])
+    if match is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?", (match,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [r["rowid"] for r in rows]
+
+
 def notes_fts_search(conn: sqlite3.Connection, terms: list[str], k: int) -> list[int]:
     match = _match_expression(terms)
     if match is None:
