@@ -29,6 +29,9 @@ TOP_K = 8
 MAX_RAW_CONTEXT_CHARS = 96_000
 # ranges wider than this also get month digests
 BROAD_RANGE_DAYS = 62
+# ranges from this up to BROAD_RANGE_DAYS get week digests instead
+WEEK_DIGEST_MIN_DAYS = 10
+MAX_WEEK_DIGESTS = 9
 # more months than this and we send year digests instead
 MAX_MONTH_DIGESTS = 14
 # the reranker can only reorder what retrieval found, so fetch extra
@@ -577,8 +580,12 @@ def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
     if lo is None or hi is None:
         return []
     start, end = date.fromisoformat(lo), date.fromisoformat(hi)
-    if (end - start).days <= BROAD_RANGE_DAYS:
+    days = (end - start).days
+    if days < WEEK_DIGEST_MIN_DAYS:
         return []
+    if days <= BROAD_RANGE_DAYS:
+        weeks = store.get_rollups_in_range(conn, "week", start, end)[-MAX_WEEK_DIGESTS:]
+        return [f"- [week {r['period_key']}] {r['summary']}" for r in weeks]
     months = store.get_rollups_in_range(conn, "month", start, end)
     if len(months) > MAX_MONTH_DIGESTS:
         years = store.get_rollups_in_range(conn, "year", start, end)

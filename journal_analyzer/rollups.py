@@ -214,8 +214,9 @@ def generate_rollups(
     period_types: tuple[str, ...] = ("week", "month", "year"),
     only_stale: bool = True,
 ) -> dict[str, int]:
-    # Weeks go last. Answers only read months and years, and a run can take
-    # hours, so if it gets stopped those should already be done.
+    # Weeks go last. Most answers read months and years (weeks only cover
+    # spans of a few weeks), and a run can take hours, so if it gets stopped
+    # those should already be done.
     counts = {"week": 0, "month": 0, "year": 0}
     groups = _entry_periods(conn)
     pruned = _prune_orphan_rollups(conn, groups)
