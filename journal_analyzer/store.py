@@ -69,6 +69,16 @@ def get_file_record(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM files WHERE path = ?", (path,)).fetchone()
 
 
+def file_states(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT f.path, f.content_hash, f.status,
+                      (SELECT COUNT(*) FROM entries e WHERE e.file_path = f.path) AS entries
+               FROM files f ORDER BY f.path"""
+        ).fetchall()
+    )
+
+
 def tracked_paths(conn: sqlite3.Connection) -> list[str]:
     return [r["path"] for r in conn.execute("SELECT path FROM files ORDER BY path")]
 
@@ -1499,6 +1509,7 @@ class CacheStats:
     date_from: str | None
     date_to: str | None
     errored_files: int
+    private_files: int
     words: int
     tags: int
     links: int  # only links that resolve to an indexed note
@@ -1518,6 +1529,7 @@ def stats(conn: sqlite3.Connection) -> CacheStats:
         date_from=lo,
         date_to=hi,
         errored_files=_count("SELECT COUNT(*) AS n FROM files WHERE status = 'error'"),
+        private_files=_count("SELECT COUNT(*) AS n FROM files WHERE status = 'private'"),
         words=_count("SELECT COALESCE(SUM(word_count), 0) AS n FROM entries"),
         tags=_count("SELECT COUNT(*) AS n FROM tags"),
         links=_count("SELECT COUNT(*) AS n FROM entry_entities"),

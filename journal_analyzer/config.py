@@ -22,6 +22,10 @@ class VaultConfig(BaseModel):
     frontmatter_date_key: str = "date"
     split_heading_regex: str = ""
     ignore_patterns: list[str] = Field(default_factory=list)
+    # entries and notes with this tag are never read; empty turns the tag off
+    private_tag: str = "private"
+    # leave out %% comments %%, which Obsidian hides in reading view
+    strip_comments: bool = True
     # empty means the model's mood is used
     frontmatter_mood_key: str = ""
     frontmatter_mood_min: float = 1
@@ -31,6 +35,11 @@ class VaultConfig(BaseModel):
     @classmethod
     def _abs_path(cls, v: Path) -> Path:
         return _expand(v)
+
+    @field_validator("private_tag")
+    @classmethod
+    def _tag(cls, v: str) -> str:
+        return v.strip().lstrip("#").strip().lower()
 
     @model_validator(mode="after")
     def _mood_range(self) -> VaultConfig:

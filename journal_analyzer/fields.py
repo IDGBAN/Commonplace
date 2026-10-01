@@ -30,7 +30,8 @@ _TRUE = frozenset({"true", "yes", "y", "done"})
 _FALSE = frozenset({"false", "no", "n"})
 # Obsidian's own keys, and ones that are never a measure
 _NOT_METRICS = frozenset(
-    {"aliases", "alias", "tags", "tag", "cssclasses", "cssclass", "publish", "position", "date"}
+    {"aliases", "alias", "tags", "tag", "cssclasses", "cssclass", "publish", "position", "date",
+     parser.PRIVATE_KEY}
 )
 
 

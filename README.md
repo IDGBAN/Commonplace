@@ -48,6 +48,7 @@ Then open `config.toml` and set these:
 - `date_source` is where each entry's date comes from: `"filename"` for a file named like `2024-01-15.md`, `"frontmatter"` for a `date:` key, or `"heading"` for the first heading that parses as a date.
 - `split_heading_regex` splits a file that holds several dated entries. Set it to something like `'^## \d{4}-\d{2}-\d{2}'`.
 - `ignore_patterns` lists folders and files to skip, like `[".stversions", ".stfolder", ".smart-env", ".obsidian"]`. A name without a `/` matches anywhere in the tree. A pattern with a `/` is matched against the path from the vault root. `*` and `?` work in both.
+- `private_tag` (default `private`) keeps entries out of the cache: a file tagged `#private`, inline or in its frontmatter tags, or with `private: true` in its frontmatter, is never sent to a model and nothing from it is stored. In a file split into several entries, a section with the tag is left out on its own. It works for notes too. `strip_comments` (on by default) leaves out `%% comments %%`, which Obsidian hides in reading view. See [Private entries](#private-entries).
 - `frontmatter_mood_key` is for when you already score your own mood in each entry's frontmatter, like `mood: 7`. Set it to `"mood"` and your number is used instead of the model's guess. `frontmatter_mood_min` and `frontmatter_mood_max` give the scale you write it on (1 to 10 by default), and it's converted to the app's scale. A value like `3/5` brings its own scale. Words like `mood: tired` are ignored.
 - `[tags]` controls tags. With `from_frontmatter = true` (the default), tags in an entry's frontmatter count the same as inline `#tags`. `ignore` drops tags from every entry, which helps when a template puts `daily` on every note. `merge` makes one tag count as another, like `{ friendship = "friends" }`; `journal tags --similar` lists tags that look like duplicates and prints a `merge` line you can paste in. When the model tags an entry it's shown the `known_in_prompt` most used tags (40 by default) and asked to reuse them, so near-duplicates stop piling up.
 - `[metrics]` is for numbers you keep in entry frontmatter, like `sleep: 7.5`, `steps: 8k`, `bedtime: 23:30` or `exercise: true` (true and false count as 1 and 0). By default every numeric property counts except the date and mood keys; `keys` limits it to a list and `ignore` leaves some out. See [Metrics](#metrics).
@@ -179,6 +180,14 @@ Numbers in your entries' frontmatter are stored with each entry without any mode
 - `journal show`, `journal export` and the entry pages in `journal browse` show them
 
 Changing `[metrics]` takes effect on the next `journal index` with no model calls.
+
+## Private entries
+
+Marking a file private keeps it out of everything: no model reads it, the cache stores nothing from it, and it can't come up in answers, digests, search or `journal browse`. The file is listed with the status `private` (`journal stats` counts them), so the indexer knows to skip it until it changes. Adding the tag to an entry that's already indexed takes it out of the cache on the next `journal index` or as soon as `journal watch` sees the edit; removing the tag puts it back.
+
+If you change `private_tag`, the next index checks every file against the new tag without calling a model, takes out the ones that are now private and indexes the ones that no longer are. The first index after upgrading does the same check, so entries you'd already tagged `#private` leave the cache.
+
+Comments are taken out of a file's text before anything reads it. Files you've already indexed keep their comments until they change, or until you run `journal index --force`. Switching `strip_comments` re-indexes the files that contain `%%`.
 
 ## Reference notes
 

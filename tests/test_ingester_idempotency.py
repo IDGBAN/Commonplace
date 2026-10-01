@@ -40,13 +40,13 @@ def test_backfill_idempotent_and_incremental(tmp_path, fake_client):
     db_mod.init_schema(conn)
 
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 2, "skipped": 0, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 2, "private": 0, "skipped": 0, "error": 0, "dropped": 0}
     files1, entries1 = _snapshot(conn)
     assert len(entries1) == 2
 
     # second run skips everything
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 0, "skipped": 2, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 0, "private": 0, "skipped": 2, "error": 0, "dropped": 0}
     assert _snapshot(conn) == (files1, entries1)
 
     # change one file, only its rows should change
@@ -56,7 +56,7 @@ def test_backfill_idempotent_and_incremental(tmp_path, fake_client):
         encoding="utf-8",
     )
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 1, "skipped": 1, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 1, "private": 0, "skipped": 1, "error": 0, "dropped": 0}
     files2, entries2 = _snapshot(conn)
     changed_files = [f for f in files2 if f not in files1]
     assert [f[0] for f in changed_files] == [str(target)]
@@ -74,7 +74,7 @@ def test_malformed_file_is_marked_error_without_aborting(tmp_path, fake_client):
     db_mod.init_schema(conn)
 
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 1, "skipped": 0, "error": 1, "dropped": 0}
+    assert counts == {"indexed": 1, "private": 0, "skipped": 0, "error": 1, "dropped": 0}
     row = conn.execute(
         "SELECT status, error_message FROM files WHERE path = ?", (str(bad),)
     ).fetchone()
@@ -146,7 +146,7 @@ def test_backfill_skips_ignored_folders(tmp_path, fake_client):
     conn = db_mod.connect(cfg)
     db_mod.init_schema(conn)
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 1, "skipped": 0, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 1, "private": 0, "skipped": 0, "error": 0, "dropped": 0}
     assert conn.execute("SELECT COUNT(*) c FROM entries").fetchone()["c"] == 1
 
 
@@ -227,7 +227,7 @@ def _notes_vault(tmp_path):
 def test_reference_notes_are_indexed_and_become_the_entities(tmp_path, fake_client):
     cfg, conn = _notes_vault(tmp_path)
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 4, "skipped": 0, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 4, "private": 0, "skipped": 0, "error": 0, "dropped": 0}
     kinds = {r["title"]: r["kind"] for r in conn.execute("SELECT title, kind FROM notes")}
     assert kinds == {
         "John Doe": "people",
@@ -322,7 +322,7 @@ def test_backfill_forgets_files_deleted_while_nothing_watched(tmp_path, fake_cli
 
     gone.unlink()
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 0, "skipped": 1, "error": 0, "dropped": 1}
+    assert counts == {"indexed": 0, "private": 0, "skipped": 1, "error": 0, "dropped": 1}
     assert store.tracked_paths(conn) == [str(kept)]
     assert [r["entry_date"] for r in conn.execute("SELECT entry_date FROM entries")] == [
         "2024-01-15"

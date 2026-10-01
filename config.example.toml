@@ -11,6 +11,10 @@ split_heading_regex = ""          # set to split one file into several entries a
 # Folders and files to skip. Names without a "/" match anywhere in the tree,
 # patterns with a "/" match the path from the vault root. * and ? work.
 ignore_patterns = [".stversions", ".stfolder", ".smart-env", ".obsidian"]
+# Entries and notes tagged with this (#private), or with private: true in their
+# frontmatter, are never read by a model or stored. Empty turns the tag off.
+private_tag = "private"
+strip_comments = true             # leave out %% comments %%, which Obsidian hides
 # Use the mood you write in each entry's frontmatter instead of the model's
 # guess. Empty leaves mood to the model. min and max are the scale you write
 # it on; it's converted to 1..mood_scale_max. "7/10" style values work too.

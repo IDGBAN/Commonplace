@@ -331,6 +331,9 @@ def _print_plan(plan: ingester.BackfillPlan, vault: Path, cache: bool) -> None:
     if by_status["forced"]:
         todo.append(f"{by_status['forced']} unchanged but forced")
     console.print(f"Would index     : {', '.join(todo)}")
+    private = sum(1 for f in plan.to_index if f.private)
+    if private:
+        console.print(f"Private         : {_count(private, 'file')} left out, nothing read by a model")
     console.print(f"Unchanged       : {by_status['unchanged']} (skipped)")
     if plan.dropped:
         console.print(f"Would drop      : {_count(len(plan.dropped), 'file')} no longer in the vault")
@@ -670,7 +673,8 @@ def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
         kinds = ", ".join(f"{r['kind']} {r['n']}" for r in store.notes_by_kind(conn))
         console.print(f"Entries indexed : {s.entries} ({s.words:,} words)")
         console.print(f"Notes indexed   : {s.notes}" + (f" ({escape(kinds)})" if kinds else ""))
-        console.print(f"Files tracked   : {s.files} ({s.errored_files} errored)")
+        private = f", {s.private_files} private" if s.private_files else ""
+        console.print(f"Files tracked   : {s.files} ({s.errored_files} errored{private})")
         console.print(f"Date range      : {s.date_from or '-'} .. {s.date_to or '-'}")
         console.print(f"Tags / links    : {s.tags} / {s.links}")
         console.print(f"Rollup digests  : {s.rollups} (and {s.note_digests} for notes)")

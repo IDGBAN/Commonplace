@@ -991,9 +991,10 @@ async function filesView(_, params) {
   document.title = "Files · Commonplace";
   const groups = {
     all: { label: "All", test: () => true },
-    problems: { label: "Problems", test: (f) => f.status !== "indexed" },
+    problems: { label: "Problems", test: (f) => f.status !== "indexed" && f.status !== "private" },
     entries: { label: "Entries", test: (f) => f.entries > 0 },
     notes: { label: "Notes", test: (f) => f.note_id != null },
+    private: { label: "Private", test: (f) => f.status === "private" },
     nothing: { label: "Nothing stored", test: (f) => f.status === "indexed" && !f.entries && f.note_id == null },
   };
   let show = groups[params.get("show")] ? params.get("show") : "all";
@@ -1016,7 +1017,7 @@ async function filesView(_, params) {
       h("td", {},
         f.note_id != null ? h("a", { href: href.note(f.note_id) }, "a note")
           : f.entries ? h("a", { href: href.entry(f.entry_id) }, plural(f.entries, "entry", "entries"))
-            : h("span", { class: "delta" }, "nothing"),
+            : h("span", { class: "delta" }, f.status === "private" ? "nothing, it's marked private" : "nothing"),
         f.error && h("div", { class: "err" }, f.error)),
       h("td", { class: "num" }, stamp(f.last_indexed)))));
     if (!rows.length) body.append(h("tr", {}, h("td", { colspan: 4 }, empty("No files here."))));

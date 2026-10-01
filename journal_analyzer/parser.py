@@ -29,9 +29,14 @@ _ATTACHMENT_EXTENSIONS = frozenset(
 )
 # Obsidian's own keys, not facts about the note
 _NON_PROPERTY_KEYS = frozenset(
-    {"aliases", "alias", "tags", "tag", "cssclasses", "cssclass", "publish", "position"}
+    {"aliases", "alias", "tags", "tag", "cssclasses", "cssclass", "publish", "position",
+     "private"}
 )
 _TAG_KEYS = frozenset({"tags", "tag"})
+# `private: true` in the frontmatter keeps a whole file out of the cache
+PRIVATE_KEY = "private"
+# Obsidian hides %% comments %% in reading view; an unclosed one runs to the end
+_COMMENT_RE = re.compile(r"%%.*?(?:%%|\Z)", re.DOTALL)
 
 
 def compute_hash(data: bytes) -> str:
@@ -126,6 +131,32 @@ def frontmatter_tags(fields: dict[str, FrontmatterValue]) -> list[str]:
                 if tag:
                     seen.setdefault(tag, None)
     return list(seen)
+
+
+def strip_comments(text: str) -> str:
+    return _COMMENT_RE.sub("", text)
+
+
+def _truthy(value: FrontmatterValue | None) -> bool:
+    item = value[0] if isinstance(value, list) and value else value
+    return isinstance(item, str) and item.strip().casefold() in {"true", "yes", "1"}
+
+
+def file_is_private(fields: dict[str, FrontmatterValue], config: Config) -> bool:
+    tag = config.vault.private_tag
+    return _truthy(frontmatter_value(fields, PRIVATE_KEY)) or bool(
+        tag and tag in frontmatter_tags(fields)
+    )
+
+
+def text_is_private(text: str, config: Config) -> bool:
+    tag = config.vault.private_tag
+    return bool(tag) and tag in extract_literal_tags(text)
+
+
+def _body(text: str, config: Config) -> tuple[dict[str, FrontmatterValue], str]:
+    frontmatter, body = _parse_frontmatter(text)
+    return frontmatter, strip_comments(body) if config.vault.strip_comments else body
 
 
 def _try_parse_date(text: str, date_format: str) -> date | None:
@@ -249,9 +280,12 @@ def _file_date(
 
 
 def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
+    """The file's entries, leaving out private ones. Empty when all of it is private."""
     path = Path(path)
     text = read_bytes(path).decode("utf-8", errors="replace")
-    frontmatter, body = _parse_frontmatter(text)
+    frontmatter, body = _body(text, config)
+    if file_is_private(frontmatter, config):
+        return []
     file_date = _file_date(path, frontmatter, body, config)
     cleaned, positions = clean_with_links(body)
     source = str(path)
@@ -259,6 +293,8 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
     file_links = _frontmatter_links(frontmatter)
 
     def whole_file() -> list[ParsedEntry]:
+        if text_is_private(cleaned, config):
+            return []
         if file_date is None:
             raise DateParseError(
                 f"Could not determine entry date for {path} "
@@ -281,6 +317,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
     preamble = cleaned[: matches[0].start()].strip()
 
     entries: list[ParsedEntry] = []
+    private_sections = 0
     for i, m in enumerate(matches):
         start = 0 if i == 0 else m.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(cleaned)
@@ -288,6 +325,9 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
         heading_line = section.splitlines()[0] if section else ""
         if i == 0 and preamble:
             section = f"{preamble}\n\n{section}" if section else preamble
+        if text_is_private(section, config):
+            private_sections += 1
+            continue
         section_date = _try_parse_date(
             heading_line.lstrip("#").strip(), config.vault.date_format
         ) or file_date
@@ -308,7 +348,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
                     frontmatter,
                 )
             )
-    if not entries:
+    if not entries and not private_sections:
         raise DateParseError(f"No non-empty sections found in {path}")
     return entries
 
@@ -338,7 +378,7 @@ def note_kind(path: Path | str, config: Config) -> str | None:
 def parse_note(path: Path | str, kind: str, config: Config) -> ParsedNote:
     path = Path(path)
     text = read_bytes(path).decode("utf-8", errors="replace")
-    frontmatter, body = _parse_frontmatter(text)
+    frontmatter, body = _body(text, config)
     cleaned, positions = clean_with_links(body)
     title = path.stem
 
@@ -370,4 +410,5 @@ def parse_note(path: Path | str, kind: str, config: Config) -> ParsedNote:
         properties=properties,
         links=links,
         rel_path=relative_path(path, config.vault.path),
+        private=file_is_private(frontmatter, config) or text_is_private(cleaned, config),
     )

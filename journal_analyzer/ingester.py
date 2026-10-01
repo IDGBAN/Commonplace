@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import json
 import os
 import sqlite3
 import time
@@ -25,10 +26,13 @@ from .ollama_client import OllamaClient
 
 console = Console()
 
-FileResult = Literal["indexed", "skipped", "error"]
+FileResult = Literal["indexed", "private", "skipped", "error"]
 EventKind = Literal["change", "delete"]
 
-_RESULT_STYLE: dict[FileResult, str] = {"indexed": "green", "skipped": "dim", "error": "red"}
+_RESULT_STYLE: dict[FileResult, str] = {
+    "indexed": "green", "private": "dim", "skipped": "dim", "error": "red",
+}
+_PRIVATE_META_KEY = "private_settings"
 
 WATCH_POLL_SECONDS = 1.0
 
@@ -54,20 +58,24 @@ def process_file(
     if (
         record is not None
         and record["content_hash"] == content_hash
-        and record["status"] == "indexed"
+        and record["status"] in ("indexed", "private")
         and not force
         # notes.paths may have turned it from entries into a note, or back
-        and (kind is not None) == store.note_exists(conn, key)
+        and (
+            (kind is not None) == store.note_exists(conn, key)
+            or record["status"] == "private"
+        )
     ):
         return "skipped"
 
     try:
         if kind is None:
-            _index_entries(path, key, content_hash, config, conn, client)
+            stored = _index_entries(path, key, content_hash, config, conn, client)
         else:
-            _index_note(path, kind, key, content_hash, config, conn, client)
-        store.upsert_file(conn, key, content_hash, "indexed")
-        return "indexed"
+            stored = _index_note(path, kind, key, content_hash, config, conn, client)
+        status: FileResult = "indexed" if stored else "private"
+        store.upsert_file(conn, key, content_hash, status)
+        return status
     except OllamaUnavailableError:
         raise  # not this file's fault, so stop the run
     except Exception as exc:  # noqa: BLE001 - one bad file shouldn't stop the run
@@ -98,8 +106,12 @@ def _index_entries(
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
-) -> None:
+) -> bool:
+    """False when the whole file is private, so nothing was stored."""
     entries = parser.parse_file(path, config)
+    if not entries:
+        _clear_file(conn, key)
+        return False
     known = config.tags.known_in_prompt
     known_tags = [r["name"] for r in store.top_tags(conn, None, None, limit=known)] if known else []
     # Do the model calls before deleting anything, so if one fails the old
@@ -127,6 +139,7 @@ def _index_entries(
             store.save_entry_vector(conn, entry_id, vector)
         store.mark_rollups_stale(conn, entry.entry_date)
         store.mark_note_digests_stale(conn, entry.links)
+    return True
 
 
 def _index_note(
@@ -137,8 +150,11 @@ def _index_note(
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
-) -> None:
+) -> bool:
     note = parser.parse_note(path, kind, config)
+    if note.private:
+        _clear_file(conn, key)
+        return False
     summary, model_used = extractor.summarize_note(note, config, client)
     vector = embedder.note_vector(note, summary, config, client)
     _clear_file(conn, key)
@@ -146,6 +162,7 @@ def _index_note(
     note_id = store.save_note(conn, note, summary, model_used)
     store.save_note_vector(conn, note_id, vector)
     store.mark_note_digests_stale(conn, [note.title.casefold()])
+    return True
 
 
 def _is_ignored(path: Path, config: Config) -> bool:
@@ -226,6 +243,7 @@ class PlannedFile:
     status: PlanStatus
     entries: list[ParsedEntry] = field(default_factory=list)
     problem: str | None = None
+    private: bool = False
     extractions: int = 0
     summaries: int = 0
     embeddings: int = 0
@@ -279,14 +297,17 @@ def _plan_file(
     try:
         if kind is None:
             planned.entries = parser.parse_file(path, config)
+            planned.private = not planned.entries
             texts = [e.raw_text.strip() for e in planned.entries]
             # empty entries skip both the model and the embedding
             planned.extractions = planned.embeddings = sum(1 for t in texts if t)
         else:
             note = parser.parse_note(path, kind, config)
-            text = note.raw_text.strip()
-            planned.summaries = int(len(text) > config.notes.summarize_over_chars)
-            planned.embeddings = 1
+            planned.private = note.private
+            if not note.private:
+                text = note.raw_text.strip()
+                planned.summaries = int(len(text) > config.notes.summarize_over_chars)
+                planned.embeddings = 1
     except Exception as exc:  # noqa: BLE001 - reported, the same way index would mark it
         planned.problem = str(exc)
     return planned
@@ -319,10 +340,12 @@ def run_backfill(
     files = sorted(_vault_files(config), key=lambda p: parser.note_kind(p, config) is None)
     counts = {
         "indexed": 0,
+        "private": 0,
         "skipped": 0,
         "error": 0,
         "dropped": _prune_vanished(config, conn, files),
     }
+    _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
     with Progress(console=console) as progress:
         task = progress.add_task("Indexing", total=len(files))
@@ -332,11 +355,74 @@ def run_backfill(
             counts[result] += 1
             progress.advance(task)
     dropped = f", {counts['dropped']} dropped" if counts["dropped"] else ""
+    private = f", {counts['private']} private" if counts["private"] else ""
     console.print(
         f"Done: {counts['indexed']} indexed, {counts['skipped']} skipped, "
-        f"{counts['error']} errored{dropped}."
+        f"{counts['error']} errored{private}{dropped}."
     )
     return counts
+
+
+def _private_now(path: Path, config: Config, stored_entries: int) -> bool | None:
+    """True if the file is all private now, False if it should be indexed again,
+    None if nothing changed or it's for the index run to sort out."""
+    kind = parser.note_kind(path, config)
+    try:
+        if kind is not None:
+            return True if parser.parse_note(path, kind, config).private else None
+        entries = parser.parse_file(path, config)
+    except (OSError, ValueError):
+        return None  # DateParseError is a ValueError
+    if not entries:
+        return True
+    return False if len(entries) != stored_entries else None
+
+
+def _apply_private_settings(config: Config, conn: sqlite3.Connection) -> None:
+    # A changed private_tag can hide files that haven't changed. Those come out
+    # of the cache now, without any model call; files that stop being private
+    # are queued for the run. A cache from before this setting existed gets the
+    # same check, so entries already tagged private leave it. Comments only
+    # change the text of files that have them, so only those are indexed again,
+    # and only when the setting is switched rather than on that first run.
+    vault = config.vault
+    settings = json.dumps({"tag": vault.private_tag, "comments": vault.strip_comments})
+    previous = db.get_meta(conn, _PRIVATE_META_KEY)
+    db.set_meta(conn, _PRIVATE_META_KEY, settings)
+    if previous == settings:
+        return
+    old = json.loads(previous) if previous else None
+    comments_changed = old is not None and old["comments"] != vault.strip_comments
+    tag_changed = old is None or old["tag"] != vault.private_tag
+    hidden = queued = 0
+    for row in store.file_states(conn):
+        path = Path(row["path"])
+        if row["status"] not in ("indexed", "private") or not path.exists():
+            continue
+        if comments_changed and row["status"] == "indexed":
+            with contextlib.suppress(OSError):
+                if b"%%" in parser.read_bytes(path):
+                    store.upsert_file(conn, row["path"], row["content_hash"], "pending")
+                    queued += 1
+                    continue
+        if not tag_changed:
+            continue
+        now = _private_now(path, config, row["entries"])
+        if row["status"] == "private" and now is not True:
+            store.upsert_file(conn, row["path"], row["content_hash"], "pending")
+            queued += 1
+        elif row["status"] == "indexed" and now is True:
+            _clear_file(conn, row["path"])
+            store.upsert_file(conn, row["path"], row["content_hash"], "private")
+            hidden += 1
+        elif row["status"] == "indexed" and now is False:
+            store.upsert_file(conn, row["path"], row["content_hash"], "pending")
+            queued += 1
+    if hidden or queued:
+        console.print(
+            f"Private and comment settings changed: {hidden} files taken out of the "
+            f"cache, {queued} to index again."
+        )
 
 
 def _refresh_readings(config: Config, conn: sqlite3.Connection) -> None:
@@ -441,6 +527,7 @@ def run_watch(
     _require_vault(config)
     client = client or OllamaClient(config)
     _ensure_vec(config, conn, client)
+    _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
     handler = _DebounceHandler(config)
     observer = Observer()
