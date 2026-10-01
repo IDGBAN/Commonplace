@@ -218,9 +218,14 @@ def _mood_str(mood: object) -> str:
 
 
 def _entry_table(
-    conn: sqlite3.Connection, rows: list[sqlite3.Row], title: str | None = None
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    title: str | None = None,
+    longer: bool = False,
 ) -> Table:
+    """With `longer`, long entries show their longer summary."""
     tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in rows])
+    details = store.details_for_entries(conn, [r["id"] for r in rows]) if longer else {}
     table = Table(show_lines=False, title=title)
     table.add_column("Date", style="cyan", no_wrap=True)
     table.add_column("Mood", justify="right")
@@ -231,7 +236,7 @@ def _entry_table(
             r["entry_date"],
             _mood_str(r["mood_score"]),
             escape(", ".join(tags_by_entry.get(r["id"], []))),
-            escape(r["summary"] or "(no summary)"),
+            escape(details.get(r["id"]) or r["summary"] or "(no summary)"),
         )
     return table
 
@@ -445,7 +450,7 @@ def _print_reading(conn: sqlite3.Connection, answer: Answer) -> None:
     elif not entries and not notes:
         console.print("Nothing matched, so the model read nothing.")
     if entries:
-        console.print(_entry_table(conn, entries, title="Entries it read"))
+        console.print(_entry_table(conn, entries, title="Entries it read", longer=True))
     if notes:
         console.print(_note_table(conn, notes, title="Notes it read"))
 
@@ -800,6 +805,9 @@ def show(
                     + escape(", ".join(f"{e['name']} ({e['type']})" for e in ents))
                 )
             console.print(f"  {escape(r['summary'] or '(no summary)')}")
+            longer = store.details_for_entries(conn, [r["id"]]).get(r["id"])
+            if longer:
+                console.print(f"  [dim]In more detail:[/dim] {escape(longer)}")
             if raw:
                 console.print()
                 console.print(escape(r["raw_text"]))
@@ -816,6 +824,7 @@ def _entry_json(cfg: Config, conn: sqlite3.Connection, row: sqlite3.Row, raw: bo
             for e in store.entities_for_entry(conn, row["id"])
         ],
         "metrics": store.metrics_for_entries(conn, [row["id"]]).get(row["id"], {}),
+        "details": store.details_for_entries(conn, [row["id"]]).get(row["id"]),
     }
     if raw:
         data["raw_text"] = row["raw_text"]

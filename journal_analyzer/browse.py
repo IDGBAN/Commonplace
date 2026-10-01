@@ -250,6 +250,7 @@ def entry(req: Request, entry_id: str) -> Json:
         "mood_scale": req.config.indexing.mood_scale_max,
         "words": row["word_count"],
         "summary": row["summary"],
+        "details": store.details_for_entries(conn, [row["id"]]).get(row["id"]),
         "model_used": row["model_used"],
         "extracted_at": row["extracted_at"],
         "raw_text": row["raw_text"],

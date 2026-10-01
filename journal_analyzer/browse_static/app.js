@@ -627,6 +627,8 @@ async function entryView([id]) {
     h("p", { class: "margin-title" }, "The app's reading"),
     moodGloss,
     gloss("Summary", e.summary ? h("p", { class: "gloss-summary" }, e.summary) : h("span", { class: "quiet" }, "No summary stored")),
+    e.details && gloss("In more detail", h("p", { class: "gloss-summary" }, e.details),
+      h("div", { class: "quiet" }, "Written for long entries. Answers and digests read this one when there's room.")),
     gloss("Tags",
       e.tags.length ? h("div", { class: "chips" }, e.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t), title: fmTags.has(t) ? "From the frontmatter" : null }, t))) : h("span", { class: "quiet" }, "No tags"),
       e.tags.some((t) => fmTags.has(t)) && h("div", { class: "quiet" }, "Includes the tags in the file's frontmatter.")),

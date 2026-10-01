@@ -27,6 +27,8 @@ _NUMBER_PREFIX = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+")
 # room for the notes the recent entries link to
 LINKED_NOTES_CHARS = 3000
 LINKED_NOTE_CHARS = 400
+# extra room for long entries' longer summaries
+DETAILS_CHARS = 4000
 
 
 def _recent_context(
@@ -36,6 +38,7 @@ def _recent_context(
     ids = [r["id"] for r in rows]
     tags_by_entry = store.tags_for_entries(conn, ids)
     entities_by_entry = store.entities_for_entries(conn, ids)
+    longer = context.longer_summaries(conn, rows, DETAILS_CHARS)
     lines: list[str] = []
     for row in rows:
         tags = tags_by_entry.get(row["id"], [])
@@ -46,7 +49,7 @@ def _recent_context(
             parts.append(f"[{', '.join(tags)}]")
         if ents:
             parts.append(f"who/what: {', '.join(ents)}")
-        parts.append(f"- {row['summary'] or '(no summary)'}")
+        parts.append(f"- {longer.get(row['id']) or row['summary'] or '(no summary)'}")
         lines.append(" ".join(parts))
     if config is not None:
         notes = context.linked_notes(

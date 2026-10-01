@@ -49,6 +49,31 @@ def fit(blocks: list[str], budget: int) -> list[str]:
     return kept
 
 
+def longer_summaries(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row], budget: int
+) -> dict[int, str]:
+    """The longer summaries that fit in `budget` extra characters, by entry id.
+
+    The longest entries go first, since a one-liner loses the most for them.
+    Anything left over is described by its one-line summary as before.
+    """
+    if budget <= 0 or not rows:
+        return {}
+    found = store.details_for_entries(conn, [r["id"] for r in rows])
+    chosen: dict[int, str] = {}
+    used = 0
+    for row in sorted(rows, key=lambda r: -r["word_count"]):
+        text = found.get(row["id"])
+        if not text:
+            continue
+        extra = len(text) - len(row["summary"] or "")
+        if used + extra > budget:
+            continue
+        chosen[row["id"]] = text
+        used += extra
+    return chosen
+
+
 def entry_links(
     conn: sqlite3.Connection, entry: ParsedEntry, vault: Path, chars: int
 ) -> list[str]:

@@ -81,7 +81,7 @@ _NOTE_PROMPT = (
 
 def _entry_periods(conn: sqlite3.Connection) -> dict[str, dict[str, list[sqlite3.Row]]]:
     rows = conn.execute(
-        "SELECT id, entry_date, mood_score, summary FROM entries ORDER BY entry_date"
+        "SELECT id, entry_date, mood_score, summary, word_count FROM entries ORDER BY entry_date"
     ).fetchall()
     groups: dict[str, dict[str, list[sqlite3.Row]]] = {
         "week": defaultdict(list),
@@ -139,13 +139,14 @@ def _with_linked_notes(
 
 
 def _rollup_members_digest(
-    conn: sqlite3.Connection, members: list[sqlite3.Row]
+    conn: sqlite3.Connection, members: list[sqlite3.Row], details_budget: int = 0
 ) -> tuple[str, list[str], float | None]:
     lines: list[str] = []
     ids = [r["id"] for r in members]
     tags_by_entry = store.tags_for_entries(conn, ids)
     notes_by_entry = store.entities_for_entries(conn, ids)
     metrics = store.metrics_for_entries(conn, ids)
+    longer = context.longer_summaries(conn, members, details_budget)
     for row in members:
         tags = tags_by_entry.get(row["id"], [])
         mood = row["mood_score"]
@@ -153,10 +154,8 @@ def _rollup_members_digest(
         numbers = "".join(f", {k} {v:g}" for k, v in metrics.get(row["id"], {}).items())
         names = [n["name"] for n in notes_by_entry.get(row["id"], [])]
         links = f" (links: {', '.join(names)})" if names else ""
-        lines.append(
-            f"- {row['entry_date']} (mood {mood_str}{numbers}) "
-            f"[{', '.join(tags)}]{links}: {row['summary'] or '(no summary)'}"
-        )
+        summary = longer.get(row["id"]) or row["summary"] or "(no summary)"
+        lines.append(f"- {row['entry_date']} (mood {mood_str}{numbers}) [{', '.join(tags)}]{links}: {summary}")
     dominant, avg_mood = _member_stats(members, tags_by_entry)
     return "\n".join(lines), dominant, avg_mood
 
@@ -169,7 +168,9 @@ def _write_period(
     conn: sqlite3.Connection,
     client: OllamaClient,
 ) -> None:
-    digest, dominant, avg_mood = _rollup_members_digest(conn, members)
+    digest, dominant, avg_mood = _rollup_members_digest(
+        conn, members, config.rollups.entry_details_chars
+    )
     text = _with_linked_notes(
         f"Period {period_key} entries:\n{digest}", config, conn, [r["id"] for r in members]
     )
@@ -268,6 +269,11 @@ def note_digest_input(
     for row in rows:
         by_year[row["entry_date"][:4]].append(row)
     tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in rows])
+    sampled_rows = [
+        r for members in by_year.values()
+        for r in _spread(members, config.rollups.note_entries_per_year)
+    ]
+    longer = context.longer_summaries(conn, sampled_rows, config.rollups.entry_details_chars)
     for year, members in sorted(by_year.items()):
         scored = [r["mood_score"] for r in members if r["mood_score"] is not None]
         mood = f", average mood {sum(scored) / len(scored):.1f}" if scored else ""
@@ -277,9 +283,8 @@ def note_digest_input(
         for row in shown:
             mood_str = f"{row['mood_score']:g}" if row["mood_score"] is not None else "-"
             tags = ", ".join(tags_by_entry.get(row["id"], []))
-            lines.append(
-                f"- {row['entry_date']} (mood {mood_str}) [{tags}]: {row['summary'] or '(no summary)'}"
-            )
+            summary = longer.get(row["id"]) or row["summary"] or "(no summary)"
+            lines.append(f"- {row['entry_date']} (mood {mood_str}) [{tags}]: {summary}")
     return "\n".join(lines), mentions, avg_mood
 
 

@@ -17,7 +17,7 @@ from typing import Any
 
 from rich.console import Console
 
-from . import db, embedder, parser, profile, store
+from . import context, db, embedder, parser, profile, store
 from .config import Config
 from .models import Answer, AnswerStage, QueryPlan
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
@@ -45,6 +45,8 @@ LINKED_NOTES_K = 8
 MAX_CONTEXT_NOTES = 12
 # comes out of MAX_RAW_CONTEXT_CHARS
 MAX_NOTE_CONTEXT_CHARS = 16_000
+# extra room for long entries' longer summaries when answering from summaries
+ANSWER_DETAILS_CHARS = 6000
 # notes called "Go" or "Me" would match ordinary words all the time
 MIN_NAME_CHARS = 3
 
@@ -669,6 +671,7 @@ def _summary_context(
     sections: list[str] = []
     linked = store.entities_for_entries(conn, [r["id"] for r in candidates])
     metrics = store.metrics_for_entries(conn, [r["id"] for r in candidates])
+    longer = context.longer_summaries(conn, candidates, ANSWER_DETAILS_CHARS)
     lines = []
     for r in candidates:
         details = [f"file: {parser.relative_path(r['file_path'], vault)}"]
@@ -677,9 +680,8 @@ def _summary_context(
             details.append(f"links: {', '.join(names)}")
         if r["id"] in metrics:
             details.append(f"recorded: {_metric_text(metrics[r['id']])}")
-        lines.append(
-            f"- [{r['entry_date']}] {r['summary'] or '(no summary)'} ({'; '.join(details)})"
-        )
+        summary = longer.get(r["id"]) or r["summary"] or "(no summary)"
+        lines.append(f"- [{r['entry_date']}] {summary} ({'; '.join(details)})")
     lines.extend(_digest_lines(plan, conn))
     if lines:
         sections.append("Journal entries:\n" + "\n".join(lines))

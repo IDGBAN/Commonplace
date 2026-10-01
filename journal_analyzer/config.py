@@ -104,6 +104,16 @@ class IndexingConfig(BaseModel):
     mood_scale_max: int = Field(default=10, ge=2)
     # how much of each linked note goes along when an entry is read; 0 sends none
     linked_note_chars: int = Field(default=600, ge=0)
+    # entries this long also get a longer summary; 0 turns it off
+    detail_min_words: int = Field(default=400, ge=0)
+    # and from this long, a longer one still
+    detail_long_words: int = Field(default=1000, ge=1)
+
+    @model_validator(mode="after")
+    def _detail_tiers(self) -> IndexingConfig:
+        if self.detail_min_words and self.detail_long_words < self.detail_min_words:
+            raise ValueError("detail_long_words can't be below detail_min_words")
+        return self
 
 
 class RerankingConfig(BaseModel):
@@ -117,6 +127,8 @@ class RollupsConfig(BaseModel):
     note_entries_per_year: int = Field(default=30, ge=1)
     # room for the notes a period's entries link to, in each digest's prompt; 0 sends none
     linked_notes_chars: int = Field(default=6000, ge=0)
+    # room for long entries' longer summaries in each digest; the rest get one line
+    entry_details_chars: int = Field(default=8000, ge=0)
 
 
 class InsightsConfig(BaseModel):

@@ -49,6 +49,10 @@ memo_path = ""
 watch_debounce_seconds = 45
 mood_scale_max = 10               # mood_score goes from 1 to this
 linked_note_chars = 600           # of each linked note sent along when an entry is read; 0 sends none
+# Entries this long also get a longer summary (2-3 sentences), and from
+# detail_long_words a longer one (3-5). 0 turns it off.
+detail_min_words = 400
+detail_long_words = 1000
 
 [reranking]
 # Reorders search hits before answering, which gives better results.
@@ -61,6 +65,7 @@ model = "ms-marco-MiniLM-L-12-v2"
 note_min_mentions = 8
 note_entries_per_year = 30         # entries per year that go into one; busier years are sampled
 linked_notes_chars = 6000          # room for linked notes in each digest's prompt; 0 sends none
+entry_details_chars = 8000         # room for long entries' longer summaries in each digest; the rest get one line
 
 [insights]
 # `journal insights` only reports a tag, person or weekly/seasonal pattern once

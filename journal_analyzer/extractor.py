@@ -6,7 +6,7 @@ from typing import TypeVar
 
 from .config import Config
 from .context import fit
-from .models import Extraction, NoteSummary, ParsedEntry, ParsedNote
+from .models import DetailedExtraction, Extraction, NoteSummary, ParsedEntry, ParsedNote
 from .ollama_client import (
     CHARS_PER_TOKEN_ESTIMATE,
     REPLY_TOKENS,
@@ -17,6 +17,9 @@ from .ollama_client import (
 from .parser import extract_literal_tags
 
 SUMMARY_MAX_CHARS = 200
+# the longer summary for entries past detail_min_words, and past detail_long_words
+DETAIL_MEDIUM_CHARS = 450
+DETAIL_LONG_CHARS = 800
 NOTE_SUMMARY_MAX_CHARS = 400
 # keeps the prompt inside Ollama's default window so the model isn't reloaded
 NOTE_INPUT_MAX_CHARS = 8_000
@@ -76,7 +79,22 @@ _VOICE_CORRECTION = (
     '"this entry", "this note" or "this file".'
 )
 
+_DETAILS_RULE = """
+- details: this entry is long, so also write {sentences}, at most {chars} \
+characters, on what happened, who was there and how it felt, in the same \
+first-person voice as the summary. The summary itself stays one sentence."""
+
 _Summarized = TypeVar("_Summarized", Extraction, NoteSummary)
+
+
+def detail_tier(words: int, config: Config) -> tuple[str, int] | None:
+    """How long a longer summary an entry of this many words gets, if any."""
+    ix = config.indexing
+    if not ix.detail_min_words or words < ix.detail_min_words:
+        return None
+    if words >= ix.detail_long_words:
+        return "3 to 5 sentences", DETAIL_LONG_CHARS
+    return "2 or 3 sentences", DETAIL_MEDIUM_CHARS
 
 
 def _clip(text: str, limit: int) -> str:
@@ -87,6 +105,18 @@ def _clip(text: str, limit: int) -> str:
     if " " in cut:
         cut = cut.rsplit(" ", 1)[0]
     return cut.rstrip(" ,;:-") + "…"
+
+
+def _clip_sentences(text: str, limit: int) -> str:
+    """Like _clip, but ends on the last whole sentence that fits when there is one."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", text[:limit])]
+    # a cut that keeps less than half would drop too much
+    if ends and ends[-1] >= limit // 2:
+        return text[: ends[-1]]
+    return _clip(text, limit)
 
 
 def _in_writers_voice(
@@ -101,7 +131,8 @@ def _in_writers_voice(
     result = client.chat_structured(
         model=model, messages=messages, schema=schema, memo_key=memo_messages
     )
-    if not _DETACHED_OPENING_RE.match(result.summary):
+    details = getattr(result, "details", "")
+    if not _DETACHED_OPENING_RE.match(result.summary) and not _DETACHED_OPENING_RE.match(details):
         return result
     tail: list[dict[str, str]] = [
         {"role": "assistant", "content": result.model_dump_json()},
@@ -138,6 +169,13 @@ def extract(
     base_system = _SYSTEM_PROMPT.format(
         mood_max=config.indexing.mood_scale_max, summary_max=SUMMARY_MAX_CHARS
     )
+    # Short entries keep exactly the prompt and schema they always had, so
+    # results already in the memo still match them.
+    tier = detail_tier(len(text.split()), config)
+    schema: type[Extraction] = Extraction
+    if tier is not None:
+        base_system += _DETAILS_RULE.format(sentences=tier[0], chars=tier[1])
+        schema = DetailedExtraction
     system = base_system
     if known_tags:
         system += _KNOWN_TAGS.format(tags=", ".join(known_tags))
@@ -163,7 +201,7 @@ def extract(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        Extraction,
+        schema,
         memo_messages=[
             {"role": "system", "content": base_system},
             {"role": "user", "content": user},
@@ -176,6 +214,8 @@ def extract(
             max(result.mood_score, 1.0), float(config.indexing.mood_scale_max)
         )
     result.summary = _clip(result.summary, SUMMARY_MAX_CHARS)
+    if tier is not None and isinstance(result, DetailedExtraction):
+        result.details = _clip_sentences(result.details, tier[1])
 
     merged: dict[str, None] = {}
     for tag in [t.lower().strip() for t in result.tags] + literal_tags:

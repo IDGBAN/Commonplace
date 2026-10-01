@@ -510,3 +510,10 @@ def test_the_you_page_shows_the_profile_and_its_facts(browser, journal):
     assert data["profile"]["text"] == "I like hills." and data["facts_count"] == 1
     assert data["facts"] == [{"date": "2024-01-15", "category": "hobbies", "fact": "I hike.",
                               "folded": False, "entry_id": entry_id(journal, "2024-01-15")}]
+
+
+def test_entry_pages_carry_the_longer_summary(browser, journal):
+    first = entry_id(journal, "2024-01-15")
+    assert browser.get(f"/api/entries/{first}")["details"] is None
+    store.save_entry_details(journal, first, "A longer account of the hike.")
+    assert browser.get(f"/api/entries/{first}")["details"] == "A longer account of the hike."

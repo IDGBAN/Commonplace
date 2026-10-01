@@ -4,7 +4,7 @@ from conftest import add_entry, add_note, copy_fixtures, copy_note_fixtures, mak
 
 from journal_analyzer import context, extractor, ingester, parser, prompts, rollups, store
 from journal_analyzer import db as db_mod
-from journal_analyzer.models import Extraction, ParsedEntry
+from journal_analyzer.models import DetailedExtraction, Extraction, ParsedEntry
 
 
 def _note_ids(conn, entry_id):
@@ -92,6 +92,9 @@ def _extract_user_message(config, fake_client, entry, linked):
         return Extraction(summary="ok")
 
     fake_client.structured["Extraction"] = respond
+    fake_client.structured["DetailedExtraction"] = lambda model, messages: (
+        respond(model, messages) and DetailedExtraction(summary="ok")
+    )
     extractor.extract(entry, config, fake_client, linked=linked)
     return seen["user"]
 

@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from journal_analyzer import cli, db, store
 from journal_analyzer.config import Config
 from journal_analyzer.models import (
+    DetailedExtraction,
     Extraction,
     NoteSummary,
     ParsedEntry,
@@ -38,6 +39,12 @@ class FakeOllamaClient:
                 mood_score=7.0,
                 summary="A pleasant day with friends outdoors.",
                 tags=["Friends", "outdoors", "nature"],
+            ),
+            "DetailedExtraction": DetailedExtraction(
+                mood_score=7.0,
+                summary="A long day out with friends.",
+                tags=["Friends", "outdoors"],
+                details="A longer canned summary of a long day out with friends.",
             ),
             "NoteSummary": NoteSummary(summary="A canned note summary."),
             "ScannedFacts": ScannedFacts(),

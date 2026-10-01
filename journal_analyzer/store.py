@@ -174,6 +174,27 @@ def save_entry_reading(conn: sqlite3.Connection, entry_id: int, reading: Extract
         )
 
 
+def save_entry_details(conn: sqlite3.Connection, entry_id: int, details: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO entry_details(entry_id, details) VALUES (?, ?)",
+            (entry_id, details),
+        )
+
+
+def details_for_entries(conn: sqlite3.Connection, entry_ids: list[int]) -> dict[int, str]:
+    if not entry_ids:
+        return {}
+    try:
+        rows = conn.execute(
+            f"SELECT entry_id, details FROM entry_details WHERE entry_id IN ({_JSON_VALUES})",
+            (_json_list(entry_ids),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # a read-only connection to a cache from before the table
+    return {r["entry_id"]: r["details"] for r in rows}
+
+
 def save_file_frontmatter(
     conn: sqlite3.Connection, path: str, fields: dict[str, FrontmatterValue]
 ) -> None:

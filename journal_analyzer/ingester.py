@@ -21,7 +21,14 @@ from watchdog.observers import Observer
 
 from . import context, db, embedder, extractor, fields, parser, profile, store
 from .config import Config
-from .models import ConfigError, JournalError, OllamaUnavailableError, ParsedEntry
+from .models import (
+    ConfigError,
+    DetailedExtraction,
+    Extraction,
+    JournalError,
+    OllamaUnavailableError,
+    ParsedEntry,
+)
 from .ollama_client import OllamaClient
 
 console = Console()
@@ -125,7 +132,10 @@ def _index_entries(
         for entry in entries
     ]
     vectors = [
-        embedder.entry_vector(entry.raw_text, config, client, summary=reading.summary)
+        # an entry too long to embed whole leads with its fuller summary
+        embedder.entry_vector(
+            entry.raw_text, config, client, summary=_details(reading) or reading.summary
+        )
         for entry, reading in zip(entries, readings, strict=True)
     ]
     _clear_file(conn, key)
@@ -141,12 +151,18 @@ def _index_entries(
             model_used=config.ollama.fast_model,
         )
         store.save_entry_reading(conn, entry_id, reading)
+        if _details(reading):
+            store.save_entry_details(conn, entry_id, _details(reading))
         store.replace_entry_metrics(conn, entry_id, fields.entry_metrics(entry.frontmatter, config))
         if vector is not None:
             store.save_entry_vector(conn, entry_id, vector)
         store.mark_rollups_stale(conn, entry.entry_date)
         store.mark_note_digests_stale(conn, entry.links)
     return True
+
+
+def _details(reading: Extraction) -> str:
+    return reading.details if isinstance(reading, DetailedExtraction) else ""
 
 
 def _index_note(

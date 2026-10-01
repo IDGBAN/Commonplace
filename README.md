@@ -2,7 +2,7 @@
 
 A command-line tool for asking questions about an Obsidian-style Markdown journal. It runs everything locally through [Ollama](https://ollama.com), so your journal stays on your machine.
 
-The tool never writes to your `.md` files. What it learns goes into a SQLite cache you can delete and rebuild whenever you like. For each dated entry it stores a mood score, some tags and a one-line summary written the way you'd write it yourself ("Hiked with John and felt calmer after", not "The author expresses..."). It also reads your undated reference notes about people, places and topics, and keeps track of how they link to your entries. Answers cite Obsidian wikilinks like `[[2024-01-15]]` or `[[John Doe]]`, and if the stored summaries aren't enough, it goes back and reads the full text of whatever it's citing.
+The tool never writes to your `.md` files. What it learns goes into a SQLite cache you can delete and rebuild whenever you like. For each dated entry it stores a mood score, some tags and a one-line summary written the way you'd write it yourself ("Hiked with John and felt calmer after", not "The author expresses..."). Long entries also get a longer summary of a few sentences, so less of what happened is lost. It also reads your undated reference notes about people, places and topics, and keeps track of how they link to your entries. Answers cite Obsidian wikilinks like `[[2024-01-15]]` or `[[John Doe]]`, and if the stored summaries aren't enough, it goes back and reads the full text of whatever it's citing.
 
 ## How it works
 
@@ -174,6 +174,14 @@ It opens the cache read-only and never touches your notes, so it's safe to leave
 `journal review 2025` puts a year on one page in Markdown: the year digest, writing numbers, mood by month, your best and hardest days by mood, the notes you linked most and the ones that first appear that year, your top tags against the year before, and tags that fell away. Days and notes are `[[links]]`, so it reads well pasted into Obsidian. It makes no model calls; if the year digest isn't written yet it says how to write it. Leave out the year for the latest one you wrote in, and add `--out FILE` to save it (outside the vault).
 
 `journal prompt` looks back over recent entries (14 days by default, or `--days N`) and suggests open-ended writing prompts that pick up loose threads, like a project you named, a person who keeps coming up, or a feeling you left unresolved. `--count N` sets how many. It only reads the cache and never touches your notes.
+
+## Longer summaries
+
+A one-sentence summary loses most of a long entry, and when the summaries aren't enough an answer falls back to the slower precise model re-reading the full text. So entries of 400 words or more (`[indexing] detail_min_words`) also get a longer summary of 2 or 3 sentences, and from 1,000 words (`detail_long_words`) one of 3 to 5. It's written in the same call as everything else about the entry, in the same first-person voice.
+
+The one-liner stays where a list wants one line: the tables, the browser's entry lists and the calendar. The longer one goes where depth helps: answers from summaries, `ask --sources`, week and month digests, relationship digests and writing prompts. `journal show`, `journal export` and the entry page in the browser show both. Prompts have room for only so much, so each one fills a budget (`[rollups] entry_details_chars` for digests), longest entries first; the rest go in as their one-liner.
+
+Shorter entries are read with exactly the same prompt as before, so changing these settings or upgrading only costs model time for long entries: run `journal index --force` and everything else comes from the memo. Set `detail_min_words = 0` to turn it off.
 
 ## Your profile
 

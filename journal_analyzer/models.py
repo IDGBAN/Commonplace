@@ -55,6 +55,12 @@ class Extraction(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class DetailedExtraction(Extraction):
+    """For long entries: the one-line summary plus a few sentences more."""
+
+    details: str = ""
+
+
 class NoteSummary(BaseModel):
     summary: str = ""
 

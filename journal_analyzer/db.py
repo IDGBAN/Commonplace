@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS entry_readings (
   tags       TEXT NOT NULL DEFAULT '[]'
 );
 
+-- the longer summary of an entry past [indexing] detail_min_words
+CREATE TABLE IF NOT EXISTS entry_details (
+  entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+  details  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS file_frontmatter (
   path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
   data TEXT NOT NULL DEFAULT '{}'
