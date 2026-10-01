@@ -7,6 +7,7 @@ import fnmatch
 import os
 import sqlite3
 import time
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from threading import Lock
 from typing import Literal
@@ -19,7 +20,7 @@ from watchdog.observers import Observer
 
 from . import db, embedder, extractor, fields, parser, store
 from .config import Config
-from .models import ConfigError, OllamaUnavailableError
+from .models import ConfigError, OllamaUnavailableError, ParsedEntry
 from .ollama_client import OllamaClient
 
 console = Console()
@@ -161,7 +162,7 @@ def _is_ignored(path: Path, config: Config) -> bool:
     return False
 
 
-def _vault_files(config: Config) -> list[Path]:
+def _candidate_files(config: Config) -> set[Path]:
     root = config.vault.path
     found = {p for p in root.glob(config.vault.daily_note_glob) if p.is_file()}
     # notes paths don't have to fall under daily_note_glob
@@ -171,7 +172,11 @@ def _vault_files(config: Config) -> list[Path]:
             found.add(target)
         elif target.is_dir():
             found.update(p for p in target.rglob("*.md") if p.is_file())
-    return sorted(p for p in found if not _is_ignored(p, config))
+    return found
+
+
+def _vault_files(config: Config) -> list[Path]:
+    return sorted(p for p in _candidate_files(config) if not _is_ignored(p, config))
 
 
 def _require_vault(config: Config) -> None:
@@ -182,21 +187,116 @@ def _require_vault(config: Config) -> None:
         )
 
 
-def _prune_vanished(config: Config, conn: sqlite3.Connection, files: list[Path]) -> int:
+def _vanished(config: Config, conn: sqlite3.Connection, files: list[Path]) -> list[str]:
     # An empty vault is much more likely an unmounted drive or a half-finished
     # sync than a deleted journal.
     if not files:
-        return 0
+        return []
     walked = {str(p) for p in files}
-    forgotten = 0
-    for key in store.tracked_paths(conn):
-        if key in walked:
-            continue
+    return [
+        key
+        for key in store.tracked_paths(conn)
+        if key not in walked
         # files left over from `index --vault` elsewhere only go once deleted
-        if PurePath(key).is_relative_to(config.vault.path) or not Path(key).exists():
-            _forget_file(conn, key)
-            forgotten += 1
-    return forgotten
+        and (PurePath(key).is_relative_to(config.vault.path) or not Path(key).exists())
+    ]
+
+
+def _prune_vanished(config: Config, conn: sqlite3.Connection, files: list[Path]) -> int:
+    gone = _vanished(config, conn, files)
+    for key in gone:
+        _forget_file(conn, key)
+    return len(gone)
+
+
+PlanStatus = Literal["new", "changed", "retry", "switching", "forced", "unchanged"]
+
+
+@dataclass
+class PlannedFile:
+    path: Path
+    kind: str | None  # None for journal entries
+    status: PlanStatus
+    entries: list[ParsedEntry] = field(default_factory=list)
+    problem: str | None = None
+    extractions: int = 0
+    summaries: int = 0
+    embeddings: int = 0
+
+
+@dataclass
+class BackfillPlan:
+    files: list[PlannedFile]
+    ignored: int
+    dropped: list[str]
+
+    @property
+    def to_index(self) -> list[PlannedFile]:
+        return [f for f in self.files if f.status != "unchanged"]
+
+    def model_calls(self) -> tuple[int, int, int]:
+        todo = self.to_index
+        return (
+            sum(f.extractions for f in todo),
+            sum(f.summaries for f in todo),
+            sum(f.embeddings for f in todo),
+        )
+
+
+def _plan_status(
+    path: Path, kind: str | None, data: bytes, conn: sqlite3.Connection | None, force: bool
+) -> PlanStatus:
+    record = store.get_file_record(conn, str(path)) if conn is not None else None
+    if conn is None or record is None:
+        return "new"
+    if record["status"] == "error":
+        return "retry"
+    if record["content_hash"] != parser.compute_hash(data):
+        return "changed"
+    if (kind is not None) != store.note_exists(conn, str(path)):
+        return "switching"
+    return "forced" if force else "unchanged"
+
+
+def _plan_file(
+    path: Path, config: Config, conn: sqlite3.Connection | None, force: bool
+) -> PlannedFile:
+    kind = parser.note_kind(path, config)
+    try:
+        data = parser.read_bytes(path)
+    except OSError as exc:
+        return PlannedFile(path, kind, "retry", problem=f"unreadable: {exc}")
+    planned = PlannedFile(path, kind, _plan_status(path, kind, data, conn, force))
+    if planned.status == "unchanged":
+        return planned
+    try:
+        if kind is None:
+            planned.entries = parser.parse_file(path, config)
+            texts = [e.raw_text.strip() for e in planned.entries]
+            # empty entries skip both the model and the embedding
+            planned.extractions = planned.embeddings = sum(1 for t in texts if t)
+        else:
+            note = parser.parse_note(path, kind, config)
+            text = note.raw_text.strip()
+            planned.summaries = int(len(text) > config.notes.summarize_over_chars)
+            planned.embeddings = 1
+    except Exception as exc:  # noqa: BLE001 - reported, the same way index would mark it
+        planned.problem = str(exc)
+    return planned
+
+
+def plan_backfill(
+    config: Config, conn: sqlite3.Connection | None, force: bool = False
+) -> BackfillPlan:
+    """What run_backfill would do, without calling a model or writing anything."""
+    _require_vault(config)
+    candidates = _candidate_files(config)
+    files = sorted(p for p in candidates if not _is_ignored(p, config))
+    return BackfillPlan(
+        files=[_plan_file(p, config, conn, force) for p in files],
+        ignored=len(candidates) - len(files),
+        dropped=_vanished(config, conn, files) if conn is not None else [],
+    )
 
 
 def run_backfill(

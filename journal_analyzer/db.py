@@ -235,6 +235,19 @@ def connect_readonly(config: Config) -> sqlite3.Connection:
     return conn
 
 
+def cache_has_data(config: Config) -> bool:
+    """Whether there's a cache with tables in it, checked without creating one."""
+    if not config.db.path.is_file():
+        return False
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"{config.db.path.resolve().as_uri()}?mode=ro", uri=True)
+        ) as probe:
+            return _is_populated(probe)
+    except sqlite3.Error:
+        return True  # let connect_readonly report it properly
+
+
 def load_vec(conn: sqlite3.Connection) -> None:
     try:
         conn.enable_load_extension(True)

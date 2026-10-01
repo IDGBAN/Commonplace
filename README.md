@@ -69,6 +69,7 @@ journal init              # create the DB schema and detect the embedding size
 # indexing (safe to stop and re-run)
 journal index             # index the vault, skipping unchanged files
 journal index --force     # re-process everything
+journal index --dry-run   # what would be indexed, which files won't parse, how many model calls
 journal stats             # entries, notes, links, date range, DB size, errored and future-dated files
 
 # questions
@@ -89,6 +90,8 @@ journal chat              # Q&A that remembers the last few turns
 journal insights          # mood, tag and timing patterns you didn't ask about
 journal prompt            # ideas for what to write next, from threads left open
 ```
+
+Before a long first run, or after changing `date_source`, `date_format` or `split_heading_regex`, run `journal index --dry-run`. It walks the vault the same way `journal index` does and parses every file it would index, without Ollama and without touching the cache. It lists files that would fail and why, files that split into several entries, entries dated in the future, files that would be dropped, and roughly how many model calls the real run would make. Add `--force` to check every file, not just new and changed ones.
 
 Each digest is one call to the precise model, so on a CPU a full `journal rollup` can take hours. Month and year digests are written first because those are what answers use, so if you stop a run partway they're already there.
 

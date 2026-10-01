@@ -185,13 +185,104 @@ def index(
     force: Annotated[
         bool, typer.Option("--force", help="Re-process files even if unchanged.")
     ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show what would be indexed and which files won't parse, without Ollama.",
+        ),
+    ] = False,
 ) -> None:
     """Index the vault. Unchanged files are skipped, so re-running is cheap."""
+    if dry_run:
+        with _guard():
+            cfg = _with_vault(load_config(config), vault)
+            if not db.cache_has_data(cfg):
+                _print_plan(
+                    ingester.plan_backfill(cfg, None, force=force), cfg.vault.path, cache=False
+                )
+                return
+            with closing(db.connect_readonly(cfg)) as conn:
+                _print_plan(
+                    ingester.plan_backfill(cfg, conn, force=force), cfg.vault.path, cache=True
+                )
+        return
     with _guard(), _open(config) as (cfg, conn):
-        if vault is not None:
-            cfg = cfg.model_copy(deep=True)
-            cfg.vault.path = vault.expanduser().resolve()
-        ingester.run_backfill(cfg, conn, force=force)
+        ingester.run_backfill(_with_vault(cfg, vault), conn, force=force)
+
+
+def _with_vault(cfg: Config, vault: Path | None) -> Config:
+    if vault is None:
+        return cfg
+    cfg = cfg.model_copy(deep=True)
+    cfg.vault.path = vault.expanduser().resolve()
+    return cfg
+
+
+def _count(n: int, one: str, many: str | None = None) -> str:
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def _print_plan(plan: ingester.BackfillPlan, vault: Path, cache: bool) -> None:
+    console.print("[dim]Dry run: nothing is written and no model is called.[/dim]")
+    if not cache:
+        console.print("[dim]There's no cache yet, so every file counts as new.[/dim]")
+    notes = sum(1 for f in plan.files if f.kind is not None)
+    console.print(
+        f"Files found     : {len(plan.files)} ({len(plan.files) - notes} journal, "
+        f"{notes} notes), {plan.ignored} ignored"
+    )
+    by_status = {s: sum(1 for f in plan.files if f.status == s) for s in (
+        "new", "changed", "retry", "switching", "forced", "unchanged")}
+    todo = [
+        f"{by_status['new']} new",
+        f"{by_status['changed']} changed",
+        f"{by_status['retry']} errored last time",
+    ]
+    if by_status["switching"]:
+        todo.append(f"{by_status['switching']} switching between entry and note")
+    if by_status["forced"]:
+        todo.append(f"{by_status['forced']} unchanged but forced")
+    console.print(f"Would index     : {', '.join(todo)}")
+    console.print(f"Unchanged       : {by_status['unchanged']} (skipped)")
+    if plan.dropped:
+        console.print(f"Would drop      : {_count(len(plan.dropped), 'file')} no longer in the vault")
+    extractions, summaries, embeddings = plan.model_calls()
+    console.print(
+        f"Model calls     : at least {extractions + summaries + embeddings} "
+        f"({_count(extractions, 'extraction')}, {_count(summaries, 'note summary', 'note summaries')}, "
+        f"{_count(embeddings, 'embedding')})"
+    )
+
+    problems = [f for f in plan.to_index if f.problem]
+    if problems:
+        table = Table(title="Files that would fail")
+        table.add_column("File", style="cyan")
+        table.add_column("Problem")
+        for f in problems:
+            table.add_row(escape(parser.relative_path(f.path, vault)), escape(f.problem or ""))
+        console.print(table)
+    split = [f for f in plan.to_index if len(f.entries) > 1]
+    if split:
+        table = Table(title="Files split into several entries")
+        table.add_column("File", style="cyan")
+        table.add_column("Entries", justify="right")
+        table.add_column("Dates")
+        for f in split:
+            dates = [e.entry_date.isoformat() for e in f.entries]
+            shown = ", ".join(dates[:4]) + (f" and {len(dates) - 4} more" if len(dates) > 4 else "")
+            table.add_row(escape(parser.relative_path(f.path, vault)), str(len(dates)), shown)
+        console.print(table)
+    today = date.today()
+    for f in plan.to_index:
+        for e in f.entries:
+            if e.entry_date > today:
+                console.print(
+                    f"  [yellow]dated in the future[/yellow] {e.entry_date}: "
+                    f"{escape(parser.relative_path(f.path, vault))}"
+                )
+    for key in plan.dropped:
+        console.print(f"  [yellow]would drop[/yellow] {escape(key)}")
 
 
 @app.command()
