@@ -489,3 +489,12 @@ def test_entry_pages_show_the_numbers_from_the_frontmatter(browser, journal):
     assert browser.get(f"/api/entries/{first}")["metrics"] == {}
     store.replace_entry_metrics(journal, first, {"sleep": 7.5})
     assert browser.get(f"/api/entries/{first}")["metrics"] == {"sleep": 7.5}
+
+
+def test_notes_page_lists_notes_that_went_quiet(browser, journal):
+    add_note(journal, "Jun Park")
+    for i in range(5):
+        add_entry(journal, date(2022, 1, i + 1), links=["Jun Park"], path=f"/vault/jun{i}.md")
+    data = browser.get("/api/notes")
+    assert [(n["title"], n["n"], n["last"]) for n in data["gone_quiet"]] == [("Jun Park", 5, "2022-01-05")]
+    assert data["gone_quiet_rule"] == {"min": 5, "months": 6}

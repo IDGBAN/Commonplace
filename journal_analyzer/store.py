@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import json
 import sqlite3
 from collections import defaultdict
@@ -628,6 +629,57 @@ def notes_linked_from_entries(
             (_json_list(entry_ids), limit),
         ).fetchall()
     )
+
+
+def months_before(day: date, months: int) -> date:
+    """The same day `months` months earlier, or the month's last day if it's shorter."""
+    year, month_index = divmod(day.year * 12 + day.month - 1 - months, 12)
+    month = month_index + 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+@dataclass(frozen=True)
+class Lapsed:
+    note_id: int
+    title: str
+    kind: str
+    count: int
+    first: str
+    last: str
+    busiest_year: str
+    busiest_count: int
+
+
+def lapsed_notes(
+    conn: sqlite3.Connection, min_links: int, quiet_since: date, kind: str | None = None
+) -> list[Lapsed]:
+    """Notes linked at least min_links times, but not on or after quiet_since."""
+    clauses = ["1 = 1"]
+    params: list[object] = []
+    if kind:
+        clauses.append("n.kind = ?")
+        params.append(kind.casefold())
+    rows = conn.execute(
+        f"""SELECT n.id, n.title, n.kind, COUNT(*) AS n_links,
+                   MIN(e.entry_date) AS first, MAX(e.entry_date) AS last
+            FROM notes n
+            JOIN entry_entities ee ON ee.entity_id = n.id
+            JOIN entries e ON e.id = ee.entry_id
+            WHERE {" AND ".join(clauses)}
+            GROUP BY n.id
+            HAVING COUNT(*) >= ? AND MAX(e.entry_date) < ?
+            ORDER BY n_links DESC, n.title""",
+        [*params, min_links, quiet_since.isoformat()],
+    ).fetchall()
+    out = []
+    for r in rows:
+        years = mentions_by_year(conn, r["id"])
+        busiest = max(years, key=lambda y: (y["n"], y["year"]))
+        out.append(
+            Lapsed(r["id"], r["title"], r["kind"], r["n_links"], r["first"], r["last"],
+                   busiest["year"], busiest["n"])
+        )
+    return out
 
 
 def note_outlinks(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:

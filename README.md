@@ -125,6 +125,7 @@ journal tags --similar                   # tags that look like the same thing, a
 journal entities --type people           # most-linked notes, optionally of one kind
 journal unlinked                         # notes your entries name without linking
 journal unlinked "John Doe"              # the entries that name John without a link
+journal lapsed --type people             # people you linked often but not in the last 6 months
 journal mood --since 2023-01-01          # average mood per month, with a bar chart
 journal mood --about "John Doe"          # only the days you linked John
 journal metric                           # numbers you keep in frontmatter, like sleep: 7
@@ -183,6 +184,8 @@ For each note, the cache keeps:
 - the links it and your entries make, resolved the way Obsidian does it: by file name, ignoring case, folders, headings and display text
 
 Entities come only from links. `journal entities`, the name filter in answers and the per-person mood patterns in `journal insights` all reflect exactly what you linked. A link to a note that doesn't exist yet starts counting as soon as you create the note. Links to attachments (images, video, PDFs) are ignored, and embedded attachments are left out of the indexed text.
+
+`journal lapsed` lists the notes you linked from at least 5 entries (`--min`) but not in the 6 months (`--quiet`) before your latest entry, with the year you linked each one most and how long it's been. The browser's Notes page shows the same list under Gone quiet. The months are counted back from your latest entry rather than today, so a few weeks off from writing doesn't make everyone look absent.
 
 Because only links count, an entry that says "lunch with John" without `[[John Doe]]` is missing from John's numbers. `journal unlinked` lists the notes this happens to and how often, and `journal unlinked "John Doe"` shows each of those entries with the sentence that names him, so you can add the links in Obsidian. It matches titles and aliases as whole words, ignoring case, and skips a name inside another note's longer name. The browser lists them on each note's page too.
 

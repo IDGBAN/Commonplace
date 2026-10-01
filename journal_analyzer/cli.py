@@ -45,6 +45,9 @@ console = Console()
 
 BYTES_PER_MB = 1_048_576
 MOOD_BAR_WIDTH = 20
+# `journal lapsed` defaults
+LAPSED_MIN_LINKS = 5
+LAPSED_QUIET_MONTHS = 6
 
 
 class ExportFormat(StrEnum):
@@ -1000,6 +1003,57 @@ def metric(
     for r in rows:
         bar = "█" * round(abs(r["avg"]) / top * MOOD_BAR_WIDTH)
         table.add_row(r["month"], f"{r['avg']:g}", f"[cyan]{bar}[/cyan]", str(r["n"]))
+    console.print(table)
+
+
+def _months_between(start: date, end: date) -> int:
+    return (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day)
+
+
+@app.command()
+def lapsed(
+    config: ConfigOpt = None,
+    type_: Annotated[
+        str | None,
+        typer.Option("--type", help="Only notes of this kind, meaning their folder (e.g. people)."),
+    ] = None,
+    min_links: Annotated[
+        int, typer.Option("--min", min=1, help="Linked from at least this many entries.")
+    ] = LAPSED_MIN_LINKS,
+    quiet: Annotated[
+        int, typer.Option("--quiet", min=1, help="Months without a link, counted back from your latest entry.")
+    ] = LAPSED_QUIET_MONTHS,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="How many notes.")] = 20,
+) -> None:
+    """People and places you used to write about often and haven't lately."""
+    with _guard(), _open(config) as (_, conn):
+        _, latest = store.date_bounds(conn, None, None)
+        if latest is None:
+            console.print("No entries indexed yet. Run 'journal index' first.")
+            return
+        anchor = date.fromisoformat(latest)
+        rows = store.lapsed_notes(conn, min_links, store.months_before(anchor, quiet), type_)
+    if not rows:
+        console.print(
+            f"Nothing you linked {min_links} or more times has gone "
+            f"{_count(quiet, 'month')} without a link."
+        )
+        return
+    table = Table(
+        title=f"Linked {min_links}+ times, but not in the {quiet} months before {anchor}"
+    )
+    table.add_column("Note", style="cyan")
+    table.add_column("Kind")
+    table.add_column("Entries", justify="right")
+    table.add_column("Busiest year", no_wrap=True)
+    table.add_column("Last linked", no_wrap=True)
+    table.add_column("Quiet for", justify="right", no_wrap=True)
+    for r in rows[:limit]:
+        months = _months_between(date.fromisoformat(r.last), anchor)
+        table.add_row(
+            escape(r.title), escape(r.kind), str(r.count),
+            f"{r.busiest_year} ({r.busiest_count})", r.last, _count(months, "month"),
+        )
     console.print(table)
 
 

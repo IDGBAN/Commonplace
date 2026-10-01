@@ -736,6 +736,16 @@ async function notesView(_, params) {
     })
     : null;
 
+  const rule = data.gone_quiet_rule;
+  const quiet = data.gone_quiet.length
+    ? section("Gone quiet", h("div", { class: "chips" }, data.gone_quiet.map((n) =>
+      h("a", { class: "chip", href: href.note(n.id), title: `${plural(n.n, "entry", "entries")}, last ${mediumDate(n.last)}` },
+        n.title, h("span", { class: "n" }, `last ${mediumDate(n.last)}`)))), {
+      intro: `Linked from ${rule.min} or more entries, but not in the ${rule.months} months before your latest one. journal lapsed lists them with more detail.`,
+      note: "most linked first",
+    })
+    : null;
+
   return h("div", {},
     pageHead({
       eyebrow: "Reference notes",
@@ -744,6 +754,7 @@ async function notesView(_, params) {
     }),
     h("div", { class: "filters", role: "search" }, field("Filter", filter, true), h("div", { class: "field" }, h("span", {}, "Kind"), kinds)),
     body,
+    quiet,
     unresolved);
 }
 

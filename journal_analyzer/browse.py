@@ -38,6 +38,9 @@ SIMILAR_K = 6
 NOTE_ENTRIES_LIMIT = 500
 TAG_ENTRIES_LIMIT = 1000
 UNRESOLVED_LINKS_LIMIT = 60
+# the "gone quiet" list on the notes page, the same as `journal lapsed` defaults
+LAPSED_MIN_LINKS = 5
+LAPSED_QUIET_MONTHS = 6
 COOCCURRING_LIMIT = 12
 _MAX_ROWID = 2**63 - 1
 _NO_ENTRY = "There is no indexed entry with that id."
@@ -356,9 +359,21 @@ def entry(req: Request, entry_id: str) -> Json:
 
 def notes(req: Request) -> Json:
     conn = req.conn
+    _, latest = store.date_bounds(conn, None, None)
+    quiet = (
+        store.lapsed_notes(
+            conn, LAPSED_MIN_LINKS, store.months_before(date.fromisoformat(latest), LAPSED_QUIET_MONTHS)
+        )
+        if latest else []
+    )
     return {
         "kinds": [dict(r) for r in store.notes_by_kind(conn)],
         "notes": _note_briefs(conn, store.all_notes(conn)),
+        "gone_quiet": [
+            {"id": r.note_id, "title": r.title, "kind": r.kind, "n": r.count, "last": r.last}
+            for r in quiet
+        ],
+        "gone_quiet_rule": {"min": LAPSED_MIN_LINKS, "months": LAPSED_QUIET_MONTHS},
         "unresolved_links": [
             dict(r) for r in store.unresolved_links(conn, UNRESOLVED_LINKS_LIMIT)
         ],
