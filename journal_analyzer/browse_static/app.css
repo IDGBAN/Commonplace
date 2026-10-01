@@ -281,6 +281,7 @@ h3 { font-size: 1.05rem; }
 }
 .button:hover { color: var(--ink); border-color: var(--ink-faint); }
 .button[aria-disabled="true"], .button:disabled { opacity: 0.45; pointer-events: none; }
+.button[hidden] { display: none; }
 .button kbd { font: 0.72rem var(--mono); color: var(--ink-faint); }
 
 /* The signature: your text beside the app's reading of it */
@@ -535,6 +536,27 @@ table.data .err { color: var(--alert); font-size: 0.86rem; }
 }
 .search-box input:focus { outline: none; border-color: var(--pencil); box-shadow: 0 0 0 3px var(--pencil-wash); }
 .search-status { color: var(--pencil); font-size: 0.9rem; margin: 0 0 1rem; min-height: 1.4rem; }
+
+/* Ask */
+
+.thread { display: grid; gap: 1.6rem; max-width: 52rem; margin-bottom: 1.6rem; }
+.turn { padding-bottom: 1.4rem; border-bottom: 1px solid var(--rule); }
+.turn-q { margin: 0 0 0.6rem; font: 600 1.15rem/1.35 var(--display); }
+.turn-rewrite { margin: -0.3rem 0 0.7rem; color: var(--ink-faint); font-size: 0.88rem; }
+.turn-running { display: flex; align-items: center; gap: 1rem; }
+.turn-running .search-status { margin: 0; }
+.turn-answer { font: 1.06rem/1.65 var(--read); white-space: pre-wrap; overflow-wrap: anywhere; max-width: var(--measure); }
+.turn-sources { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; margin-top: 0.9rem; }
+.turn-sources .gloss-label { margin: 0; }
+.turn-meta { margin: 0.7rem 0 0; color: var(--ink-faint); font-size: 0.86rem; }
+.turn-read { margin-top: 0.8rem; }
+.turn-read summary { cursor: pointer; color: var(--pencil); font-size: 0.9rem; width: fit-content; }
+.turn-read[open] summary { margin-bottom: 0.8rem; }
+.turn-read .note-grid { margin-bottom: 0.8rem; }
+.ask-box { max-width: 52rem; }
+.ask-box button:disabled { opacity: 0.45; pointer-events: none; }
+.ask-foot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: 52rem; }
+.ask-foot .section-note { margin: 0; }
 
 /* States */
 

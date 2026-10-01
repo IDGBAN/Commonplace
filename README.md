@@ -129,6 +129,8 @@ journal browse --port 9000 --no-open
 
 `journal browse` shows everything in the cache as a local web page, so you can see exactly what the app knows. Each entry page puts your stored text next to what the models took from it: mood, summary, tags, the notes and days it links to, links that don't resolve to a note yet, which model read it and when, whether it has a vector, the entries closest to it in meaning, and the digests that cover it. There are also pages for notes (aliases, properties, backlinks, mentions by year), tags (with average mood against your usual), digests, a mood calendar, and every tracked file with its index status and errors. Type `/` to jump to a date, note or tag, and `j`/`k` to step through entries.
 
+The Ask page answers questions the same way `journal ask` does. You see each step while it works, then the answer with its sources linked to their entry and note pages, and a list of everything the model read. Follow-ups build on earlier answers like `journal chat`, and the conversation stays put while you open the pages it cites. Asking needs Ollama; Cancel stops waiting for an answer. From the jump box, type a question and pick "Ask".
+
 It opens the cache read-only and never touches your notes, so it's safe to leave open while `journal watch` runs. Reload a page to see new changes. It only listens on 127.0.0.1 and turns away requests that use any other host name. Keyword search works offline; matching by meaning needs Ollama and falls back to keywords when it isn't running. Nothing loads from the internet. Ctrl-C stops it.
 
 ### Reflection commands

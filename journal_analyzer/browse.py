@@ -3,6 +3,8 @@
 The server binds to 127.0.0.1, only answers GET, and opens the cache with
 db.connect_readonly, so it can run next to `journal watch` without touching it.
 Every value comes from store/query, the same functions the CLI and models use.
+Asking a question streams server-sent events from GET /api/ask, since an
+answer can take minutes and the page shows each step as it happens.
 """
 
 from __future__ import annotations
@@ -24,13 +26,14 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import db, fields, parser, query, store
 from .config import Config
-from .models import JournalError
+from .models import Answer, JournalError
 from .ollama_client import OllamaClient
 from .parser import relative_path
 
 DEFAULT_PORT = 8765
 HOST = "127.0.0.1"
 MAX_PAGE_SIZE = 200
+MAX_QUESTION_CHARS = 2000
 SIMILAR_K = 6
 NOTE_ENTRIES_LIMIT = 500
 TAG_ENTRIES_LIMIT = 1000
@@ -494,6 +497,48 @@ def search(req: Request) -> Json:
     }
 
 
+def _ask_params(params: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
+    question = params.get("q", "").strip()
+    if not question:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Type a question to ask.")
+    if len(question) > MAX_QUESTION_CHARS:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"That question is over {MAX_QUESTION_CHARS} characters. Try a shorter one.",
+        )
+    try:
+        raw = json.loads(params.get("history") or "[]")
+    except json.JSONDecodeError:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "The conversation so far couldn't be read.") from None
+    if not isinstance(raw, list) or not all(
+        isinstance(turn, list) and len(turn) == 2 and all(isinstance(x, str) for x in turn)
+        for turn in raw
+    ):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "The conversation so far couldn't be read.")
+    history = [(q, a) for q, a in raw][-query.CHAT_HISTORY_TURNS:]
+    return question, history
+
+
+def _answer_json(conn: sqlite3.Connection, answer: Answer) -> Json:
+    dates = []
+    for day in answer.cited_dates:
+        rows = store.entries_in_range(conn, day, day)
+        dates.append({"date": day.isoformat(), "id": rows[0]["id"] if rows else None})
+    notes = []
+    for title in answer.cited_notes:
+        found = store.find_notes(conn, title)
+        notes.append({"title": title, "id": found[0]["id"] if found else None})
+    read = store.entries_by_ids(conn, answer.read_entry_ids)
+    return {
+        "text": answer.text,
+        "body": answer.body,
+        "stage": answer.stage_used,
+        "sources": {"dates": dates, "notes": notes},
+        "entries": _entry_briefs(conn, read),
+        "notes": _note_briefs(conn, store.notes_by_ids(conn, answer.read_note_ids)),
+    }
+
+
 Handler = Callable[..., Json]
 
 _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
@@ -527,7 +572,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Unexpected Host header."})
             return
         url = urlsplit(self.path)
-        if url.path.startswith("/api/"):
+        if url.path == "/api/ask":
+            self._ask(url.query)
+        elif url.path.startswith("/api/"):
             self._api(url.path, url.query)
         else:
             self._static(url.path)
@@ -574,6 +621,52 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, payload)
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "No such API route."})
+
+    def _ask(self, query_string: str) -> None:
+        params = {k: v[-1] for k, v in parse_qs(query_string).items()}
+        try:
+            question, history = _ask_params(params)
+        except ApiError as exc:
+            self._send_json(exc.status, {"error": str(exc)})
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        for key, value in _SECURITY_HEADERS.items():
+            self.send_header(key, value)
+        self.end_headers()
+
+        def send(event: str, data: Json) -> None:
+            body = json.dumps(data, default=_json_default, ensure_ascii=False)
+            self.wfile.write(f"event: {event}\ndata: {body}\n\n".encode())
+            self.wfile.flush()
+
+        config = self.server.config
+        try:
+            try:
+                with closing(db.connect_readonly(config)) as conn:
+                    client = self.server.make_client(config)
+                    standalone = question
+                    if history:
+                        send("stage", {"text": "Resolving your follow-up..."})
+                        standalone = query.contextualize_question(question, history, config, client)
+                        if standalone != question:
+                            send("rewritten", {"question": standalone})
+                    result = query.answer(
+                        standalone, config, conn, client,
+                        on_stage=lambda stage: send("stage", {"text": stage}),
+                    )
+                    send("answer", {"question": standalone, **_answer_json(conn, result)})
+            except JournalError as exc:
+                send("problem", {"error": str(exc)})
+            except sqlite3.Error as exc:
+                send("problem", {"error": f"The cache couldn't be read: {exc}"})
+            except (ConnectionError, OSError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - otherwise the page waits on a dead stream
+                send("problem", {"error": f"The journal browser hit a bug: {type(exc).__name__}: {exc}"})
+        except (ConnectionError, OSError):
+            # the page closed or cancelled; stop here instead of running more model calls
+            return
 
     def _static(self, path: str) -> None:
         asset = _STATIC.get(path)

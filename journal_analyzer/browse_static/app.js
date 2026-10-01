@@ -122,6 +122,7 @@ const href = {
   digest: (type, key) => `#/digest/${type}/${encodeURIComponent(key)}`,
   files: (params) => `#/files${query(params)}`,
   search: (q) => `#/search${query({ q })}`,
+  ask: (q) => `#/ask${query({ q })}`,
 };
 
 function query(params) {
@@ -1044,6 +1045,206 @@ async function searchView(_, params) {
     results);
 }
 
+// ---------------------------------------------------------------- ask
+
+const STAGE_LABELS = {
+  aggregate: "from statistics over your entries",
+  fast_summary: "from stored summaries and notes",
+  precise_raw: "from the full text of the entries",
+  retrieval_empty: "nothing matched",
+};
+// matches query.CHAT_HISTORY_TURNS and the part of each answer it keeps
+const HISTORY_TURNS = 6;
+const HISTORY_ANSWER_CHARS = 400;
+
+// Kept outside the view so a question keeps running, and the conversation
+// stays, while you look at the entries it cites.
+const ask = { turns: loadTurns(), controller: null, redraw: null };
+
+function loadTurns() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem("ask-turns") || "[]");
+    // a question that was still running when the page reloaded has no answer coming
+    return saved.map((t) => (t.status === "running" ? { ...t, status: "cancelled" } : t));
+  } catch {
+    return [];
+  }
+}
+
+function saveTurns() {
+  try {
+    sessionStorage.setItem("ask-turns", JSON.stringify(ask.turns));
+  } catch {
+    // storage can be full or refused; the conversation still works for this visit
+  }
+}
+
+function changed() {
+  saveTurns();
+  if (ask.redraw) ask.redraw();
+}
+
+async function readEvents(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, cut);
+      buffer = buffer.slice(cut + 2);
+      let event = "message";
+      let data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event: ")) event = line.slice(7);
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      onEvent(event, data ? JSON.parse(data) : {});
+    }
+  }
+}
+
+async function askQuestion(question) {
+  const history = ask.turns
+    .filter((t) => t.status === "done")
+    .slice(-HISTORY_TURNS)
+    .map((t) => [t.rewritten || t.question, t.answer.text.slice(0, HISTORY_ANSWER_CHARS)]);
+  const turn = { question, status: "running", stage: "Starting…" };
+  ask.turns.push(turn);
+  const controller = new AbortController();
+  ask.controller = controller;
+  changed();
+  try {
+    const response = await fetch(`/api/ask${query({ q: question, history: history.length ? JSON.stringify(history) : "" })}`, {
+      headers: { Accept: "text/event-stream" }, signal: controller.signal,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || `The question couldn't be asked (${response.status}).`);
+    }
+    await readEvents(response, (event, data) => {
+      if (event === "stage") turn.stage = data.text;
+      else if (event === "rewritten") turn.rewritten = data.question;
+      else if (event === "answer") Object.assign(turn, { status: "done", answer: data });
+      else if (event === "problem") Object.assign(turn, { status: "failed", error: data.error });
+      changed();
+    });
+    if (turn.status === "running") {
+      Object.assign(turn, { status: "failed", error: "The answer stopped partway. Is `journal browse` still running?" });
+    }
+  } catch (err) {
+    if (controller.signal.aborted) turn.status = "cancelled";
+    else Object.assign(turn, { status: "failed", error: err.message === "Failed to fetch" ? "The journal browser isn't answering. Is `journal browse` still running?" : err.message });
+  } finally {
+    if (ask.controller === controller) ask.controller = null;
+    changed();
+  }
+}
+
+function sourceChips(answer) {
+  const { dates, notes } = answer.sources;
+  if (!dates.length && !notes.length) return null;
+  return h("div", { class: "turn-sources" },
+    h("span", { class: "gloss-label" }, "Sources"),
+    h("div", { class: "chips" },
+      dates.map((d) => d.id != null
+        ? h("a", { class: "chip pencil", href: href.entry(d.id) }, mediumDate(d.date))
+        : h("span", { class: "chip ghost" }, mediumDate(d.date))),
+      notes.map((n) => n.id != null
+        ? h("a", { class: "chip pencil", href: href.note(n.id) }, n.title)
+        : h("span", { class: "chip ghost" }, n.title))));
+}
+
+function turnView(turn, scale, index) {
+  const parts = [h("p", { class: "turn-q" }, turn.question)];
+  if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, turn.rewritten)));
+  if (turn.status === "running") {
+    parts.push(h("div", { class: "turn-running" },
+      h("p", { class: "search-status", role: "status" }, turn.stage),
+      h("button", { class: "button", type: "button", onclick: () => ask.controller?.abort() }, "Cancel")));
+  } else if (turn.status === "failed") {
+    parts.push(h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't answer"), h("span", {}, turn.error)));
+  } else if (turn.status === "cancelled") {
+    parts.push(h("p", { class: "turn-meta" }, "Cancelled before it finished."));
+  } else {
+    const a = turn.answer;
+    const readCount = a.entries.length + a.notes.length;
+    parts.push(
+      h("div", { class: "turn-answer" }, a.body),
+      sourceChips(a),
+      h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}.`),
+      readCount ? h("details", { class: "turn-read" },
+        h("summary", {}, `What it read: ${plural(a.entries.length, "entry", "entries")}, ${plural(a.notes.length, "note")}`),
+        a.notes.length ? h("div", { class: "note-grid" }, a.notes.map((n) =>
+          h("a", { class: "note-card", href: href.note(n.id) },
+            h("div", { class: "note-title" }, n.title),
+            h("div", { class: "note-aliases" }, kindLabel(n.kind)),
+            n.summary ? h("div", { class: "note-summary" }, n.summary) : null))) : null,
+        a.entries.length ? entryLines(a.entries, scale) : null) : null);
+  }
+  return h("article", { class: "turn", "aria-label": `Question ${index + 1}` }, parts);
+}
+
+async function askView(_, params) {
+  const cat = await getCatalog();
+  const scale = cat.mood_scale;
+  document.title = "Ask · Commonplace";
+  const thread = h("div", { class: "thread", "aria-live": "polite" });
+  const input = h("input", {
+    type: "text", placeholder: "When did I last see John? How was March?", "aria-label": "Your question",
+    autocomplete: "off", maxlength: 2000,
+  });
+  const go = h("button", { class: "button", type: "submit" }, "Ask");
+  const reset = h("button", { class: "button", type: "button" }, "New conversation");
+  const hint = h("p", { class: "section-note" });
+  const form = h("form", { class: "search-box ask-box", role: "search" }, input, go);
+
+  const draw = () => {
+    const running = ask.turns.some((t) => t.status === "running");
+    go.disabled = running;
+    reset.hidden = !ask.turns.length || running;
+    hint.textContent = ask.turns.some((t) => t.status === "done")
+      ? "Follow-ups like “what about the month after?” build on the answers above."
+      : "";
+    fill(thread, ask.turns.length
+      ? ask.turns.map((t, i) => turnView(t, scale, i))
+      : empty("Ask anything about your journal. Answers are built from your entries and notes the same way ", h("code", {}, "journal ask"), " does, and each one lists what it read. Questions need Ollama running; everything else on these pages works without it."));
+  };
+  ask.redraw = () => {
+    if (thread.isConnected) draw();
+  };
+
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const q = input.value.trim();
+    if (!q || ask.controller) return;
+    input.value = "";
+    askQuestion(q);
+  });
+  reset.addEventListener("click", () => {
+    ask.turns = [];
+    changed();
+    input.focus();
+  });
+
+  const preset = (params.get("q") || "").trim();
+  if (preset) {
+    replaceParams("/ask", {});
+    if (!ask.controller) askQuestion(preset);
+  }
+  draw();
+  setTimeout(() => input.focus(), 0);
+  return h("div", {},
+    pageHead({
+      eyebrow: "Questions about your journal", title: "Ask",
+      lede: "Ask in plain words. The answer cites the days and notes it drew on, and you can open each one.",
+    }),
+    thread, form, h("div", { class: "ask-foot" }, hint, reset));
+}
+
 function notFoundView() {
   document.title = "Not found · Commonplace";
   return h("div", {}, pageHead({ title: "There's no page here" }),
@@ -1074,6 +1275,7 @@ const routes = [
   [/^\/digest\/(year|month|week)\/([^/]+)$/, digestView, "digests"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
+  [/^\/ask$/, askView, "ask"],
 ];
 
 let renderToken = 0;
@@ -1183,7 +1385,10 @@ async function jumpSearch() {
     groups.push(["Tags", tags.map((t) => ({ primary: t.name, secondary: plural(t.n, "entry", "entries"), link: href.tag(t.name) }))]);
   }
   if (!datePrefix && entries.length) groups.push(entryGroup);
-  groups.push(["Search", [{ primary: `Search for “${raw}”`, secondary: "keywords and meaning", link: href.search(raw) }]]);
+  groups.push(["Search", [
+    { primary: `Search for “${raw}”`, secondary: "keywords and meaning", link: href.search(raw) },
+    { primary: `Ask “${raw}”`, secondary: "an answer from your entries and notes", link: href.ask(raw) },
+  ]]);
 
   jump.options = [];
   fill(jump.list, ...groups.flatMap(([label, items]) => [

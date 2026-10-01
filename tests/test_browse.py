@@ -9,8 +9,13 @@ from urllib.parse import quote
 import pytest
 from conftest import add_entry, add_note
 
-from journal_analyzer import browse, db, store
-from journal_analyzer.models import DatabaseError, Extraction, OllamaUnavailableError
+from journal_analyzer import browse, db, query, store
+from journal_analyzer.models import (
+    DatabaseError,
+    Extraction,
+    OllamaUnavailableError,
+    QueryPlan,
+)
 
 
 class Browser:
@@ -376,3 +381,72 @@ def test_port_in_use_is_explained(config, journal):
             browse.make_server(config, port=first.port)
     finally:
         first.server_close()
+
+
+def _events(response) -> list[tuple[str, dict]]:
+    assert response.getheader("Content-Type").startswith("text/event-stream")
+    out = []
+    for block in response.read().decode().split("\n\n"):
+        if not block.strip():
+            continue
+        lines = dict(line.split(": ", 1) for line in block.splitlines())
+        out.append((lines["event"], json.loads(lines["data"])))
+    return out
+
+
+def test_ask_streams_its_steps_then_the_answer(browser, journal, fake_client):
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "You hiked Bear Mountain with John on 2024-01-15."
+    response = browser.request(f"/api/ask?q={quote('When did I hike?')}")
+    assert response.status == 200
+    events = _events(response)
+    kinds = [kind for kind, _ in events]
+    assert kinds[-1] == "answer" and "stage" in kinds
+    answer = events[-1][1]
+    assert answer["body"] == "You hiked Bear Mountain with John on 2024-01-15."
+    assert answer["stage"] == "fast_summary"
+    first = entry_id(journal, "2024-01-15")
+    assert {"date": "2024-01-15", "id": first} in answer["sources"]["dates"]
+    assert {e["id"] for e in answer["entries"]} == {first, entry_id(journal, "2024-01-16")}
+    assert "Sources:" in answer["text"]
+
+
+def test_ask_follow_ups_are_rewritten_first(browser, fake_client):
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+
+    def chat(model, messages):
+        if messages[0]["content"] == query._CONTEXTUALIZE_SYSTEM:
+            assert "User: How was January?" in messages[-1]["content"]
+            return "How was February 2024?"
+        return "Quiet."
+
+    fake_client.chat_response = chat
+    history = json.dumps([["How was January?", "Calm."]])
+    events = _events(browser.request(f"/api/ask?q=and+Feb%3F&history={quote(history)}"))
+    assert ("rewritten", {"question": "How was February 2024?"}) in events
+    assert events[-1][1]["question"] == "How was February 2024?"
+
+
+def test_ask_reports_problems_inside_the_stream(browser, fake_client):
+    def down(model, messages, schema, options=None):
+        raise OllamaUnavailableError("Cannot reach Ollama at http://localhost:11434")
+
+    fake_client.chat_structured = down
+    events = _events(browser.request("/api/ask?q=anything"))
+    assert events[-1][0] == "problem"
+    assert "Cannot reach Ollama" in events[-1][1]["error"]
+
+
+def test_ask_rejects_bad_input_before_streaming(browser):
+    assert "Type a question" in browser.get("/api/ask?q=%20", status=400)["error"]
+    long = "x" * (browse.MAX_QUESTION_CHARS + 1)
+    assert "shorter" in browser.get(f"/api/ask?q={long}", status=400)["error"]
+    for history in ("not json", json.dumps({"a": 1}), json.dumps([["only one"]])):
+        error = browser.get(f"/api/ask?q=hi&history={quote(history)}", status=400)["error"]
+        assert "conversation" in error
+
+
+def test_ask_keeps_only_the_last_turns_of_history():
+    turns = [[f"q{i}", f"a{i}"] for i in range(10)]
+    _, history = browse._ask_params({"q": "next", "history": json.dumps(turns)})
+    assert history == [(f"q{i}", f"a{i}") for i in range(4, 10)]
