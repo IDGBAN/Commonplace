@@ -52,6 +52,19 @@ def test_years_are_built_from_month_digests_not_entries(conn, config, fake_clien
     assert "day 2024-01-15" not in year_prompt
 
 
+def test_year_numbers_count_every_entry_equally(conn, config, fake_client):
+    for day in (1, 2, 3):
+        _add(conn, date(2024, 1, day), 2.0, ("work",))
+    _add(conn, date(2024, 2, 1), 8.0, ("rest",))
+    fake_client.chat_response = "A digest."
+    rollups.generate_rollups(config, conn, fake_client)
+    year = _rollup(conn, "year", "2024")
+    # the month averages are 2 and 8, but three of the four entries are January's
+    assert year["avg_mood"] == 3.5
+    assert year["entry_count"] == 4
+    assert json.loads(year["dominant_tags"]) == ["work", "rest"]
+
+
 def test_only_stale_skips_fresh_digests(conn, config, fake_client):
     _seed(conn)
     fake_client.chat_response = "A digest."

@@ -16,6 +16,8 @@ from .ollama_client import OllamaClient
 
 console = Console()
 
+DOMINANT_TAG_COUNT = 5
+
 _VOICE = (
     "Write it in the journal writer's own first-person voice (I, me, my), as "
     "if they were looking back on it themselves, and open with what happened "
@@ -94,21 +96,28 @@ def _needs_generation(
     return (not only_stale) or bool(row["stale"])
 
 
+def _member_stats(
+    members: list[sqlite3.Row], tags_by_entry: dict[int, list[str]]
+) -> tuple[list[str], float | None]:
+    tag_counter: Counter[str] = Counter()
+    for row in members:
+        tag_counter.update(tags_by_entry.get(row["id"], []))
+    moods = [r["mood_score"] for r in members if r["mood_score"] is not None]
+    dominant = [t for t, _ in tag_counter.most_common(DOMINANT_TAG_COUNT)]
+    avg_mood = round(sum(moods) / len(moods), 2) if moods else None
+    return dominant, avg_mood
+
+
 def _rollup_members_digest(
     conn: sqlite3.Connection, members: list[sqlite3.Row]
 ) -> tuple[str, list[str], float | None]:
     lines: list[str] = []
-    tag_counter: Counter[str] = Counter()
-    moods: list[float] = []
     ids = [r["id"] for r in members]
     tags_by_entry = store.tags_for_entries(conn, ids)
     notes_by_entry = store.entities_for_entries(conn, ids)
     for row in members:
         tags = tags_by_entry.get(row["id"], [])
-        tag_counter.update(tags)
         mood = row["mood_score"]
-        if mood is not None:
-            moods.append(mood)
         mood_str = f"{mood:g}" if mood is not None else "-"
         names = [n["name"] for n in notes_by_entry.get(row["id"], [])]
         links = f" (links: {', '.join(names)})" if names else ""
@@ -116,8 +125,7 @@ def _rollup_members_digest(
             f"- {row['entry_date']} (mood {mood_str}) "
             f"[{', '.join(tags)}]{links}: {row['summary'] or '(no summary)'}"
         )
-    dominant = [t for t, _ in tag_counter.most_common(5)]
-    avg_mood = round(sum(moods) / len(moods), 2) if moods else None
+    dominant, avg_mood = _member_stats(members, tags_by_entry)
     return "\n".join(lines), dominant, avg_mood
 
 
@@ -152,7 +160,11 @@ def _generate_periods(
 
 
 def _generate_years(
-    config: Config, conn: sqlite3.Connection, client: OllamaClient, only_stale: bool
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    only_stale: bool,
+    month_groups: dict[str, list[sqlite3.Row]],
 ) -> int:
     month_rollups = conn.execute(
         "SELECT * FROM rollups WHERE period_type = 'month' ORDER BY period_key"
@@ -165,14 +177,7 @@ def _generate_years(
         if not _needs_generation(conn, "year", year, only_stale):
             continue
         lines = []
-        tag_counter: Counter[str] = Counter()
-        moods: list[float] = []
-        total_entries = 0
         for m in months:
-            tag_counter.update(json.loads(m["dominant_tags"] or "[]"))
-            if m["avg_mood"] is not None:
-                moods.append(m["avg_mood"])
-            total_entries += m["entry_count"] or 0
             mood_str = f"{m['avg_mood']:g}" if m["avg_mood"] is not None else "-"
             lines.append(f"- {m['period_key']} (avg mood {mood_str}): {m['summary']}")
         with _writing("year", year):
@@ -183,10 +188,19 @@ def _generate_years(
                     {"role": "user", "content": f"Year {year} months:\n" + "\n".join(lines)},
                 ],
             ).strip()
-        avg_mood = round(sum(moods) / len(moods), 2) if moods else None
-        dominant = [t for t, _ in tag_counter.most_common(5)]
+        # The text comes from month digests, but the numbers come from the
+        # entries: an average of monthly averages would let a one-entry month
+        # count as much as a full one.
+        members = [
+            row
+            for key, rows in sorted(month_groups.items())
+            if key.startswith(f"{year}-")
+            for row in rows
+        ]
+        tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in members])
+        dominant, avg_mood = _member_stats(members, tags_by_entry)
         store.upsert_rollup(
-            conn, "year", year, summary, json.dumps(dominant), avg_mood, total_entries
+            conn, "year", year, summary, json.dumps(dominant), avg_mood, len(members)
         )
         generated += 1
         console.print(f"rollup year {year}")
@@ -212,7 +226,7 @@ def generate_rollups(
             "month", groups["month"], config, conn, client, only_stale
         )
     if "year" in period_types:
-        counts["year"] = _generate_years(config, conn, client, only_stale)
+        counts["year"] = _generate_years(config, conn, client, only_stale, groups["month"])
     if "week" in period_types:
         counts["week"] = _generate_periods(
             "week", groups["week"], config, conn, client, only_stale
