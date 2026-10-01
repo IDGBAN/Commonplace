@@ -129,7 +129,7 @@ def _entry_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Jso
     ]
 
 
-def _note_ref(row: sqlite3.Row) -> Json:
+def _note_ref(row: sqlite3.Row | dict[str, Any]) -> Json:
     return {"id": row["id"], "title": row["title"], "kind": row["kind"]}
 
 
@@ -181,6 +181,20 @@ def _rollup_json(row: sqlite3.Row) -> Json:
         "generated_at": row["generated_at"],
         "start": bounds[0],
         "end": bounds[1],
+    }
+
+
+def _note_digest_json(row: sqlite3.Row | None) -> Json | None:
+    if row is None:
+        return None
+    return {
+        "summary": row["summary"],
+        "stale": bool(row["stale"]),
+        "generated_at": row["generated_at"],
+        "entries": row["entry_count"],
+        "mood": row["avg_mood"],
+        "first": row["first_date"],
+        "last": row["last_date"],
     }
 
 
@@ -384,6 +398,8 @@ def note(req: Request, note_id: str) -> Json:
         "avg_mood": store.browse_mood(conn, note_id=row["id"]),
         "baseline_mood": store.overall_mood(conn, None, None)[0],
         "mood_scale": req.config.indexing.mood_scale_max,
+        "digest": _note_digest_json(store.get_note_digest(conn, row["link_key"])),
+        "digest_min_mentions": req.config.rollups.note_min_mentions,
         "outlinks": [_note_ref(r) for r in store.note_outlinks(conn, row["id"])],
         "backlinks": [_note_ref(r) for r in store.note_backlinks(conn, row["id"])],
         "entries": linking,
@@ -422,7 +438,17 @@ def digests(req: Request) -> Json:
     grouped: dict[str, list[Json]] = {"year": [], "month": [], "week": []}
     for row in store.all_rollups(req.conn):
         grouped.setdefault(row["period_type"], []).append(_rollup_json(row))
-    return {"mood_scale": req.config.indexing.mood_scale_max, "digests": grouped}
+    notes = [
+        {**_note_ref({"id": r["note_id"], "title": r["title"], "kind": r["kind"]}),
+         **(_note_digest_json(r) or {})}
+        for r in store.all_note_digests(req.conn)
+    ]
+    return {
+        "mood_scale": req.config.indexing.mood_scale_max,
+        "digests": grouped,
+        "notes": notes,
+        "note_min_mentions": req.config.rollups.note_min_mentions,
+    }
 
 
 def digest(req: Request, period_type: str, period_key: str) -> Json:

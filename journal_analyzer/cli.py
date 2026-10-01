@@ -362,7 +362,7 @@ def rollup(
         )
     console.print(
         f"Generated {counts['week']} week, {counts['month']} month, "
-        f"{counts['year']} year rollups."
+        f"{counts['year']} year and {counts['note']} relationship rollups."
     )
 
 
@@ -378,7 +378,7 @@ def stats(config: ConfigOpt = None) -> None:
         console.print(f"Files tracked   : {s.files} ({s.errored_files} errored)")
         console.print(f"Date range      : {s.date_from or '-'} .. {s.date_to or '-'}")
         console.print(f"Tags / links    : {s.tags} / {s.links}")
-        console.print(f"Rollup digests  : {s.rollups}")
+        console.print(f"Rollup digests  : {s.rollups} (and {s.note_digests} for notes)")
         console.print(f"DB size         : {size_mb:.2f} MB ({escape(str(cfg.db.path))})")
         for row in store.errored_files(conn):
             console.print(
@@ -466,7 +466,7 @@ def note(
     ] = 10,
 ) -> None:
     """Show a reference note and the entries that link to it."""
-    with _guard(), _open(config) as (_, conn):
+    with _guard(), _open(config) as (cfg, conn):
         matches = store.find_notes(conn, name)
         if not matches:
             console.print(
@@ -480,10 +480,12 @@ def note(
             )
             console.print(_note_table(conn, matches))
             raise typer.Exit(1)
-        _print_note(conn, matches[0], raw=raw, limit=limit)
+        _print_note(cfg, conn, matches[0], raw=raw, limit=limit)
 
 
-def _print_note(conn: sqlite3.Connection, row: sqlite3.Row, raw: bool, limit: int) -> None:
+def _print_note(
+    cfg: Config, conn: sqlite3.Connection, row: sqlite3.Row, raw: bool, limit: int
+) -> None:
     parsed = store.note_from_row(row)
     console.print(
         f"[bold cyan]{escape(parsed.title)}[/bold cyan]  ({escape(parsed.kind)})  "
@@ -509,6 +511,17 @@ def _print_note(conn: sqlite3.Connection, row: sqlite3.Row, raw: bool, limit: in
     if backlinks:
         console.print(
             "  linked from notes: " + escape(", ".join(r["title"] for r in backlinks))
+        )
+    digest = store.get_note_digest(conn, row["link_key"])
+    minimum = cfg.rollups.note_min_mentions
+    if digest is not None and digest["summary"]:
+        stale = " [yellow](out of date, run 'journal rollup')[/yellow]" if digest["stale"] else ""
+        console.print(f"\n[bold]Over the years[/bold]{stale}")
+        console.print(f"  {escape(digest['summary'])}")
+    elif minimum and mentions is not None and mentions.count >= minimum:
+        console.print(
+            "\n[dim]No relationship digest yet. 'journal rollup' writes one for notes "
+            f"linked from {minimum} or more entries.[/dim]"
         )
     recent = store.entries_mentioning(conn, row["id"], limit)
     if recent:

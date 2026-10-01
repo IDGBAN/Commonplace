@@ -511,6 +511,7 @@ def entry_ids_mentioning(conn: sqlite3.Connection, note_ids: list[int]) -> list[
 def entries_mentioning(
     conn: sqlite3.Connection, note_id: int, limit: int
 ) -> list[sqlite3.Row]:
+    """Newest first. A negative limit means all of them."""
     return list(
         conn.execute(
             """SELECT e.* FROM entries e
@@ -602,6 +603,129 @@ def upsert_rollup(
             (period_type, period_key, summary, dominant_tags_json,
              avg_mood, entry_count, _now()),
         )
+
+
+def link_targets_for_file(conn: sqlite3.Connection, path: str) -> list[str]:
+    rows = conn.execute(
+        """SELECT DISTINCT el.target FROM entry_links el
+           JOIN entries e ON e.id = el.entry_id
+           WHERE e.file_path = ?""",
+        (path,),
+    )
+    keys = [r["target"] for r in rows]
+    note = conn.execute("SELECT link_key FROM notes WHERE file_path = ?", (path,)).fetchone()
+    return keys + ([note["link_key"]] if note else [])
+
+
+def link_targets_for_entries(conn: sqlite3.Connection, entry_ids: list[int]) -> list[str]:
+    if not entry_ids:
+        return []
+    return [
+        r["target"]
+        for r in conn.execute(
+            f"SELECT DISTINCT target FROM entry_links WHERE entry_id IN ({_JSON_VALUES})",
+            (_json_list(entry_ids),),
+        )
+    ]
+
+
+def mark_note_digests_stale(conn: sqlite3.Connection, link_keys: Sequence[str]) -> None:
+    if not link_keys:
+        return
+    with conn:
+        conn.execute(
+            f"UPDATE note_digests SET stale = 1 WHERE link_key IN ({_JSON_VALUES})",
+            (_json_list(list(dict.fromkeys(link_keys))),),
+        )
+
+
+def notes_linked_at_least(conn: sqlite3.Connection, minimum: int) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT n.*, COUNT(*) AS n_entries
+               FROM notes n
+               JOIN entry_entities ee ON ee.entity_id = n.id
+               GROUP BY n.id
+               HAVING COUNT(*) >= ?
+               ORDER BY n_entries DESC, n.title""",
+            (minimum,),
+        ).fetchall()
+    )
+
+
+def upsert_note_digest(
+    conn: sqlite3.Connection,
+    link_key: str,
+    summary: str,
+    mentions: Mentions,
+    avg_mood: float | None,
+) -> None:
+    with conn:
+        conn.execute(
+            """INSERT INTO note_digests
+               (link_key, summary, entry_count, avg_mood, first_date, last_date,
+                stale, generated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+               ON CONFLICT(link_key) DO UPDATE SET
+                 summary = excluded.summary,
+                 entry_count = excluded.entry_count,
+                 avg_mood = excluded.avg_mood,
+                 first_date = excluded.first_date,
+                 last_date = excluded.last_date,
+                 stale = 0,
+                 generated_at = excluded.generated_at""",
+            (link_key, summary, mentions.count, avg_mood, mentions.first, mentions.last, _now()),
+        )
+
+
+def get_note_digest(conn: sqlite3.Connection, link_key: str) -> sqlite3.Row | None:
+    try:
+        return conn.execute(
+            "SELECT * FROM note_digests WHERE link_key = ?", (link_key,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None  # a read-only connection to a cache from before the table
+
+
+def note_digests_for(conn: sqlite3.Connection, link_keys: list[str]) -> dict[str, sqlite3.Row]:
+    if not link_keys:
+        return {}
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM note_digests WHERE link_key IN ({_JSON_VALUES})",
+            (_json_list(link_keys),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r["link_key"]: r for r in rows}
+
+
+def all_note_digests(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """SELECT d.*, n.id AS note_id, n.title, n.kind
+                   FROM note_digests d JOIN notes n ON n.link_key = d.link_key
+                   ORDER BY d.entry_count DESC, n.title"""
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def prune_note_digests(conn: sqlite3.Connection, keep: set[str]) -> int:
+    doomed = [
+        r["link_key"]
+        for r in conn.execute("SELECT link_key FROM note_digests")
+        if r["link_key"] not in keep
+    ]
+    if doomed:
+        with conn:
+            conn.execute(
+                f"DELETE FROM note_digests WHERE link_key IN ({_JSON_VALUES})",
+                (_json_list(doomed),),
+            )
+    return len(doomed)
 
 
 _PERIOD_KEY_FN = {"week": week_key, "month": month_key, "year": year_key}
@@ -1125,6 +1249,7 @@ class CacheStats:
     tags: int
     links: int  # only links that resolve to an indexed note
     rollups: int
+    note_digests: int
 
 
 def stats(conn: sqlite3.Connection) -> CacheStats:
@@ -1143,7 +1268,15 @@ def stats(conn: sqlite3.Connection) -> CacheStats:
         tags=_count("SELECT COUNT(*) AS n FROM tags"),
         links=_count("SELECT COUNT(*) AS n FROM entry_entities"),
         rollups=_count("SELECT COUNT(*) AS n FROM rollups"),
+        note_digests=_optional_count(conn, "note_digests"),
     )
+
+
+def _optional_count(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        return conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+    except sqlite3.OperationalError:
+        return 0  # a read-only connection to a cache from before the table
 
 
 def entries_dated_after(conn: sqlite3.Connection, day: date) -> list[sqlite3.Row]:

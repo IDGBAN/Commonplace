@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -595,12 +595,28 @@ def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
     return [f"- [month {r['period_key']}] {r['summary']}" for r in months]
 
 
+def _relationship_digests(
+    conn: sqlite3.Connection, config: Config, note_ids: list[int]
+) -> dict[int, str]:
+    """Relationship digests for these notes, by note id."""
+    if config.rollups.note_min_mentions == 0 or not note_ids:
+        return {}
+    rows = store.notes_by_ids(conn, note_ids[:MAX_CONTEXT_NOTES])
+    found = store.note_digests_for(conn, [r["link_key"] for r in rows])
+    return {
+        r["id"]: found[r["link_key"]]["summary"]
+        for r in rows
+        if r["link_key"] in found and found[r["link_key"]]["summary"]
+    }
+
+
 def _summary_context(
     candidates: list[sqlite3.Row],
     notes: list[sqlite3.Row],
     plan: QueryPlan,
     config: Config,
     conn: sqlite3.Connection,
+    about: Sequence[int] = (),
 ) -> str:
     vault = config.vault.path
     sections: list[str] = []
@@ -622,6 +638,13 @@ def _summary_context(
         sections.append(
             "Reference notes:\n"
             + "\n".join(_note_line(r, mentions.get(r["id"]), vault) for r in notes)
+        )
+    digests = _relationship_digests(conn, config, list(about))
+    if digests:
+        titles = {r["id"]: r["title"] for r in store.notes_by_ids(conn, list(digests))}
+        sections.append(
+            "How they come up in the journal over the years:\n"
+            + "\n".join(f"- [[{titles[i]}]]: {text}" for i, text in digests.items())
         )
     return "\n\n".join(sections)
 
@@ -668,6 +691,7 @@ def _precise_reanalysis(
     notes: list[sqlite3.Row],
     config: Config,
     client: OllamaClient,
+    digests: dict[int, str] | None = None,
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     note_blocks: list[str] = []
     used_notes: list[sqlite3.Row] = []
@@ -675,7 +699,9 @@ def _precise_reanalysis(
     vault = config.vault.path
     for row in notes:  # most relevant first
         note = store.note_from_row(row, vault)
-        block = f"### Note: {note.header()}\n{note.raw_text}".rstrip()
+        over_years = (digests or {}).get(row["id"])
+        history = f"\nOver the years: {over_years}" if over_years else ""
+        block = f"### Note: {note.header()}{history}\n{note.raw_text}".rstrip()
         if note_blocks and note_chars + len(block) > MAX_NOTE_CONTEXT_CHARS:
             continue
         block = block[:MAX_NOTE_CONTEXT_CHARS]
@@ -772,7 +798,7 @@ def answer(
 
     if not plan.needs_raw_text:
         on_stage("Answering from summaries...")
-        context = _summary_context(candidates, notes, plan, config, conn)
+        context = _summary_context(candidates, notes, plan, config, conn, about)
         fast_answer = _fast_attempt(question, context, config, client)
         if fast_answer is not None:
             return _finalize(
@@ -785,7 +811,10 @@ def answer(
             )
 
     on_stage("Re-reading the full entries...")
-    text, used, used_notes = _precise_reanalysis(question, candidates, notes, config, client)
+    text, used, used_notes = _precise_reanalysis(
+        question, candidates, notes, config, client,
+        digests=_relationship_digests(conn, config, about),
+    )
     return _finalize(
         text,
         "precise_raw",

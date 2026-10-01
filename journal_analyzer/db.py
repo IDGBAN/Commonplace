@@ -123,6 +123,19 @@ CREATE TABLE IF NOT EXISTS rollups (
   UNIQUE(period_type, period_key)
 );
 
+-- How a note that's linked often shows up across the journal. Keyed by link
+-- key, since a note's id changes whenever it's re-indexed.
+CREATE TABLE IF NOT EXISTS note_digests (
+  link_key     TEXT PRIMARY KEY,
+  summary      TEXT,
+  entry_count  INTEGER,
+  avg_mood     REAL,
+  first_date   TEXT,
+  last_date    TEXT,
+  stale        INTEGER NOT NULL DEFAULT 0,
+  generated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

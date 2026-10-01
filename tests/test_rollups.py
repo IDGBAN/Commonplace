@@ -27,7 +27,7 @@ def test_generates_week_month_and_year_digests(conn, config, fake_client):
     _seed(conn)
     fake_client.chat_response = "A digest."
     counts = rollups.generate_rollups(config, conn, fake_client)
-    assert counts == {"week": 2, "month": 2, "year": 1}
+    assert counts == {"week": 2, "month": 2, "year": 1, "note": 0}
     month = _rollup(conn, "month", "2024-01")
     assert month["summary"] == "A digest."
     assert month["entry_count"] == 2
@@ -70,11 +70,11 @@ def test_only_stale_skips_fresh_digests(conn, config, fake_client):
     fake_client.chat_response = "A digest."
     rollups.generate_rollups(config, conn, fake_client)
     assert rollups.generate_rollups(config, conn, fake_client) == {
-        "week": 0, "month": 0, "year": 0
+        "week": 0, "month": 0, "year": 0, "note": 0
     }
     store.mark_rollups_stale(conn, date(2024, 1, 15))
     counts = rollups.generate_rollups(config, conn, fake_client)
-    assert counts == {"week": 1, "month": 1, "year": 1}
+    assert counts == {"week": 1, "month": 1, "year": 1, "note": 0}
 
 
 def test_rebuild_all_regenerates_everything(conn, config, fake_client):
@@ -82,7 +82,7 @@ def test_rebuild_all_regenerates_everything(conn, config, fake_client):
     fake_client.chat_response = "A digest."
     rollups.generate_rollups(config, conn, fake_client)
     counts = rollups.generate_rollups(config, conn, fake_client, only_stale=False)
-    assert counts == {"week": 2, "month": 2, "year": 1}
+    assert counts == {"week": 2, "month": 2, "year": 1, "note": 0}
 
 
 def test_digests_for_emptied_periods_are_pruned(conn, config, fake_client):
@@ -114,7 +114,7 @@ def test_months_and_years_are_written_before_weeks(conn, config, fake_client):
 
 def test_no_entries_generates_nothing(conn, config, fake_client):
     assert rollups.generate_rollups(config, conn, fake_client) == {
-        "week": 0, "month": 0, "year": 0
+        "week": 0, "month": 0, "year": 0, "note": 0
     }
     assert fake_client.chat_calls == []
 

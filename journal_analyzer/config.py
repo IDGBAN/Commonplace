@@ -84,6 +84,12 @@ class RerankingConfig(BaseModel):
     model: str = "ms-marco-MiniLM-L-12-v2"
 
 
+class RollupsConfig(BaseModel):
+    # notes linked from at least this many entries get a relationship digest; 0 turns them off
+    note_min_mentions: int = Field(default=8, ge=0)
+    note_entries_per_year: int = Field(default=30, ge=1)
+
+
 class InsightsConfig(BaseModel):
     min_sample_size: int = Field(default=3, ge=1)
     mood_deviation_threshold: float = Field(default=0.8, ge=0)
@@ -121,6 +127,7 @@ class Config(BaseModel):
     indexing: IndexingConfig = IndexingConfig()
     reranking: RerankingConfig = RerankingConfig()
     insights: InsightsConfig = InsightsConfig()
+    rollups: RollupsConfig = RollupsConfig()
     notes: NotesConfig = NotesConfig()
     tags: TagsConfig = TagsConfig()
 

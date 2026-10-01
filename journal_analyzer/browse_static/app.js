@@ -775,6 +775,17 @@ async function noteView([id]) {
       h("div", { class: "quiet" }, n.embedded ? "Has a meaning vector" : "No meaning vector yet")));
 
   const props = Object.entries(n.properties);
+  const qualifies = n.digest_min_mentions > 0 && n.mentions && n.mentions.count >= n.digest_min_mentions;
+  const overYears = n.digest
+    ? section("Over the years", [
+      h("p", { class: "digest-summary" }, n.digest.summary || "The digest is empty."),
+      n.digest.stale && h("p", { class: "turn-meta" }, h("span", { class: "status pending" }, "out of date"),
+        " An entry that links here changed since it was written. The next journal rollup rewrites it."),
+    ], { note: `written ${stamp(n.digest.generated_at)} from ${plural(n.digest.entries, "entry", "entries")}` })
+    : qualifies
+      ? section("Over the years", empty("Not written yet. ", h("code", {}, "journal rollup"),
+        ` writes one for every note linked from ${n.digest_min_mentions} or more entries.`))
+      : null;
   const node = h("div", {},
     pageHead({
       eyebrow: h("a", { href: href.notes({ kind: n.kind }) }, kindLabel(n.kind)),
@@ -787,6 +798,7 @@ async function noteView([id]) {
         h("p", { class: "reading-label" }, "The note, as the app stored it"),
         h("div", { class: n.raw_text ? "raw" : "raw empty" }, n.raw_text || "This note has no text of its own.")),
       margin),
+    overYears,
     (n.outlinks.length || n.backlinks.length) ? section("Connected notes", h("div", { class: "two-col" },
       h("div", {}, h("h3", {}, "This note links to"), h("div", { class: "chips" }, n.outlinks.length ? n.outlinks.map((o) => noteChip(o)) : empty("Nothing."))),
       h("div", {}, h("h3", {}, "Notes that link here"), h("div", { class: "chips" }, n.backlinks.length ? n.backlinks.map((o) => noteChip(o)) : empty("Nothing."))))) : null,
@@ -877,19 +889,31 @@ async function tagView([name]) {
 async function digestsView([type]) {
   const data = await api("digests");
   const scale = data.mood_scale;
-  const current = ["year", "month", "week"].includes(type) ? type : "month";
+  const current = ["year", "month", "week", "notes"].includes(type) ? type : "month";
   document.title = "Digests · Commonplace";
-  const list = data.digests[current] || [];
+  const list = current === "notes" ? [] : data.digests[current] || [];
+  const tabCount = (t) => (t === "notes" ? data.notes.length : (data.digests[t] || []).length);
+  const noteCards = data.notes.length
+    ? h("div", { class: "digest-list" }, data.notes.map((d) => h("a", { class: "digest-card", href: href.note(d.id) },
+      h("div", {},
+        h("div", { class: "digest-when" }, d.title),
+        h("div", { class: "digest-sub" }, kindLabel(d.kind), d.first ? ` · ${mediumDate(d.first)} to ${mediumDate(d.last)}` : ""),
+        h("div", { class: "digest-sub" }, moodChip(d.mood, scale), ` · ${plural(d.entries ?? 0, "entry", "entries")}`),
+        d.stale && h("div", { class: "digest-sub" }, h("span", { class: "status pending" }, "out of date"))),
+      h("div", { class: "digest-summary clamp" }, d.summary || "No summary text."))))
+    : empty(data.note_min_mentions
+      ? ["No relationship digests yet. ", h("code", {}, "journal rollup"), ` writes one for every note linked from ${data.note_min_mentions} or more entries.`]
+      : ["Relationship digests are turned off (", h("code", {}, "note_min_mentions = 0"), " in config.toml)."]);
   return h("div", {},
     pageHead({
       eyebrow: "Written by the precise model",
       title: "Digests",
-      lede: "Summaries of each week, month and year. Answers to broad questions read these instead of every entry. A digest goes out of date when an entry in its period changes, until the next journal rollup.",
+      lede: "Summaries of each week, month and year, and of the people, places and topics you link most. Answers read these instead of every entry. A digest goes out of date when an entry it covers changes, until the next journal rollup.",
     }),
-    h("nav", { class: "tabs", "aria-label": "Digest periods" }, ["year", "month", "week"].map((t) =>
+    h("nav", { class: "tabs", "aria-label": "Digest periods" }, ["year", "month", "week", "notes"].map((t) =>
       h("a", { class: "tab", href: href.digests(t), "aria-current": t === current ? "page" : null },
-        `${KIND_LABELS[t]}s `, h("span", { class: "count" }, fmtNum((data.digests[t] || []).length))))),
-    list.length
+        t === "notes" ? "Notes " : `${KIND_LABELS[t]}s `, h("span", { class: "count" }, fmtNum(tabCount(t)))))),
+    current === "notes" ? noteCards : list.length
       ? h("div", { class: "digest-list" }, list.map((d) => h("a", { class: "digest-card", href: href.digest(d.type, d.key) },
         h("div", {},
           h("div", { class: "digest-when" }, periodTitle(d.type, d.key)),
@@ -1271,7 +1295,7 @@ const routes = [
   [/^\/note\/(\d+)$/, noteView, "notes"],
   [/^\/tags$/, tagsView, "tags"],
   [/^\/tag\/(.+)$/, tagView, "tags"],
-  [/^\/digests(?:\/(year|month|week))?$/, digestsView, "digests"],
+  [/^\/digests(?:\/(year|month|week|notes))?$/, digestsView, "digests"],
   [/^\/digest\/(year|month|week)\/([^/]+)$/, digestView, "digests"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],

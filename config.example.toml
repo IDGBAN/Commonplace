@@ -40,6 +40,12 @@ mood_scale_max = 10               # mood_score goes from 1 to this
 enabled = true
 model = "ms-marco-MiniLM-L-12-v2"
 
+[rollups]
+# Notes linked from at least this many entries get a relationship digest,
+# written by `journal rollup`. 0 turns them off.
+note_min_mentions = 8
+note_entries_per_year = 30         # entries per year that go into one; busier years are sampled
+
 [insights]
 # `journal insights` only reports a tag, person or weekly/seasonal pattern once
 # it has at least min_sample_size mood-scored entries, and only if its average

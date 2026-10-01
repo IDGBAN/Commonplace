@@ -450,3 +450,17 @@ def test_ask_keeps_only_the_last_turns_of_history():
     turns = [[f"q{i}", f"a{i}"] for i in range(10)]
     _, history = browse._ask_params({"q": "next", "history": json.dumps(turns)})
     assert history == [(f"q{i}", f"a{i}") for i in range(4, 10)]
+
+
+def test_note_pages_carry_the_relationship_digest(browser, journal):
+    john = note_id(journal, "John Doe")
+    assert browser.get(f"/api/notes/{john}")["digest"] is None
+    store.upsert_note_digest(
+        journal, "john doe", "John keeps turning up.", store.Mentions(1, "2024-01-15", "2024-01-15"), 8.0
+    )
+    detail = browser.get(f"/api/notes/{john}")
+    assert detail["digest"]["summary"] == "John keeps turning up."
+    assert detail["digest"]["stale"] is False
+    assert detail["digest_min_mentions"] == 8
+    listed = browser.get("/api/digests")["notes"]
+    assert [(n["id"], n["title"], n["entries"]) for n in listed] == [(john, "John Doe", 1)]

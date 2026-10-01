@@ -120,6 +120,7 @@ def refresh(config: Config, conn: sqlite3.Connection) -> int:
             continue
         store.update_entry_mood_and_tags(conn, row.entry_id, final.mood_score, final.tags)
         store.mark_rollups_stale(conn, row.entry_date)
+        store.mark_note_digests_stale(conn, store.link_targets_for_entries(conn, [row.entry_id]))
         changed += 1
     if changed:
         store.prune_unused_tags(conn)

@@ -77,6 +77,7 @@ def process_file(
 
 
 def _clear_file(conn: sqlite3.Connection, key: str) -> None:
+    store.mark_note_digests_stale(conn, store.link_targets_for_file(conn, key))
     # clear both kinds, since notes.paths can change what a file is
     for d in store.delete_entries_for_file(conn, key):
         store.mark_rollups_stale(conn, d)
@@ -85,6 +86,7 @@ def _clear_file(conn: sqlite3.Connection, key: str) -> None:
 
 
 def _forget_file(conn: sqlite3.Connection, key: str) -> None:
+    store.mark_note_digests_stale(conn, store.link_targets_for_file(conn, key))
     for d in store.delete_file(conn, key):
         store.mark_rollups_stale(conn, d)
 
@@ -121,6 +123,7 @@ def _index_entries(
         if vector is not None:
             store.save_entry_vector(conn, entry_id, vector)
         store.mark_rollups_stale(conn, entry.entry_date)
+        store.mark_note_digests_stale(conn, entry.links)
 
 
 def _index_note(
@@ -139,6 +142,7 @@ def _index_note(
     store.upsert_file(conn, key, content_hash, "pending")
     note_id = store.save_note(conn, note, summary, model_used)
     store.save_note_vector(conn, note_id, vector)
+    store.mark_note_digests_stale(conn, [note.title.casefold()])
 
 
 def _is_ignored(path: Path, config: Config) -> bool:
