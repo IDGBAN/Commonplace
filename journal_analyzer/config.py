@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,16 @@ class VaultConfig(BaseModel):
     @classmethod
     def _abs_path(cls, v: Path) -> Path:
         return _expand(v)
+
+    @field_validator("split_heading_regex")
+    @classmethod
+    def _compiles(cls, v: str) -> str:
+        # otherwise every file fails to index with the same regex error
+        try:
+            re.compile(v, re.MULTILINE)
+        except re.error as exc:
+            raise ValueError(f"not a valid regular expression ({exc})") from exc
+        return v
 
 
 class OllamaConfig(BaseModel):

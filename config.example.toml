@@ -30,8 +30,7 @@ watch_debounce_seconds = 45
 mood_scale_max = 10               # mood_score goes from 1 to this
 
 [reranking]
-# Reorders search hits before answering, which gives better results. The model
-# is downloaded the first time it's used, so set enabled = false to stay offline.
+# Reorders search hits before answering, which gives better results.
 enabled = true
 model = "ms-marco-MiniLM-L-12-v2"
 
