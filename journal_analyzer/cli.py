@@ -58,6 +58,11 @@ SinceOpt = Annotated[
 UntilOpt = Annotated[
     str | None, typer.Option("--until", help="Only entries on/before this ISO date.")
 ]
+AboutOpt = Annotated[
+    str | None,
+    typer.Option("--about", help="Only entries that link this note (its title or an alias)."),
+]
+TagOpt = Annotated[str | None, typer.Option("--tag", help="Only entries with this tag.")]
 
 
 @app.callback()
@@ -104,6 +109,41 @@ def _parse_range(since: str | None, until: str | None) -> tuple[date | None, dat
         console.print(f"[red]--since {date_from} is after --until {date_to}.[/red]")
         raise typer.Exit(1)
     return date_from, date_to
+
+
+def _entry_filter(
+    conn: sqlite3.Connection, about: str | None, tag: str | None
+) -> store.EntryFilter | None:
+    note_ids: tuple[int, ...] = ()
+    if about is not None:
+        matches = store.find_notes(conn, about)
+        if not matches:
+            console.print(
+                f"[red]No reference note called '{escape(about)}'. Notes come from the "
+                "folders listed in notes.paths in config.toml.[/red]"
+            )
+            raise typer.Exit(1)
+        if len(matches) > 1:
+            console.print(f"'{escape(about)}' matches {len(matches)} notes; use a full title:")
+            console.print(_note_table(conn, matches))
+            raise typer.Exit(1)
+        note_ids = (matches[0]["id"],)
+    name = tag.strip().lstrip("#").strip().lower() if tag is not None else None
+    if name is not None and not store.tag_exists(conn, name):
+        console.print(f"[red]No entry is tagged '{escape(name)}'. 'journal tags' lists them.[/red]")
+        raise typer.Exit(1)
+    return store.EntryFilter(name, note_ids) if name or note_ids else None
+
+
+def _filter_label(conn: sqlite3.Connection, only: store.EntryFilter | None) -> str:
+    if not only:
+        return ""
+    parts = []
+    if only.note_ids:
+        parts.append("linking " + ", ".join(r["title"] for r in store.notes_by_ids(conn, list(only.note_ids))))
+    if only.tag:
+        parts.append(f"tagged {only.tag}")
+    return " (entries " + " and ".join(parts) + ")"
 
 
 @contextmanager
@@ -336,12 +376,23 @@ def ask(
         bool,
         typer.Option("--sources", help="Also list the entries and notes the answer was built from."),
     ] = False,
+    since: SinceOpt = None,
+    until: UntilOpt = None,
+    about: AboutOpt = None,
+    tag: TagOpt = None,
 ) -> None:
-    """Ask a question about your journal."""
+    """Ask a question about your journal.
+
+    --since, --until, --about and --tag replace whatever the question's wording
+    suggests, so use them when you know the dates or the person.
+    """
+    date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
+        only = _entry_filter(conn, about, tag)
         with _working("Thinking...") as status:
             result = query.answer(
-                question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status)
+                question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status),
+                since=date_from, until=date_to, only=only,
             )
         _print_answer(conn, result, "answered by stage")
         if sources:
@@ -400,14 +451,17 @@ def search(
     limit: Annotated[int, typer.Option("--limit", min=1, help="Max entries.")] = 10,
     since: SinceOpt = None,
     until: UntilOpt = None,
+    about: AboutOpt = None,
+    tag: TagOpt = None,
 ) -> None:
     """Search entries and notes by keyword and meaning."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
+        only = _entry_filter(conn, about, tag)
         with _working("Searching..."):
             results = query.search(
                 text, cfg, conn, OllamaClient(cfg),
-                limit=limit, date_from=date_from, date_to=date_to,
+                limit=limit, date_from=date_from, date_to=date_to, only=only,
             )
         if not results.entries and not results.notes:
             console.print("No matching entries or notes.")
@@ -593,16 +647,20 @@ def mood(
     config: ConfigOpt = None,
     since: SinceOpt = None,
     until: UntilOpt = None,
+    about: AboutOpt = None,
+    tag: TagOpt = None,
 ) -> None:
     """Average mood per month."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        rows = store.monthly_mood(conn, date_from, date_to)
+        only = _entry_filter(conn, about, tag)
+        rows = store.monthly_mood(conn, date_from, date_to, only)
+        label = _filter_label(conn, only)
     if not any(r["avg_mood"] is not None for r in rows):
         console.print("No mood-scored entries in this range yet.")
         return
     scale = cfg.indexing.mood_scale_max
-    table = Table(title=f"Average mood by month (1..{scale})")
+    table = Table(title=f"Average mood by month (1..{scale}){escape(label)}")
     table.add_column("Month", style="cyan", no_wrap=True)
     table.add_column("Mood", justify="right")
     table.add_column("")
@@ -724,6 +782,8 @@ def export_cmd(
     ] = None,
     since: SinceOpt = None,
     until: UntilOpt = None,
+    about: AboutOpt = None,
+    tag: TagOpt = None,
     include_raw: Annotated[
         bool, typer.Option("--include-raw", help="Include full entry text.")
     ] = False,
@@ -731,7 +791,10 @@ def export_cmd(
     """Export entries as JSON or Markdown."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        entries = export.collect_entries(conn, date_from, date_to, include_raw=include_raw)
+        only = _entry_filter(conn, about, tag)
+        entries = export.collect_entries(
+            conn, date_from, date_to, include_raw=include_raw, only=only
+        )
     if not entries:
         console.print("No entries in the requested range.")
         raise typer.Exit(1)
@@ -779,13 +842,28 @@ def insights_cmd(
 
 
 @app.command()
-def chat(config: ConfigOpt = None) -> None:
-    """Ask questions with follow-ups."""
+def chat(
+    config: ConfigOpt = None,
+    since: SinceOpt = None,
+    until: UntilOpt = None,
+    about: AboutOpt = None,
+    tag: TagOpt = None,
+) -> None:
+    """Ask questions with follow-ups. The filters apply to every question."""
+    date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        _chat_loop(cfg, conn, OllamaClient(cfg))
+        only = _entry_filter(conn, about, tag)
+        _chat_loop(cfg, conn, OllamaClient(cfg), date_from, date_to, only)
 
 
-def _chat_loop(cfg: Config, conn: sqlite3.Connection, client: OllamaClient) -> None:
+def _chat_loop(
+    cfg: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    since: date | None = None,
+    until: date | None = None,
+    only: store.EntryFilter | None = None,
+) -> None:
     console.print(
         "Follow-ups like 'what about the month after that?' work. Type 'sources' to "
         "see what the last answer read, and 'exit' or Ctrl-D to quit."
@@ -813,7 +891,8 @@ def _chat_loop(cfg: Config, conn: sqlite3.Connection, client: OllamaClient) -> N
             with _working("Resolving your follow-up..." if history else "Thinking...") as status:
                 standalone = query.contextualize_question(question, history, cfg, client)
                 result = query.answer(
-                    standalone, cfg, conn, client, on_stage=_show_stage(status)
+                    standalone, cfg, conn, client, on_stage=_show_stage(status),
+                    since=since, until=until, only=only,
                 )
         except JournalError as exc:
             console.print(f"[red]{escape(str(exc))}[/red]")

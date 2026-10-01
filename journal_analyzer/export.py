@@ -15,8 +15,9 @@ def collect_entries(
     date_from: date | None = None,
     date_to: date | None = None,
     include_raw: bool = False,
+    only: store.EntryFilter | None = None,
 ) -> list[ExportEntry]:
-    rows = store.entries_in_optional_range(conn, date_from, date_to)
+    rows = store.entries_in_optional_range(conn, date_from, date_to, only)
     ids = [r["id"] for r in rows]
     # batched, since an export is usually the whole journal
     tags_by_entry = store.tags_for_entries(conn, ids)

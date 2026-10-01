@@ -750,19 +750,70 @@ def get_rollups_in_range(
     return list(conn.execute(sql + " ORDER BY period_key", params).fetchall())
 
 
+@dataclass(frozen=True)
+class EntryFilter:
+    """Only entries with this tag, and linking at least one of these notes."""
+
+    tag: str | None = None
+    note_ids: tuple[int, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.tag or self.note_ids)
+
+
+def _filter_clauses(
+    date_from: date | None,
+    date_to: date | None,
+    only: EntryFilter | None,
+    alias: str = "",
+) -> tuple[list[str], list[object]]:
+    clauses, params = _range_clauses(date_from, date_to, alias)
+    if only and only.tag:
+        clauses.append(
+            f"{alias}id IN (SELECT et.entry_id FROM entry_tags et "
+            "JOIN tags t ON t.id = et.tag_id WHERE t.name = ?)"
+        )
+        params.append(only.tag)
+    if only and only.note_ids:
+        clauses.append(
+            f"{alias}id IN (SELECT entry_id FROM entry_entities "
+            f"WHERE entity_id IN ({_JSON_VALUES}))"
+        )
+        params.append(_json_list(list(only.note_ids)))
+    return clauses, params
+
+
+def _filter_where(
+    date_from: date | None, date_to: date | None, only: EntryFilter | None, alias: str = ""
+) -> tuple[str, list[object]]:
+    clauses, params = _filter_clauses(date_from, date_to, only, alias)
+    return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def tag_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        """SELECT 1 FROM tags t JOIN entry_tags et ON et.tag_id = t.id
+           WHERE t.name = ? LIMIT 1""",
+        (name,),
+    ).fetchone() is not None
+
+
 def filtered_entry_ids(
     conn: sqlite3.Connection,
     date_from: date | None = None,
     date_to: date | None = None,
     entity_names: list[str] | None = None,
+    only: EntryFilter | None = None,
 ) -> list[int]:
     """Oldest first, so callers can slice off the end for the most recent.
 
     If the name filter matches nothing it's dropped instead of returning no
-    candidates, since the router's entity names aren't always right.
+    candidates, since the router's entity names aren't always right. Notes
+    named in `only` are what the person asked for, so they always apply, and
+    the router's names are left out.
     """
-    note_ids = note_ids_matching(conn, entity_names or [])
-    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    note_ids = [] if only and only.note_ids else note_ids_matching(conn, entity_names or [])
+    clauses, params = _filter_clauses(date_from, date_to, only, alias="e.")
     if note_ids:
         clauses.append(
             "e.id IN (SELECT entry_id FROM entry_entities "
@@ -777,7 +828,7 @@ def filtered_entry_ids(
         )
     ]
     if note_ids and not ids:
-        return filtered_entry_ids(conn, date_from, date_to, None)
+        return filtered_entry_ids(conn, date_from, date_to, None, only)
     return ids
 
 
@@ -874,9 +925,12 @@ def entries_in_range(
 
 
 def entries_in_optional_range(
-    conn: sqlite3.Connection, date_from: date | None, date_to: date | None
+    conn: sqlite3.Connection,
+    date_from: date | None,
+    date_to: date | None,
+    only: EntryFilter | None = None,
 ) -> list[sqlite3.Row]:
-    where, params = _range_where(date_from, date_to)
+    where, params = _filter_where(date_from, date_to, only)
     return list(
         conn.execute(
             f"SELECT * FROM entries {where} ORDER BY entry_date, id", params
@@ -940,9 +994,12 @@ def entities_for_entries(
 
 
 def monthly_mood(
-    conn: sqlite3.Connection, date_from: date | None, date_to: date | None
+    conn: sqlite3.Connection,
+    date_from: date | None,
+    date_to: date | None,
+    only: EntryFilter | None = None,
 ) -> list[sqlite3.Row]:
-    where, params = _range_where(date_from, date_to)
+    where, params = _filter_where(date_from, date_to, only)
     return list(
         conn.execute(
             f"""SELECT substr(entry_date, 1, 7) AS month,
@@ -960,8 +1017,9 @@ def top_tags(
     date_from: date | None,
     date_to: date | None,
     limit: int = 10,
+    only: EntryFilter | None = None,
 ) -> list[sqlite3.Row]:
-    where, params = _range_where(date_from, date_to, alias="e.")
+    where, params = _filter_where(date_from, date_to, only, alias="e.")
     return list(
         conn.execute(
             f"""SELECT t.name, COUNT(*) AS n
@@ -1079,9 +1137,12 @@ def similar_entry_ids(conn: sqlite3.Connection, entry_id: int, k: int) -> list[i
 
 
 def date_bounds(
-    conn: sqlite3.Connection, date_from: date | None, date_to: date | None
+    conn: sqlite3.Connection,
+    date_from: date | None,
+    date_to: date | None,
+    only: EntryFilter | None = None,
 ) -> tuple[str | None, str | None]:
-    where, params = _range_where(date_from, date_to)
+    where, params = _filter_where(date_from, date_to, only)
     row = conn.execute(
         f"SELECT MIN(entry_date) AS lo, MAX(entry_date) AS hi FROM entries {where}",
         params,
@@ -1392,16 +1453,8 @@ def _browse_where(
     note_id: int | None,
     text: str | None,
 ) -> tuple[str, list[object]]:
-    clauses, params = _range_clauses(date_from, date_to, alias="e.")
-    if tag:
-        clauses.append(
-            "e.id IN (SELECT et.entry_id FROM entry_tags et "
-            "JOIN tags t ON t.id = et.tag_id WHERE t.name = ?)"
-        )
-        params.append(tag)
-    if note_id is not None:
-        clauses.append("e.id IN (SELECT entry_id FROM entry_entities WHERE entity_id = ?)")
-        params.append(note_id)
+    only = EntryFilter(tag or None, (note_id,) if note_id is not None else ())
+    clauses, params = _filter_clauses(date_from, date_to, only, alias="e.")
     if text and text.strip():
         pattern = _like_contains(text.strip())
         clauses.append(

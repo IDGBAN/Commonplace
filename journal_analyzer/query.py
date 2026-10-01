@@ -293,6 +293,16 @@ def _mention_facts(
     return facts, titles, note_ids
 
 
+def _filter_facts(conn: sqlite3.Connection, only: store.EntryFilter | None) -> list[str]:
+    facts = []
+    if only and only.note_ids:
+        titles = " or ".join(f"[[{r['title']}]]" for r in store.notes_by_ids(conn, list(only.note_ids)))
+        facts.append(f"Only entries that link {titles} are counted.")
+    if only and only.tag:
+        facts.append(f"Only entries tagged '{only.tag}' are counted.")
+    return facts
+
+
 def _answer_aggregate(
     question: str,
     plan: QueryPlan,
@@ -300,16 +310,20 @@ def _answer_aggregate(
     conn: sqlite3.Connection,
     client: OllamaClient,
     named: list[int],
+    only: store.EntryFilter | None = None,
 ) -> Answer:
-    mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to)
-    tag_rows = store.top_tags(conn, plan.date_from, plan.date_to, limit=AGGREGATE_TOP_TAGS)
-    lo, hi = store.date_bounds(conn, plan.date_from, plan.date_to)
+    mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
+    tag_rows = store.top_tags(
+        conn, plan.date_from, plan.date_to, limit=AGGREGATE_TOP_TAGS, only=only
+    )
+    lo, hi = store.date_bounds(conn, plan.date_from, plan.date_to, only)
     if not mood_rows:
         return Answer(
             text="No journal entries found in the requested range.",
             stage_used="aggregate",
         )
-    facts = [f"Monthly average mood (1-{config.indexing.mood_scale_max}) and entry counts:"]
+    facts = _filter_facts(conn, only)
+    facts.append(f"Monthly average mood (1-{config.indexing.mood_scale_max}) and entry counts:")
     for r in mood_rows:
         mood = f"{r['avg_mood']:g}" if r["avg_mood"] is not None else "n/a"
         facts.append(f"- {r['month']}: mood {mood}, {r['entry_count']} entries")
@@ -409,8 +423,9 @@ def _retrieve(
     *,
     query_vector: list[float] | None = None,
     boost_note_ids: list[int] | None = None,
+    only: store.EntryFilter | None = None,
 ) -> list[sqlite3.Row]:
-    allowed = store.filtered_entry_ids(conn, plan.date_from, plan.date_to, plan.entities)
+    allowed = store.filtered_entry_ids(conn, plan.date_from, plan.date_to, plan.entities, only)
     if not allowed:
         return []
 
@@ -491,6 +506,7 @@ def search(
     limit: int = 10,
     date_from: date | None = None,
     date_to: date | None = None,
+    only: store.EntryFilter | None = None,
 ) -> SearchResults:
     """For `journal search`: no router and no answer, just the query embedding."""
     keywords = search_keywords(text)
@@ -501,7 +517,7 @@ def search(
     named = notes_named_in(text, conn)
     entries = _retrieve(
         text, plan, config, conn, client, top_k=limit,
-        query_vector=query_vector, boost_note_ids=named,
+        query_vector=query_vector, boost_note_ids=named, only=only,
     )
     note_ids = _matching_notes(conn, query_vector, keywords, named, NOTE_SEARCH_K)
     return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids))
@@ -548,9 +564,11 @@ def _ensure_day_included(
     conn: sqlite3.Connection,
     day: date,
     candidates: list[sqlite3.Row],
+    only: store.EntryFilter | None = None,
 ) -> list[sqlite3.Row]:
     have = {r["id"] for r in candidates}
-    day_rows = [r for r in store.entries_in_range(conn, day, day) if r["id"] not in have]
+    allowed = set(store.filtered_entry_ids(conn, day, day, only=only))
+    day_rows = [r for r in store.entries_by_ids(conn, list(allowed)) if r["id"] not in have]
     # in front, so the raw-text budget can't drop it
     return day_rows + candidates
 
@@ -769,26 +787,37 @@ def answer(
     client: OllamaClient,
     today: date | None = None,
     on_stage: Callable[[str], None] = _no_progress,
+    since: date | None = None,
+    until: date | None = None,
+    only: store.EntryFilter | None = None,
 ) -> Answer:
+    """`since`, `until` and `only` are what the person asked for, so they
+    override whatever the router reads into the question."""
     today = today or date.today()
     on_stage("Working out what you're asking...")
     plan = _plan(question, config, client, today)
+    if since is not None or until is not None:
+        plan = plan.model_copy(update={"date_from": since, "date_to": until})
     named = notes_named_in(question, conn)
+    if only and only.note_ids:
+        named = list(dict.fromkeys([*only.note_ids, *named]))
 
     if plan.intent == "aggregate":
         on_stage("Putting the numbers into words...")
-        return _answer_aggregate(question, plan, config, conn, client, named)
+        return _answer_aggregate(question, plan, config, conn, client, named, only)
 
     on_stage("Searching entries and notes...")
     about = _named_notes(conn, plan, named)
     query_vector = _embed_question(question, config, conn, client)
     candidates = _retrieve(
         question, plan, config, conn, client,
-        query_vector=query_vector, boost_note_ids=named,
+        query_vector=query_vector, boost_note_ids=named, only=only,
     )
     explicit_day = _explicit_day(question, today)
-    if explicit_day is not None:
-        candidates = _ensure_day_included(conn, explicit_day, candidates)
+    if explicit_day is not None and (since is None or since <= explicit_day) and (
+        until is None or explicit_day <= until
+    ):
+        candidates = _ensure_day_included(conn, explicit_day, candidates, only)
     notes = _retrieve_notes(plan, conn, query_vector, about, candidates)
     if not candidates and not notes:
         return Answer(

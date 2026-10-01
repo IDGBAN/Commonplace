@@ -77,6 +77,7 @@ journal ask "When did I go hiking with John?"
 journal ask "When did I go hiking with John?" --sources   # and what it read
 journal ask "Who is John, and when did I last see him?"
 journal ask "How did my mood change over spring?"     # answered from SQL
+journal ask "What did we talk about?" --about "John Doe" --since 2024-03-01
 
 # digests
 journal rollup                # write missing or stale month, year, relationship, then week digests
@@ -114,13 +115,14 @@ journal note "John Doe"               # a reference note and the entries that li
 journal tags --limit 30                  # most used tags
 journal entities --type people           # most-linked notes, optionally of one kind
 journal mood --since 2023-01-01          # average mood per month, with a bar chart
+journal mood --about "John Doe"          # only the days you linked John
 journal streaks                          # days written, words, longest run
 journal on-this-day                      # what you wrote on this date in earlier years
 journal similar 2024-01-15               # closest entries by stored embedding
 journal export --format markdown --out ~/journal-export.md
 ```
 
-`search`, `tags`, `entities`, `mood`, `insights` and `export` take `--since` and `--until` as ISO dates. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
+`search`, `tags`, `entities`, `mood`, `insights` and `export` take `--since` and `--until` as ISO dates. `search`, `mood` and `export`, as well as `ask` and `chat`, also take `--about NOTE` (only entries that link that note, by title or alias) and `--tag TAG`. On `ask` and `chat`, `--since` and `--until` replace whatever dates the question's wording suggests, which helps when the small routing model reads a date wrong; with `chat` the filters apply to every question in the conversation. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
 
 ### Browsing in a web page
 
