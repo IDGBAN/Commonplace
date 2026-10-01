@@ -477,10 +477,7 @@ def search(
     date_to: date | None = None,
 ) -> SearchResults:
     """For `journal search`: no router and no answer, just the query embedding."""
-    keywords = [
-        w for w in _SEARCH_WORD_RE.findall(text.lower())
-        if w not in _SEARCH_STOPWORDS
-    ][:8]
+    keywords = search_keywords(text)
     plan = QueryPlan(
         intent="factual", date_from=date_from, date_to=date_to, keywords=keywords
     )
@@ -491,6 +488,43 @@ def search(
         query_vector=query_vector, boost_note_ids=named,
     )
     note_ids = _matching_notes(conn, query_vector, keywords, named, NOTE_SEARCH_K)
+    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids))
+
+
+def search_keywords(text: str) -> list[str]:
+    return [
+        w for w in _SEARCH_WORD_RE.findall(text.lower())
+        if w not in _SEARCH_STOPWORDS
+    ][:8]
+
+
+def keyword_search(
+    text: str,
+    conn: sqlite3.Connection,
+    limit: int = 10,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> SearchResults:
+    """`search` without the embedding, so it works while Ollama is down."""
+    keywords = search_keywords(text)
+    named = notes_named_in(text, conn)
+    allowed = (
+        store.filtered_entry_ids(conn, date_from, date_to) if date_from or date_to else None
+    )
+    ranked_lists = [store.fts_search(conn, keywords, allowed, limit)]
+    if named:
+        allowed_set = set(allowed) if allowed is not None else None
+        linked = [
+            i for i in store.entry_ids_mentioning(conn, named)
+            if allowed_set is None or i in allowed_set
+        ]
+        ranked_lists.append(linked[:limit])
+    merged = _rrf_merge(ranked_lists, limit)
+    order = {eid: i for i, eid in enumerate(merged)}
+    entries = sorted(store.entries_by_ids(conn, merged), key=lambda r: order[r["id"]])
+    note_ids = list(
+        dict.fromkeys([*named, *store.notes_fts_search(conn, keywords, NOTE_SEARCH_K)])
+    )
     return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids))
 
 

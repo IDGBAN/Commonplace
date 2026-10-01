@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import date, timedelta
 
 import sqlite_vec
@@ -20,6 +21,27 @@ def test_tags_are_shared_rather_than_duplicated(conn):
     assert e1 != e2
     assert _count(conn, "tags") == 2
     assert _count(conn, "entry_tags") == 4
+
+
+def test_batch_lookups_are_not_capped_by_the_sqlite_variable_limit(conn):
+    # SQLite before 3.32 allows 999 variables a statement; this stands in for that
+    note_ids = [add_note(conn, f"Person {i}") for i in range(30)]
+    entry_ids = [
+        add_entry(
+            conn, date(2024, 1, 1) + timedelta(days=i), tags=["walk"],
+            links=[f"Person {i}"], path=f"/vault/{i}.md",
+        )
+        for i in range(30)
+    ]
+    conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 5)
+    assert [r["id"] for r in store.entries_by_ids(conn, entry_ids)] == entry_ids
+    assert len(store.tags_for_entries(conn, entry_ids)) == 30
+    assert len(store.entities_for_entries(conn, entry_ids)) == 30
+    assert [r["id"] for r in store.notes_by_ids(conn, note_ids)] == note_ids
+    assert len(store.mention_stats(conn, note_ids)) == 30
+    assert len(store.entry_ids_mentioning(conn, note_ids)) == 30
+    assert len(store.notes_linked_from_entries(conn, entry_ids, limit=50)) == 30
+    assert store.filtered_entry_ids(conn, entity_names=["Person"]) == entry_ids
 
 
 def test_links_resolve_whichever_side_was_indexed_first(conn):

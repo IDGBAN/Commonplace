@@ -13,16 +13,17 @@ import sqlite_vec
 from .models import Extraction, ParsedEntry, ParsedNote
 from .parser import relative_path
 
-# allowed_ids can be the whole journal, too many for one placeholder each
-_JSON_IDS = "SELECT value FROM json_each(?)"
+# Lists go in as one JSON array rather than a placeholder each. An id list can
+# be the whole journal, and SQLite before 3.32 allows only 999 variables.
+_JSON_VALUES = "SELECT value FROM json_each(?)"
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _placeholders(values: Sequence[object]) -> str:
-    return ",".join("?" for _ in values)
+def _json_list(values: Sequence[object]) -> str:
+    return json.dumps(list(values), ensure_ascii=False)
 
 
 def _like_contains(term: str) -> str:
@@ -45,6 +46,22 @@ def year_key(d: date) -> str:
 
 def period_keys_for_date(d: date) -> dict[str, str]:
     return {"week": week_key(d), "month": month_key(d), "year": year_key(d)}
+
+
+def period_bounds(period_type: str, period_key: str) -> tuple[date, date]:
+    """First and last day of a week, month or year key. ValueError if malformed."""
+    if period_type == "week":
+        year, week = period_key.split("-W")
+        start = date.fromisocalendar(int(year), int(week), 1)
+        return start, date.fromisocalendar(int(year), int(week), 7)
+    if period_type == "month":
+        start = datetime.strptime(period_key, "%Y-%m").date()
+        next_month = date(start.year + start.month // 12, start.month % 12 + 1, 1)
+        return start, date.fromordinal(next_month.toordinal() - 1)
+    if period_type == "year":
+        start = datetime.strptime(period_key, "%Y").date()
+        return start, date(start.year, 12, 31)
+    raise ValueError(f"unknown period type '{period_type}'")
 
 
 def get_file_record(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
@@ -167,7 +184,7 @@ def _link_tags(conn: sqlite3.Connection, entry_id: int, tags: list[str]) -> None
     ids = [
         r["id"]
         for r in conn.execute(
-            f"SELECT id FROM tags WHERE name IN ({_placeholders(tags)})", tags
+            f"SELECT id FROM tags WHERE name IN ({_JSON_VALUES})", (_json_list(tags),)
         )
     ]
     conn.executemany(
@@ -237,7 +254,9 @@ def notes_by_ids(conn: sqlite3.Connection, ids: list[int]) -> list[sqlite3.Row]:
         return []
     by_id = {
         r["id"]: r
-        for r in conn.execute(f"SELECT * FROM notes WHERE id IN ({_placeholders(ids)})", ids)
+        for r in conn.execute(
+            f"SELECT * FROM notes WHERE id IN ({_JSON_VALUES})", (_json_list(ids),)
+        )
     }
     return [by_id[i] for i in ids if i in by_id]
 
@@ -306,7 +325,7 @@ def mention_stats(
     if not note_ids:
         return {}
     clauses, params = _range_clauses(date_from, date_to, alias="e.")
-    where = " AND ".join([f"ee.entity_id IN ({_placeholders(note_ids)})", *clauses])
+    where = " AND ".join([f"ee.entity_id IN ({_JSON_VALUES})", *clauses])
     rows = conn.execute(
         f"""SELECT ee.entity_id AS note_id, COUNT(*) AS n,
                    MIN(e.entry_date) AS first, MAX(e.entry_date) AS last
@@ -314,7 +333,7 @@ def mention_stats(
             JOIN entries e ON e.id = ee.entry_id
             WHERE {where}
             GROUP BY ee.entity_id""",
-        [*note_ids, *params],
+        [_json_list(note_ids), *params],
     )
     return {r["note_id"]: Mentions(r["n"], r["first"], r["last"]) for r in rows}
 
@@ -348,9 +367,9 @@ def entry_ids_mentioning(conn: sqlite3.Connection, note_ids: list[int]) -> list[
             f"""SELECT DISTINCT e.id, e.entry_date
                 FROM entries e
                 JOIN entry_entities ee ON ee.entry_id = e.id
-                WHERE ee.entity_id IN ({_placeholders(note_ids)})
+                WHERE ee.entity_id IN ({_JSON_VALUES})
                 ORDER BY e.entry_date DESC, e.id DESC""",
-            note_ids,
+            (_json_list(note_ids),),
         )
     ]
 
@@ -379,11 +398,11 @@ def notes_linked_from_entries(
         conn.execute(
             f"""SELECT entity_id AS note_id, COUNT(*) AS n
                 FROM entry_entities
-                WHERE entry_id IN ({_placeholders(entry_ids)})
+                WHERE entry_id IN ({_JSON_VALUES})
                 GROUP BY entity_id
                 ORDER BY n DESC, note_id
                 LIMIT ?""",
-            [*entry_ids, limit],
+            (_json_list(entry_ids), limit),
         ).fetchall()
     )
 
@@ -489,9 +508,9 @@ def filtered_entry_ids(
     if note_ids:
         clauses.append(
             "e.id IN (SELECT entry_id FROM entry_entities "
-            f"WHERE entity_id IN ({_placeholders(note_ids)}))"
+            f"WHERE entity_id IN ({_JSON_VALUES}))"
         )
-        params.extend(note_ids)
+        params.append(_json_list(note_ids))
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     ids = [
         r["id"]
@@ -522,8 +541,8 @@ def fts_search(
     sql = "SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?"
     params: list[object] = [match]
     if allowed_ids is not None:
-        sql += f" AND rowid IN ({_JSON_IDS})"
-        params.append(json.dumps(allowed_ids))
+        sql += f" AND rowid IN ({_JSON_VALUES})"
+        params.append(_json_list(allowed_ids))
     try:
         rows = conn.execute(f"{sql} ORDER BY rank LIMIT ?", [*params, k]).fetchall()
     except sqlite3.OperationalError:
@@ -554,8 +573,8 @@ def vec_search(
     sql = "SELECT entry_id FROM entries_vec WHERE embedding MATCH ?"
     params: list[object] = [sqlite_vec.serialize_float32(query_vector)]
     if allowed_ids is not None:
-        sql += f" AND entry_id IN ({_JSON_IDS})"
-        params.append(json.dumps(allowed_ids))
+        sql += f" AND entry_id IN ({_JSON_VALUES})"
+        params.append(_json_list(allowed_ids))
     rows = conn.execute(f"{sql} ORDER BY distance LIMIT ?", [*params, k]).fetchall()
     return [r["entry_id"] for r in rows]
 
@@ -578,7 +597,8 @@ def entries_by_ids(conn: sqlite3.Connection, ids: list[int]) -> list[sqlite3.Row
     if not ids:
         return []
     rows = conn.execute(
-        f"SELECT * FROM entries WHERE id IN ({_placeholders(ids)}) ORDER BY entry_date", ids
+        f"SELECT * FROM entries WHERE id IN ({_JSON_VALUES}) ORDER BY entry_date, id",
+        (_json_list(ids),),
     ).fetchall()
     return list(rows)
 
@@ -620,7 +640,7 @@ def tags_for_entry(conn: sqlite3.Connection, entry_id: int) -> list[str]:
 def entities_for_entry(conn: sqlite3.Connection, entry_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(
-            "SELECT en.name, en.type FROM entities en "
+            "SELECT en.id, en.name, en.type FROM entities en "
             "JOIN entry_entities ee ON ee.entity_id = en.id "
             "WHERE ee.entry_id = ? ORDER BY en.type, en.name",
             (entry_id,),
@@ -635,10 +655,10 @@ def tags_for_entries(
         return {}
     out: dict[int, list[str]] = defaultdict(list)
     for r in conn.execute(
-        f"SELECT et.entry_id AS eid, t.name FROM tags t "
-        f"JOIN entry_tags et ON et.tag_id = t.id "
-        f"WHERE et.entry_id IN ({_placeholders(entry_ids)}) ORDER BY et.entry_id, t.name",
-        entry_ids,
+        "SELECT et.entry_id AS eid, t.name FROM tags t "
+        "JOIN entry_tags et ON et.tag_id = t.id "
+        f"WHERE et.entry_id IN ({_JSON_VALUES}) ORDER BY et.entry_id, t.name",
+        (_json_list(entry_ids),),
     ):
         out[r["eid"]].append(r["name"])
     return dict(out)
@@ -651,11 +671,11 @@ def entities_for_entries(
         return {}
     out: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for r in conn.execute(
-        f"SELECT ee.entry_id AS eid, en.name, en.type FROM entities en "
-        f"JOIN entry_entities ee ON ee.entity_id = en.id "
-        f"WHERE ee.entry_id IN ({_placeholders(entry_ids)}) "
-        f"ORDER BY ee.entry_id, en.type, en.name",
-        entry_ids,
+        "SELECT ee.entry_id AS eid, en.name, en.type FROM entities en "
+        "JOIN entry_entities ee ON ee.entity_id = en.id "
+        f"WHERE ee.entry_id IN ({_JSON_VALUES}) "
+        "ORDER BY ee.entry_id, en.type, en.name",
+        (_json_list(entry_ids),),
     ):
         out[r["eid"]].append(r)
     return dict(out)
@@ -1007,5 +1027,239 @@ def errored_files(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         conn.execute(
             "SELECT path, error_message FROM files WHERE status = 'error' "
             "ORDER BY path"
+        ).fetchall()
+    )
+
+
+# Browsing. Everything below only reads.
+
+
+def entry_by_id(conn: sqlite3.Connection, entry_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+
+
+def adjacent_entries(
+    conn: sqlite3.Connection, entry: sqlite3.Row
+) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+    """The entries just before and after, in (date, id) order."""
+    day, entry_id = entry["entry_date"], entry["id"]
+    before = conn.execute(
+        """SELECT id, entry_date FROM entries
+           WHERE entry_date < ? OR (entry_date = ? AND id < ?)
+           ORDER BY entry_date DESC, id DESC LIMIT 1""",
+        (day, day, entry_id),
+    ).fetchone()
+    after = conn.execute(
+        """SELECT id, entry_date FROM entries
+           WHERE entry_date > ? OR (entry_date = ? AND id > ?)
+           ORDER BY entry_date, id LIMIT 1""",
+        (day, day, entry_id),
+    ).fetchone()
+    return before, after
+
+
+_LINKS_NOTHING = """NOT EXISTS (SELECT 1 FROM notes n WHERE n.link_key = el.target)
+                 AND NOT EXISTS (SELECT 1 FROM entries d WHERE d.entry_date = el.target)"""
+
+
+def unresolved_links_for_entry(conn: sqlite3.Connection, entry_id: int) -> list[str]:
+    """Link targets that are neither a note nor a day with an entry.
+
+    They don't count as mentions until a note with that name is indexed.
+    """
+    return [
+        r["target"]
+        for r in conn.execute(
+            f"""SELECT el.target FROM entry_links el
+                WHERE el.entry_id = ? AND {_LINKS_NOTHING}
+                ORDER BY el.target""",
+            (entry_id,),
+        )
+    ]
+
+
+def days_linked_from_entry(conn: sqlite3.Connection, entry_id: int) -> list[sqlite3.Row]:
+    """Entries on the days this entry links to, like [[2024-01-15]]."""
+    return list(
+        conn.execute(
+            """SELECT DISTINCT d.id, d.entry_date FROM entry_links el
+               JOIN entries d ON d.entry_date = el.target
+               WHERE el.entry_id = ? AND d.id != el.entry_id
+               ORDER BY d.entry_date, d.id""",
+            (entry_id,),
+        ).fetchall()
+    )
+
+
+def entries_linking_to_day(conn: sqlite3.Connection, entry: sqlite3.Row) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT DISTINCT e.id, e.entry_date FROM entry_links el
+               JOIN entries e ON e.id = el.entry_id
+               WHERE el.target = ? AND e.id != ?
+               ORDER BY e.entry_date, e.id""",
+            (entry["entry_date"], entry["id"]),
+        ).fetchall()
+    )
+
+
+def unresolved_links(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            f"""SELECT el.target, COUNT(*) AS n, MAX(e.entry_date) AS last
+               FROM entry_links el
+               JOIN entries e ON e.id = el.entry_id
+               WHERE {_LINKS_NOTHING}
+               GROUP BY el.target
+               ORDER BY n DESC, el.target
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    )
+
+
+def _browse_where(
+    date_from: date | None,
+    date_to: date | None,
+    tag: str | None,
+    note_id: int | None,
+    text: str | None,
+) -> tuple[str, list[object]]:
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    if tag:
+        clauses.append(
+            "e.id IN (SELECT et.entry_id FROM entry_tags et "
+            "JOIN tags t ON t.id = et.tag_id WHERE t.name = ?)"
+        )
+        params.append(tag)
+    if note_id is not None:
+        clauses.append("e.id IN (SELECT entry_id FROM entry_entities WHERE entity_id = ?)")
+        params.append(note_id)
+    if text and text.strip():
+        pattern = _like_contains(text.strip())
+        clauses.append(
+            "(e.summary LIKE ? ESCAPE '\\' OR e.raw_text LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pattern, pattern])
+    return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def browse_entries(
+    conn: sqlite3.Connection,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    tag: str | None = None,
+    note_id: int | None = None,
+    text: str | None = None,
+    newest_first: bool = True,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[sqlite3.Row], int]:
+    """One page of entries and the total that match."""
+    where, params = _browse_where(date_from, date_to, tag, note_id, text)
+    total = conn.execute(f"SELECT COUNT(*) AS n FROM entries e {where}", params).fetchone()["n"]
+    direction = "DESC" if newest_first else "ASC"
+    rows = conn.execute(
+        f"""SELECT e.* FROM entries e {where}
+            ORDER BY e.entry_date {direction}, e.id {direction}
+            LIMIT ? OFFSET ?""",
+        [*params, limit, offset],
+    ).fetchall()
+    return list(rows), total
+
+
+def browse_mood(
+    conn: sqlite3.Connection,
+    *,
+    tag: str | None = None,
+    note_id: int | None = None,
+) -> float | None:
+    """Average mood over every entry browse_entries would match, not just one page."""
+    where, params = _browse_where(None, None, tag, note_id, None)
+    row = conn.execute(
+        f"SELECT ROUND(AVG(e.mood_score), 2) AS avg FROM entries e {where}", params
+    ).fetchone()
+    return row["avg"]
+
+
+def entry_days(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT id, entry_date, mood_score, word_count, summary FROM entries "
+            "ORDER BY entry_date, id"
+        ).fetchall()
+    )
+
+
+def all_notes(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT * FROM notes ORDER BY kind, title COLLATE NOCASE"
+        ).fetchall()
+    )
+
+
+def tag_stats(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT t.name, COUNT(*) AS n,
+                      ROUND(AVG(e.mood_score), 2) AS avg_mood,
+                      COUNT(e.mood_score) AS scored,
+                      MIN(e.entry_date) AS first, MAX(e.entry_date) AS last
+               FROM tags t
+               JOIN entry_tags et ON et.tag_id = t.id
+               JOIN entries e ON e.id = et.entry_id
+               GROUP BY t.name
+               ORDER BY n DESC, t.name"""
+        ).fetchall()
+    )
+
+
+def tags_cooccurring_with(
+    conn: sqlite3.Connection, tag: str, limit: int
+) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT t2.name, COUNT(*) AS n
+               FROM tags t1
+               JOIN entry_tags et1 ON et1.tag_id = t1.id
+               JOIN entry_tags et2 ON et2.entry_id = et1.entry_id AND et2.tag_id != t1.id
+               JOIN tags t2 ON t2.id = et2.tag_id
+               WHERE t1.name = ?
+               GROUP BY t2.name
+               ORDER BY n DESC, t2.name
+               LIMIT ?""",
+            (tag, limit),
+        ).fetchall()
+    )
+
+
+def all_rollups(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT * FROM rollups ORDER BY period_type, period_key DESC"
+        ).fetchall()
+    )
+
+
+def get_rollup(
+    conn: sqlite3.Connection, period_type: str, period_key: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM rollups WHERE period_type = ? AND period_key = ?",
+        (period_type, period_key),
+    ).fetchone()
+
+
+def files_overview(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT f.path, f.status, f.last_indexed, f.error_message,
+                      (SELECT COUNT(*) FROM entries e WHERE e.file_path = f.path) AS entries,
+                      (SELECT n.id FROM notes n WHERE n.file_path = f.path) AS note_id,
+                      (SELECT MIN(e.id) FROM entries e WHERE e.file_path = f.path) AS entry_id
+               FROM files f
+               ORDER BY f.status = 'indexed', f.path"""
         ).fetchall()
     )
