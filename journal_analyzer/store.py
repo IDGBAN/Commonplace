@@ -1104,17 +1104,21 @@ class WritingStats:
     longest_streak_end: date | None
 
 
-def writing_stats(conn: sqlite3.Connection) -> WritingStats:
+def writing_stats(
+    conn: sqlite3.Connection, date_from: date | None = None, date_to: date | None = None
+) -> WritingStats:
+    where, params = _range_where(date_from, date_to)
     row = conn.execute(
-        """SELECT COUNT(*) AS entries,
+        f"""SELECT COUNT(*) AS entries,
                   COALESCE(SUM(word_count), 0) AS words,
                   COUNT(DISTINCT entry_date) AS days
-           FROM entries"""
+           FROM entries {where}""",
+        params,
     ).fetchone()
     days = [
         date.fromisoformat(r["entry_date"])
         for r in conn.execute(
-            "SELECT DISTINCT entry_date FROM entries ORDER BY entry_date"
+            f"SELECT DISTINCT entry_date FROM entries {where} ORDER BY entry_date", params
         )
     ]
     longest = run = 0
@@ -1136,6 +1140,41 @@ def writing_stats(conn: sqlite3.Connection) -> WritingStats:
         current_streak=run,
         longest_streak=longest,
         longest_streak_end=longest_end,
+    )
+
+
+def entries_by_mood(
+    conn: sqlite3.Connection, date_from: date, date_to: date, limit: int, highest: bool
+) -> list[sqlite3.Row]:
+    direction = "DESC" if highest else "ASC"
+    return list(
+        conn.execute(
+            f"""SELECT * FROM entries
+                WHERE mood_score IS NOT NULL AND entry_date >= ? AND entry_date <= ?
+                ORDER BY mood_score {direction}, entry_date
+                LIMIT ?""",
+            (date_from.isoformat(), date_to.isoformat(), limit),
+        ).fetchall()
+    )
+
+
+def notes_first_linked_in(
+    conn: sqlite3.Connection, date_from: date, date_to: date, limit: int
+) -> list[sqlite3.Row]:
+    """Notes no entry linked before this range, and how often they're linked in it."""
+    return list(
+        conn.execute(
+            """SELECT n.id, n.title, n.kind, MIN(e.entry_date) AS first,
+                      SUM(e.entry_date <= ?) AS n
+               FROM notes n
+               JOIN entry_entities ee ON ee.entity_id = n.id
+               JOIN entries e ON e.id = ee.entry_id
+               GROUP BY n.id
+               HAVING MIN(e.entry_date) >= ? AND MIN(e.entry_date) <= ?
+               ORDER BY n DESC, n.title
+               LIMIT ?""",
+            (date_to.isoformat(), date_from.isoformat(), date_to.isoformat(), limit),
+        ).fetchall()
     )
 
 

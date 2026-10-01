@@ -31,6 +31,7 @@ from . import (
     parser,
     prompts,
     query,
+    review,
     rollups,
     store,
     unlinked,
@@ -1048,10 +1049,17 @@ def export_cmd(
         if fmt is ExportFormat.json
         else export.to_markdown(entries)
     )
+    written = _write_out(cfg, out, text)
+    if written is not None:
+        console.print(f"Wrote {len(entries)} entries to {escape(str(written))}")
+
+
+def _write_out(cfg: Config, out: Path | None, text: str) -> Path | None:
+    """Print to stdout, or write to a file outside the vault."""
     if out is None:
         # plain print so rich doesn't read markup or rewrap the text
         print(text)
-        return
+        return None
     out = out.expanduser().resolve()
     if out.is_relative_to(cfg.vault.path):
         console.print(
@@ -1064,7 +1072,35 @@ def export_cmd(
     except OSError as exc:
         console.print(f"[red]Could not write {escape(str(out))}: {escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
-    console.print(f"Wrote {len(entries)} entries to {escape(str(out))}")
+    return out
+
+
+@app.command(name="review")
+def review_cmd(
+    year: Annotated[
+        int | None, typer.Argument(help="The year, e.g. 2025. Default: the latest year you wrote in.")
+    ] = None,
+    config: ConfigOpt = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Write the Markdown to this file instead of stdout."),
+    ] = None,
+) -> None:
+    """A year in review as Markdown: mood, best and hardest days, people, tags."""
+    with _guard(), _open(config) as (cfg, conn):
+        if year is None:
+            _, last = store.date_bounds(conn, None, None)
+            if last is None:
+                console.print("No entries indexed yet. Run 'journal index' first.")
+                raise typer.Exit(1)
+            year = int(last[:4])
+        built = review.build(cfg, conn, year)
+    if built is None:
+        console.print(f"No entries in {year}.")
+        raise typer.Exit(1)
+    written = _write_out(cfg, out, review.to_markdown(built))
+    if written is not None:
+        console.print(f"Wrote the {year} review to {escape(str(written))}")
 
 
 @app.command(name="insights")
