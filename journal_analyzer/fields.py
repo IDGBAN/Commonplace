@@ -6,6 +6,7 @@ change, `refresh` recomputes every entry without calling a model.
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import sqlite3
@@ -16,6 +17,8 @@ from .config import Config
 from .models import Extraction, FrontmatterValue
 
 _SETTINGS_META_KEY = "reading_settings"
+# how alike two tag names must be (0..1) for `journal tags --similar` to pair them
+SIMILAR_TAG_RATIO = 0.85
 # "7", "7.5", "7,5" or "7/10"
 _SCORE_RE = re.compile(r"^\s*([-+]?\d+(?:[.,]\d+)?)\s*(?:/\s*(\d+(?:[.,]\d+)?))?\s*$")
 
@@ -56,9 +59,11 @@ def final_tags(
     if config.tags.from_frontmatter:
         candidates += parser.frontmatter_tags(fields)
     ignored = set(config.tags.ignore)
+    merge = config.tags.merge
     seen: dict[str, None] = {}
     for raw in candidates:
         tag = raw.strip().lstrip("#").lower()
+        tag = merge.get(tag, tag)
         if tag and tag not in ignored:
             seen.setdefault(tag, None)
     return list(seen)
@@ -85,9 +90,34 @@ def settings_fingerprint(config: Config) -> str:
             "scale": config.indexing.mood_scale_max,
             "frontmatter_tags": config.tags.from_frontmatter,
             "ignore": sorted(config.tags.ignore),
+            "merge": sorted(config.tags.merge.items()),
         },
         sort_keys=True,
     )
+
+
+def _plural_pair(a: str, b: str) -> bool:
+    return b in (a + "s", a + "es") or (a.endswith("y") and b == a[:-1] + "ies")
+
+
+def similar_tags(rows: list[sqlite3.Row]) -> list[tuple[str, int, str, int]]:
+    """Pairs of tags that look like the same thing: (rarer, count, more used, count)."""
+    counts = {r["name"]: r["n"] for r in rows}
+    names = sorted(counts)
+    pairs: list[tuple[str, int, str, int]] = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            short, long = sorted((a, b), key=len)
+            related = (
+                _plural_pair(short, long)
+                or (len(short) >= 4 and long.startswith(short))
+                or (min(len(a), len(b)) >= 5
+                    and difflib.SequenceMatcher(None, a, b).ratio() >= SIMILAR_TAG_RATIO)
+            )
+            if related:
+                rare, common = sorted((a, b), key=lambda t: (counts[t], t == short))
+                pairs.append((rare, counts[rare], common, counts[common]))
+    return sorted(pairs, key=lambda p: (-p[3], p[0]))
 
 
 def _load_missing_frontmatter(conn: sqlite3.Connection) -> int:

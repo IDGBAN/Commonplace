@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import sqlite3
 import sys
 from collections.abc import Callable, Iterator
@@ -592,9 +593,17 @@ def tags(
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many tags.")] = 20,
     since: SinceOpt = None,
     until: UntilOpt = None,
+    similar: Annotated[
+        bool,
+        typer.Option("--similar", help="List tags that look like the same thing, to merge."),
+    ] = False,
 ) -> None:
     """List the most used tags."""
     date_from, date_to = _parse_range(since, until)
+    if similar:
+        with _guard(), _open(config) as (_, conn):
+            _print_similar_tags(fields.similar_tags(store.tag_stats(conn)))
+        return
     with _guard(), _open(config) as (_, conn):
         rows = store.top_tags(conn, date_from, date_to, limit=limit)
     if not rows:
@@ -606,6 +615,36 @@ def tags(
     for r in rows:
         table.add_row(escape(r["name"]), str(r["n"]))
     console.print(table)
+
+
+def _print_similar_tags(pairs: list[tuple[str, int, str, int]]) -> None:
+    if not pairs:
+        console.print("No tags look like duplicates of each other.")
+        return
+    table = Table(title="Tags that may be the same thing")
+    table.add_column("Tag", style="cyan")
+    table.add_column("Entries", justify="right")
+    table.add_column("Looks like", style="cyan")
+    table.add_column("Entries", justify="right")
+    for rare, n_rare, common, n_common in pairs:
+        table.add_row(escape(rare), str(n_rare), escape(common), str(n_common))
+    console.print(table)
+    console.print(
+        "\nTo count them as one, add the ones you agree with to config.toml and run "
+        "'journal index' (no model calls needed):\n"
+    )
+    seen: set[str] = set()
+    lines = []
+    for rare, _, common, _ in pairs:
+        if rare not in seen:
+            seen.add(rare)
+            lines.append(f'{_toml_key(rare)} = "{common}"')
+    # plain print so the [tags] header isn't read as markup
+    print("[tags]\nmerge = { " + ", ".join(lines) + " }")
+
+
+def _toml_key(name: str) -> str:
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else f'"{name}"'
 
 
 @app.command()

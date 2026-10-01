@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import TypeVar
 
 from .config import Config
@@ -31,6 +32,10 @@ outside. Write "Felt drained after work but the evening walk helped", not \
 author", "The user", "The writer" or "This entry".
 - tags: 3-6 lowercase theme tags. Keep them general and reusable \
 (e.g. "work", "health", "family"), not hyper-specific."""
+
+_KNOWN_TAGS = """
+- Tags already used in this journal, most used first: {tags}. Use these when \
+one fits the entry, and make up a new tag only when none of them does."""
 
 _NOTE_PROMPT = """You summarize one note from someone's personal knowledge base. \
 Its notes describe the people, places, groups, events, games and topics that \
@@ -88,12 +93,23 @@ def _in_writers_voice(
     return client.chat_structured(model=model, messages=retry, schema=schema)
 
 
-def extract(entry: ParsedEntry, config: Config, client: OllamaClient) -> Extraction:
+def extract(
+    entry: ParsedEntry,
+    config: Config,
+    client: OllamaClient,
+    known_tags: Sequence[str] = (),
+) -> Extraction:
     text = entry.raw_text.strip()
     literal_tags = extract_literal_tags(text)
 
     if not text:
         return Extraction(mood_score=None, summary="(empty entry)", tags=literal_tags)
+
+    system = _SYSTEM_PROMPT.format(
+        mood_max=config.indexing.mood_scale_max, summary_max=SUMMARY_MAX_CHARS
+    )
+    if known_tags:
+        system += _KNOWN_TAGS.format(tags=", ".join(known_tags))
 
     heading = f"Journal entry dated {entry.entry_date.isoformat()}"
     if entry.rel_path:
@@ -102,13 +118,7 @@ def extract(entry: ParsedEntry, config: Config, client: OllamaClient) -> Extract
         client,
         config.ollama.fast_model,
         [
-            {
-                "role": "system",
-                "content": _SYSTEM_PROMPT.format(
-                    mood_max=config.indexing.mood_scale_max,
-                    summary_max=SUMMARY_MAX_CHARS,
-                ),
-            },
+            {"role": "system", "content": system},
             {"role": "user", "content": f"{heading}\n\n{text}"},
         ],
         Extraction,

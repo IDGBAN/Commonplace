@@ -49,7 +49,7 @@ Then open `config.toml` and set these:
 - `split_heading_regex` splits a file that holds several dated entries. Set it to something like `'^## \d{4}-\d{2}-\d{2}'`.
 - `ignore_patterns` lists folders and files to skip, like `[".stversions", ".stfolder", ".smart-env", ".obsidian"]`. A name without a `/` matches anywhere in the tree. A pattern with a `/` is matched against the path from the vault root. `*` and `?` work in both.
 - `frontmatter_mood_key` is for when you already score your own mood in each entry's frontmatter, like `mood: 7`. Set it to `"mood"` and your number is used instead of the model's guess. `frontmatter_mood_min` and `frontmatter_mood_max` give the scale you write it on (1 to 10 by default), and it's converted to the app's scale. A value like `3/5` brings its own scale. Words like `mood: tired` are ignored.
-- `[tags]` controls tags. With `from_frontmatter = true` (the default), tags in an entry's frontmatter count the same as inline `#tags`. `ignore` drops tags from every entry, which helps when a template puts `daily` on every note.
+- `[tags]` controls tags. With `from_frontmatter = true` (the default), tags in an entry's frontmatter count the same as inline `#tags`. `ignore` drops tags from every entry, which helps when a template puts `daily` on every note. `merge` makes one tag count as another, like `{ friendship = "friends" }`; `journal tags --similar` lists tags that look like duplicates and prints a `merge` line you can paste in. When the model tags an entry it's shown the `known_in_prompt` most used tags (40 by default) and asked to reuse them, so near-duplicates stop piling up.
 - `[notes] paths` points at the folders with your undated reference notes, e.g. `["Links"]`. See [Reference notes](#reference-notes).
 - `[ollama]` has the host, the three model names, whether the fast and precise models think before answering (`fast_model_think`, `precise_model_think`), the embedding context window (`embed_num_ctx`) and the request timeout. The chat models run at Ollama's default context window. When a prompt won't fit (a very long entry, a big pile of digests), the request asks for a bigger window instead of letting the prompt get cut, and Ollama reloads the model at that size. Thinking is off for the fast model by default, because on a reasoning model it makes extraction a lot slower without helping much. If you change `embed_model` later you'll have to rebuild the cache, since vectors from different models can't be compared.
 - `[db] path` is where the SQLite cache goes.
@@ -113,6 +113,7 @@ journal show 2024-01-15                  # one day's mood, tags, linked notes an
 journal show 2024-01-15 --raw            # same, plus the stored entry text
 journal note "John Doe"               # a reference note and the entries that link to it
 journal tags --limit 30                  # most used tags
+journal tags --similar                   # tags that look like the same thing, as a merge table
 journal entities --type people           # most-linked notes, optionally of one kind
 journal mood --since 2023-01-01          # average mood per month, with a bar chart
 journal mood --about "John Doe"          # only the days you linked John

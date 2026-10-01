@@ -57,6 +57,10 @@ mood_deviation_threshold = 0.8
 [tags]
 from_frontmatter = true           # tags: in an entry's frontmatter count like inline #tags
 ignore = []                       # dropped from every entry, e.g. ["daily", "journal"]
+# Tags that should count as another one, e.g. { friendship = "friends" }.
+# `journal tags --similar` suggests some.
+merge = {}
+known_in_prompt = 40              # most used tags shown to the model when it tags an entry; 0 turns it off
 
 [notes]
 # Folders (or single files) of undated notes about people, places, topics and

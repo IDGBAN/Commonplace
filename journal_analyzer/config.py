@@ -102,11 +102,33 @@ def _tag_name(raw: str) -> str:
 class TagsConfig(BaseModel):
     from_frontmatter: bool = True
     ignore: list[str] = Field(default_factory=list)
+    # tag -> the tag it should count as
+    merge: dict[str, str] = Field(default_factory=dict)
+    known_in_prompt: int = Field(default=40, ge=0)
 
     @field_validator("ignore")
     @classmethod
     def _normalize(cls, v: list[str]) -> list[str]:
         return [name for name in (_tag_name(t) for t in v) if name]
+
+    @field_validator("merge")
+    @classmethod
+    def _resolve(cls, v: dict[str, str]) -> dict[str, str]:
+        raw = {_tag_name(k): _tag_name(t) for k, t in v.items() if _tag_name(k) and _tag_name(t)}
+        resolved: dict[str, str] = {}
+        for start in raw:
+            # a -> b -> c becomes a -> c, so one lookup is enough later
+            seen = [start]
+            target = raw[start]
+            while target in raw and target != start:
+                if target in seen:
+                    raise ValueError(f"merging goes round in a circle: {' -> '.join([*seen, target])}")
+                seen.append(target)
+                target = raw[target]
+            if target == start:
+                raise ValueError(f"merging goes round in a circle: {' -> '.join([*seen, target])}")
+            resolved[start] = target
+        return resolved
 
 
 class NotesConfig(BaseModel):

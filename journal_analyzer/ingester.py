@@ -100,9 +100,11 @@ def _index_entries(
     client: OllamaClient,
 ) -> None:
     entries = parser.parse_file(path, config)
+    known = config.tags.known_in_prompt
+    known_tags = [r["name"] for r in store.top_tags(conn, None, None, limit=known)] if known else []
     # Do the model calls before deleting anything, so if one fails the old
     # entries are still there.
-    readings = [extractor.extract(entry, config, client) for entry in entries]
+    readings = [extractor.extract(entry, config, client, known_tags) for entry in entries]
     vectors = [
         embedder.entry_vector(entry.raw_text, config, client, summary=reading.summary)
         for entry, reading in zip(entries, readings, strict=True)
