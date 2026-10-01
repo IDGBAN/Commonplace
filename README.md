@@ -82,6 +82,10 @@ journal ask "What did we talk about?" --about "John Doe" --since 2024-03-01
 # digests
 journal rollup                # write missing or stale month, year, relationship, then week digests
 journal rollup --rebuild-all  # regenerate all of them
+journal rollup --since 2025-01-01 --only month,year   # just this year's months and year
+journal rollup --dry-run      # list what would be written, without Ollama
+journal digest 2024-03        # read one digest: a year (2024), month (2024-03) or week (2024-W10)
+journal digest 2024-03 --refresh   # write that one first if it's missing or out of date
 
 # live updates
 journal watch             # keeps running and indexes notes as you save them
@@ -93,6 +97,8 @@ journal prompt            # ideas for what to write next, from threads left open
 ```
 
 Before a long first run, or after changing `date_source`, `date_format` or `split_heading_regex`, run `journal index --dry-run`. It walks the vault the same way `journal index` does and parses every file it would index, without Ollama and without touching the cache. It lists files that would fail and why, files that split into several entries, entries dated in the future, files that would be dropped, and roughly how many model calls the real run would make. Add `--force` to check every file, not just new and changed ones.
+
+`journal rollup` shows a progress bar with the time left. `--since` and `--until` limit it to periods that overlap those dates and `--only` to some kinds (`month`, `year`, `note`, `week`); relationship digests cover the whole journal, so the dates don't apply to them. `--dry-run` lists what it would write and why (not written yet, out of date, or rewritten for `--rebuild-all`). To read one digest, or to write just the one you want instead of waiting for a full run, use `journal digest`. A year is written from its month digests, so refreshing a year writes any of its months that are missing first.
 
 Notes you link often (from 8 or more entries by default) also get a relationship digest: a few sentences on how that person, place or topic figures in your journal over the years. It's written from the note itself and the summaries of the entries that link to it, a sample of each year's when there are many. `journal note` shows it, so do the note's page and the Digests page in the browser, and answers that name the note read it. It goes out of date when an entry that links the note, or the note itself, changes. `[rollups] note_min_mentions` sets the threshold (0 turns them off) and `note_entries_per_year` caps how many entries from each year go in.
 

@@ -9,10 +9,19 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 from rich.console import Console
-from rich.status import Status
+from rich.markup import escape
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+)
 
 from . import store
 from .config import Config
@@ -60,12 +69,6 @@ _NOTE_PROMPT = (
 )
 
 
-def _writing(period_type: str, period_key: str) -> Status:
-    return console.status(
-        f"[dim]Writing the {period_type} {period_key} digest...[/dim]", spinner="line"
-    )
-
-
 def _entry_periods(conn: sqlite3.Connection) -> dict[str, dict[str, list[sqlite3.Row]]]:
     rows = conn.execute(
         "SELECT id, entry_date, mood_score, summary FROM entries ORDER BY entry_date"
@@ -103,18 +106,6 @@ def _prune_orphan_rollups(
     return len(doomed)
 
 
-def _needs_generation(
-    conn: sqlite3.Connection, period_type: str, period_key: str, only_stale: bool
-) -> bool:
-    row = conn.execute(
-        "SELECT stale FROM rollups WHERE period_type = ? AND period_key = ?",
-        (period_type, period_key),
-    ).fetchone()
-    if row is None:
-        return True
-    return (not only_stale) or bool(row["stale"])
-
-
 def _member_stats(
     members: list[sqlite3.Row], tags_by_entry: dict[int, list[str]]
 ) -> tuple[list[str], float | None]:
@@ -148,82 +139,65 @@ def _rollup_members_digest(
     return "\n".join(lines), dominant, avg_mood
 
 
-def _generate_periods(
+def _write_period(
     period_type: str,
-    groups: dict[str, list[sqlite3.Row]],
+    period_key: str,
+    members: list[sqlite3.Row],
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
-    only_stale: bool,
-) -> int:
-    generated = 0
-    for period_key, members in sorted(groups.items()):
-        if not _needs_generation(conn, period_type, period_key, only_stale):
-            continue
-        digest, dominant, avg_mood = _rollup_members_digest(conn, members)
-        with _writing(period_type, period_key):
-            summary = client.chat(
-                model=config.ollama.precise_model,
-                messages=[
-                    {"role": "system", "content": _WEEK_MONTH_PROMPT},
-                    {"role": "user", "content": f"Period {period_key} entries:\n{digest}"},
-                ],
-            ).strip()
-        store.upsert_rollup(
-            conn, period_type, period_key, summary,
-            json.dumps(dominant), avg_mood, len(members),
-        )
-        generated += 1
-        console.print(f"rollup {period_type} {period_key}")
-    return generated
+) -> None:
+    digest, dominant, avg_mood = _rollup_members_digest(conn, members)
+    summary = client.chat(
+        model=config.ollama.precise_model,
+        messages=[
+            {"role": "system", "content": _WEEK_MONTH_PROMPT},
+            {"role": "user", "content": f"Period {period_key} entries:\n{digest}"},
+        ],
+    ).strip()
+    store.upsert_rollup(
+        conn, period_type, period_key, summary, json.dumps(dominant), avg_mood, len(members)
+    )
 
 
-def _generate_years(
+def _write_year(
+    year: str,
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
-    only_stale: bool,
     month_groups: dict[str, list[sqlite3.Row]],
-) -> int:
-    month_rollups = conn.execute(
-        "SELECT * FROM rollups WHERE period_type = 'month' ORDER BY period_key"
+) -> bool:
+    months = conn.execute(
+        "SELECT * FROM rollups WHERE period_type = 'month' AND period_key LIKE ? "
+        "ORDER BY period_key",
+        (f"{year}-%",),
     ).fetchall()
-    by_year: dict[str, list[sqlite3.Row]] = defaultdict(list)
-    for row in month_rollups:
-        by_year[row["period_key"][:4]].append(row)
-    generated = 0
-    for year, months in sorted(by_year.items()):
-        if not _needs_generation(conn, "year", year, only_stale):
-            continue
-        lines = []
-        for m in months:
-            mood_str = f"{m['avg_mood']:g}" if m["avg_mood"] is not None else "-"
-            lines.append(f"- {m['period_key']} (avg mood {mood_str}): {m['summary']}")
-        with _writing("year", year):
-            summary = client.chat(
-                model=config.ollama.precise_model,
-                messages=[
-                    {"role": "system", "content": _YEAR_PROMPT},
-                    {"role": "user", "content": f"Year {year} months:\n" + "\n".join(lines)},
-                ],
-            ).strip()
-        # The text comes from month digests, but the numbers come from the
-        # entries: an average of monthly averages would let a one-entry month
-        # count as much as a full one.
-        members = [
-            row
-            for key, rows in sorted(month_groups.items())
-            if key.startswith(f"{year}-")
-            for row in rows
-        ]
-        tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in members])
-        dominant, avg_mood = _member_stats(members, tags_by_entry)
-        store.upsert_rollup(
-            conn, "year", year, summary, json.dumps(dominant), avg_mood, len(members)
-        )
-        generated += 1
-        console.print(f"rollup year {year}")
-    return generated
+    if not months:
+        return False  # a year is written from its month digests
+    lines = []
+    for m in months:
+        mood_str = f"{m['avg_mood']:g}" if m["avg_mood"] is not None else "-"
+        lines.append(f"- {m['period_key']} (avg mood {mood_str}): {m['summary']}")
+    summary = client.chat(
+        model=config.ollama.precise_model,
+        messages=[
+            {"role": "system", "content": _YEAR_PROMPT},
+            {"role": "user", "content": f"Year {year} months:\n" + "\n".join(lines)},
+        ],
+    ).strip()
+    # The text comes from month digests, but the numbers come from the
+    # entries: an average of monthly averages would let a one-entry month
+    # count as much as a full one.
+    members = [
+        row
+        for key, rows in sorted(month_groups.items())
+        if key.startswith(f"{year}-")
+        for row in rows
+    ]
+    tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in members])
+    dominant, avg_mood = _member_stats(members, tags_by_entry)
+    store.upsert_rollup(conn, "year", year, summary, json.dumps(dominant), avg_mood, len(members))
+    return True
 
 
 def _spread(rows: list[sqlite3.Row], limit: int) -> list[sqlite3.Row]:
@@ -272,66 +246,130 @@ def note_digest_input(
     return "\n".join(lines), mentions, avg_mood
 
 
-def _generate_note_digests(
+def _write_note_digest(
+    link_key: str, config: Config, conn: sqlite3.Connection, client: OllamaClient
+) -> bool:
+    found = store.notes_by_link_key(conn, link_key)
+    if found is None:
+        return False
+    text, mentions, avg_mood = note_digest_input(config, conn, found)
+    if mentions is None:
+        return False
+    summary = client.chat(
+        model=config.ollama.precise_model,
+        messages=[
+            {"role": "system", "content": _NOTE_PROMPT},
+            {"role": "user", "content": text},
+        ],
+    ).strip()
+    store.upsert_note_digest(conn, link_key, summary, mentions, avg_mood)
+    return True
+
+
+# Weeks go last. Most answers read months and years (weeks only cover spans
+# of a few weeks), and a run can take hours, so if it gets stopped those
+# should already be done. Years need their months written first.
+ORDER = ("month", "year", "note", "week")
+Reason = Literal["missing", "stale", "rebuild"]
+
+
+@dataclass(frozen=True)
+class PlannedDigest:
+    kind: str  # week, month, year or note
+    key: str  # a period key, or a note's link key
+    label: str  # the period key, or the note's title
+    reason: Reason
+
+
+def _reason(row: sqlite3.Row | None, only_stale: bool) -> Reason | None:
+    if row is None:
+        return "missing"
+    if row["stale"]:
+        return "stale"
+    return None if only_stale else "rebuild"
+
+
+def _overlaps(kind: str, key: str, since: date | None, until: date | None) -> bool:
+    start, end = store.period_bounds(kind, key)
+    return (until is None or start <= until) and (since is None or end >= since)
+
+
+def plan_rollups(
     config: Config,
     conn: sqlite3.Connection,
-    client: OllamaClient,
-    only_stale: bool,
-) -> int:
-    minimum = config.rollups.note_min_mentions
-    if minimum == 0:
-        return 0
-    notes = store.notes_linked_at_least(conn, minimum)
-    pruned = store.prune_note_digests(conn, {n["link_key"] for n in notes})
-    if pruned:
-        console.print(f"pruned {pruned} note digests for notes no longer linked often enough")
-    generated = 0
-    for note in notes:
-        existing = store.get_note_digest(conn, note["link_key"])
-        if existing is not None and only_stale and not existing["stale"]:
+    period_types: tuple[str, ...] = ORDER,
+    only_stale: bool = True,
+    since: date | None = None,
+    until: date | None = None,
+) -> list[PlannedDigest]:
+    """What generate_rollups would write, in the order it writes them.
+
+    The date range picks periods that overlap it. Note digests span the whole
+    journal, so the range doesn't apply to them.
+    """
+    groups = _entry_periods(conn)
+    planned: list[PlannedDigest] = []
+    for kind in ORDER:
+        if kind not in period_types:
             continue
-        text, mentions, avg_mood = note_digest_input(config, conn, note)
-        if mentions is None:
+        if kind == "note":
+            minimum = config.rollups.note_min_mentions
+            for note in store.notes_linked_at_least(conn, minimum) if minimum else []:
+                reason = _reason(store.get_note_digest(conn, note["link_key"]), only_stale)
+                if reason:
+                    planned.append(PlannedDigest("note", note["link_key"], note["title"], reason))
             continue
-        with _writing("note", note["title"]):
-            summary = client.chat(
-                model=config.ollama.precise_model,
-                messages=[
-                    {"role": "system", "content": _NOTE_PROMPT},
-                    {"role": "user", "content": text},
-                ],
-            ).strip()
-        store.upsert_note_digest(conn, note["link_key"], summary, mentions, avg_mood)
-        generated += 1
-        console.print(f"rollup note {note['title']}")
-    return generated
+        keys = sorted({k[:4] for k in groups["month"]}) if kind == "year" else sorted(groups[kind])
+        for key in keys:
+            if not _overlaps(kind, key, since, until):
+                continue
+            reason = _reason(store.get_rollup(conn, kind, key), only_stale)
+            if reason:
+                planned.append(PlannedDigest(kind, key, key, reason))
+    return planned
 
 
 def generate_rollups(
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
-    period_types: tuple[str, ...] = ("week", "month", "year", "note"),
+    period_types: tuple[str, ...] = ORDER,
     only_stale: bool = True,
+    since: date | None = None,
+    until: date | None = None,
 ) -> dict[str, int]:
-    # Weeks go last. Most answers read months and years (weeks only cover
-    # spans of a few weeks), and a run can take hours, so if it gets stopped
-    # those should already be done.
-    counts = {"week": 0, "month": 0, "year": 0, "note": 0}
+    counts = dict.fromkeys(ORDER, 0)
     groups = _entry_periods(conn)
     pruned = _prune_orphan_rollups(conn, groups)
     if pruned:
         console.print(f"pruned {pruned} rollups for periods with no entries")
-    if "month" in period_types:
-        counts["month"] = _generate_periods(
-            "month", groups["month"], config, conn, client, only_stale
-        )
-    if "year" in period_types:
-        counts["year"] = _generate_years(config, conn, client, only_stale, groups["month"])
-    if "note" in period_types:
-        counts["note"] = _generate_note_digests(config, conn, client, only_stale)
-    if "week" in period_types:
-        counts["week"] = _generate_periods(
-            "week", groups["week"], config, conn, client, only_stale
-        )
+    if "note" in period_types and config.rollups.note_min_mentions:
+        keep = {n["link_key"] for n in store.notes_linked_at_least(conn, config.rollups.note_min_mentions)}
+        pruned = store.prune_note_digests(conn, keep)
+        if pruned:
+            console.print(f"pruned {pruned} note digests for notes no longer linked often enough")
+    plan = plan_rollups(config, conn, period_types, only_stale, since, until)
+    if not plan:
+        return counts
+    with Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Writing digests", total=len(plan))
+        for item in plan:
+            progress.update(task, description=f"Writing the {item.kind} {escape(item.label)} digest")
+            if item.kind == "note":
+                written = _write_note_digest(item.key, config, conn, client)
+            elif item.kind == "year":
+                written = _write_year(item.key, config, conn, client, groups["month"])
+            else:
+                _write_period(item.kind, item.key, groups[item.kind][item.key], config, conn, client)
+                written = True
+            if written:
+                counts[item.kind] += 1
+                progress.console.print(f"rollup {item.kind} {escape(item.label)}")
+            progress.advance(task)
     return counts

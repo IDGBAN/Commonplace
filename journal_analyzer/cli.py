@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import sqlite3
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -401,22 +402,166 @@ def ask(
             _print_reading(conn, result)
 
 
+def _parse_only(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return rollups.ORDER
+    kinds = tuple(dict.fromkeys(k.strip().lower() for k in value.split(",") if k.strip()))
+    unknown = [k for k in kinds if k not in rollups.ORDER]
+    if unknown or not kinds:
+        console.print(
+            f"[red]--only takes a comma list of {', '.join(rollups.ORDER)}, got "
+            f"'{escape(value)}'.[/red]"
+        )
+        raise typer.Exit(1)
+    return kinds
+
+
+_REASONS = {"missing": "not written yet", "stale": "out of date", "rebuild": "rewriting"}
+
+
+def _print_rollup_plan(plan: list[rollups.PlannedDigest]) -> None:
+    console.print("[dim]Dry run: nothing is written and no model is called.[/dim]")
+    if not plan:
+        console.print("Every digest is up to date.")
+        return
+    table = Table(title="Digests that would be written, in order")
+    table.add_column("Kind")
+    table.add_column("Period or note", style="cyan")
+    table.add_column("Why")
+    for item in plan:
+        table.add_row(item.kind, escape(item.label), _REASONS[item.reason])
+    console.print(table)
+    console.print(f"{_count(len(plan), 'call')} to the precise model.")
+
+
 @app.command()
 def rollup(
     config: ConfigOpt = None,
     rebuild_all: Annotated[
         bool, typer.Option("--rebuild-all", help="Regenerate all digests, not just stale ones.")
     ] = False,
+    since: Annotated[
+        str | None, typer.Option("--since", help="Only periods that end on/after this ISO date.")
+    ] = None,
+    until: Annotated[
+        str | None, typer.Option("--until", help="Only periods that start on/before this ISO date.")
+    ] = None,
+    only: Annotated[
+        str | None,
+        typer.Option("--only", help="Comma list of month, year, note, week. Default all."),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="List what would be written, without Ollama.")
+    ] = False,
 ) -> None:
-    """Write any missing or outdated week, month and year digests."""
+    """Write any missing or outdated digests: months, years, often-linked notes, weeks."""
+    date_from, date_to = _parse_range(since, until)
+    kinds = _parse_only(only)
     with _guard(), _open(config) as (cfg, conn):
+        if dry_run:
+            _print_rollup_plan(
+                rollups.plan_rollups(cfg, conn, kinds, not rebuild_all, date_from, date_to)
+            )
+            return
         counts = rollups.generate_rollups(
-            cfg, conn, OllamaClient(cfg), only_stale=not rebuild_all
+            cfg, conn, OllamaClient(cfg), kinds, not rebuild_all, date_from, date_to
         )
     console.print(
         f"Generated {counts['week']} week, {counts['month']} month, "
         f"{counts['year']} year and {counts['note']} relationship rollups."
     )
+
+
+_PERIOD_PATTERNS = (
+    ("year", re.compile(r"\d{4}")),
+    ("month", re.compile(r"\d{4}-\d{2}")),
+    ("week", re.compile(r"\d{4}-[Ww]\d{2}")),
+)
+
+
+def _parse_period(value: str) -> tuple[str, str, date, date]:
+    text = value.strip()
+    for kind, pattern in _PERIOD_PATTERNS:
+        if pattern.fullmatch(text):
+            key = text.upper() if kind == "week" else text
+            try:
+                start, end = store.period_bounds(kind, key)
+            except ValueError:
+                break
+            return kind, key, start, end
+    console.print(
+        f"[red]'{escape(value)}' isn't a period. Use a year (2024), a month (2024-03) "
+        "or an ISO week (2024-W10).[/red]"
+    )
+    raise typer.Exit(1)
+
+
+def _when(stamp: str | None) -> str:
+    if not stamp:
+        return "at an unknown time"
+    try:
+        return datetime.fromisoformat(stamp).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return stamp
+
+
+def _period_title(kind: str, key: str, start: date) -> str:
+    if kind == "month":
+        return start.strftime("%B %Y")
+    if kind == "week":
+        year, week = key.split("-W")
+        return f"Week {int(week)} of {year}"
+    return key
+
+
+@app.command(name="digest")
+def digest_cmd(
+    period: Annotated[
+        str, typer.Argument(help="A year (2024), month (2024-03) or ISO week (2024-W10).")
+    ],
+    config: ConfigOpt = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Write it first if it's missing or out of date."),
+    ] = False,
+) -> None:
+    """Show the digest for one week, month or year."""
+    kind, key, start, end = _parse_period(period)
+    title = _period_title(kind, key, start)
+    with _guard(), _open(config) as (cfg, conn):
+        members = store.entries_in_range(conn, start, end)
+        row = store.get_rollup(conn, kind, key)
+        if not members and row is None:
+            console.print(f"No entries in {title} ({start} to {end}).")
+            raise typer.Exit(1)
+        if refresh:
+            kinds = ("month", "year") if kind == "year" else (kind,)
+            plan = rollups.plan_rollups(cfg, conn, kinds, True, start, end)
+            if not plan:
+                console.print("[dim]Already up to date.[/dim]")
+            else:
+                console.print(f"[dim]Writing {_count(len(plan), 'digest')}...[/dim]")
+                rollups.generate_rollups(cfg, conn, OllamaClient(cfg), kinds, True, start, end)
+            row = store.get_rollup(conn, kind, key)
+        console.print(f"[bold cyan]{escape(title)}[/bold cyan]  {start} .. {end}")
+        moods = [r["mood_score"] for r in members if r["mood_score"] is not None]
+        avg = f"{sum(moods) / len(moods):.2f}".rstrip("0").rstrip(".") if moods else "-"
+        console.print(f"  {_count(len(members), 'entry', 'entries')}, mood {avg}")
+        if row is None:
+            console.print(
+                f"\nNo digest yet. Run 'journal digest {key} --refresh' to write it "
+                "(one call to the precise model, more for a year whose months aren't written)."
+            )
+            return
+        tags = json.loads(row["dominant_tags"] or "[]")
+        if tags:
+            console.print(f"  tags: {escape(', '.join(tags))}")
+        state = " [yellow](out of date)[/yellow]" if row["stale"] else ""
+        console.print(f"  [dim]written {_when(row['generated_at'])}[/dim]{state}")
+        console.print()
+        console.print(escape(row["summary"] or "(empty)"))
+        if row["stale"] and not refresh:
+            console.print(f"\n[dim]'journal digest {key} --refresh' rewrites it.[/dim]")
 
 
 @app.command()

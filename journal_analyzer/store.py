@@ -427,6 +427,12 @@ def find_notes(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
     return sorted(rows, key=lambda r: r["title"].casefold())
 
 
+def notes_by_link_key(conn: sqlite3.Connection, link_key: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM notes WHERE link_key = ? ORDER BY id LIMIT 1", (link_key,)
+    ).fetchone()
+
+
 def note_exists(conn: sqlite3.Connection, path: str) -> bool:
     return conn.execute("SELECT 1 FROM notes WHERE file_path = ?", (path,)).fetchone() is not None
 
