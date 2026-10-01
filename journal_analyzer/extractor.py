@@ -5,8 +5,15 @@ from collections.abc import Sequence
 from typing import TypeVar
 
 from .config import Config
+from .context import fit
 from .models import Extraction, NoteSummary, ParsedEntry, ParsedNote
-from .ollama_client import OllamaClient
+from .ollama_client import (
+    CHARS_PER_TOKEN_ESTIMATE,
+    REPLY_TOKENS,
+    OllamaClient,
+    context_window,
+    prompt_tokens,
+)
 from .parser import extract_literal_tags
 
 SUMMARY_MAX_CHARS = 200
@@ -32,6 +39,13 @@ outside. Write "Felt drained after work but the evening walk helped", not \
 author", "The user", "The writer" or "This entry".
 - tags: 3-6 lowercase theme tags. Keep them general and reusable \
 (e.g. "work", "health", "family"), not hyper-specific."""
+
+_LINKED_HEADER = (
+    "What this entry links to, as background on who and what the names are. "
+    "Summarize, score and tag the entry itself, not these:"
+)
+# the extraction retry adds the first reply and a correction to the prompt
+RETRY_HEADROOM_TOKENS = 400
 
 _KNOWN_TAGS = """
 - Tags already used in this journal, most used first: {tags}. Use these when \
@@ -93,12 +107,22 @@ def _in_writers_voice(
     return client.chat_structured(model=model, messages=retry, schema=schema)
 
 
+def _room_for_links(config: Config, messages: list[dict[str, str]]) -> int:
+    """Characters left in the fast model's window once the entry and a reply fit."""
+    window = context_window(config, config.ollama.fast_model)
+    tokens = window - REPLY_TOKENS - RETRY_HEADROOM_TOKENS - prompt_tokens(messages)
+    return max(tokens, 0) * CHARS_PER_TOKEN_ESTIMATE
+
+
 def extract(
     entry: ParsedEntry,
     config: Config,
     client: OllamaClient,
     known_tags: Sequence[str] = (),
+    linked: Sequence[str] = (),
 ) -> Extraction:
+    """`linked` is context.entry_links: what the entry's links point at. As much
+    of it as fits in the fast model's window goes along as background."""
     text = entry.raw_text.strip()
     literal_tags = extract_literal_tags(text)
 
@@ -114,12 +138,20 @@ def extract(
     heading = f"Journal entry dated {entry.entry_date.isoformat()}"
     if entry.rel_path:
         heading += f"\nFile: {entry.rel_path}"
+    user = f"{heading}\n\n{text}"
+    if linked:
+        room = _room_for_links(
+            config, [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        )
+        shown = fit(list(linked), room - len(_LINKED_HEADER))
+        if shown:
+            user += f"\n\n{_LINKED_HEADER}\n" + "\n".join(shown)
     result = _in_writers_voice(
         client,
         config.ollama.fast_model,
         [
             {"role": "system", "content": system},
-            {"role": "user", "content": f"{heading}\n\n{text}"},
+            {"role": "user", "content": user},
         ],
         Extraction,
     )

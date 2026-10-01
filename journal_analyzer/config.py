@@ -68,6 +68,11 @@ class OllamaConfig(BaseModel):
     # not much benefit, so it's off for the fast model.
     fast_model_think: bool | None = False
     precise_model_think: bool | None = None
+    # A fixed window means Ollama loads the model once at that size instead
+    # of reloading whenever a prompt needs more room. 0 is Ollama's default,
+    # raised only for prompts that need it.
+    fast_num_ctx: int = Field(default=8192, ge=0)
+    precise_num_ctx: int = Field(default=0, ge=0)
     embed_model: str = "qwen3-embedding:0.6b"
     # capped at the model's own limit
     embed_num_ctx: int = Field(default=8192, ge=512)
@@ -86,6 +91,8 @@ class DbConfig(BaseModel):
 class IndexingConfig(BaseModel):
     watch_debounce_seconds: float = Field(default=45, ge=0)
     mood_scale_max: int = Field(default=10, ge=2)
+    # how much of each linked note goes along when an entry is read; 0 sends none
+    linked_note_chars: int = Field(default=600, ge=0)
 
 
 class RerankingConfig(BaseModel):
@@ -97,6 +104,8 @@ class RollupsConfig(BaseModel):
     # notes linked from at least this many entries get a relationship digest; 0 turns them off
     note_min_mentions: int = Field(default=8, ge=0)
     note_entries_per_year: int = Field(default=30, ge=1)
+    # room for the notes a period's entries link to, in each digest's prompt; 0 sends none
+    linked_notes_chars: int = Field(default=6000, ge=0)
 
 
 class InsightsConfig(BaseModel):

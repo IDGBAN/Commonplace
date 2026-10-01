@@ -19,7 +19,7 @@ from rich.progress import Progress
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import db, embedder, extractor, fields, parser, store
+from . import context, db, embedder, extractor, fields, parser, store
 from .config import Config
 from .models import ConfigError, OllamaUnavailableError, ParsedEntry
 from .ollama_client import OllamaClient
@@ -114,9 +114,16 @@ def _index_entries(
         return False
     known = config.tags.known_in_prompt
     known_tags = [r["name"] for r in store.top_tags(conn, None, None, limit=known)] if known else []
+    vault = config.vault.path
+    chars = config.indexing.linked_note_chars
     # Do the model calls before deleting anything, so if one fails the old
     # entries are still there.
-    readings = [extractor.extract(entry, config, client, known_tags) for entry in entries]
+    readings = [
+        extractor.extract(
+            entry, config, client, known_tags, context.entry_links(conn, entry, vault, chars)
+        )
+        for entry in entries
+    ]
     vectors = [
         embedder.entry_vector(entry.raw_text, config, client, summary=reading.summary)
         for entry, reading in zip(entries, readings, strict=True)

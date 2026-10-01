@@ -40,8 +40,9 @@ RERANK_CANDIDATE_POOL = 25
 RRF_DAMPING = 60
 AGGREGATE_TOP_TAGS = 10
 NOTE_SEARCH_K = 3
-LINKED_NOTES_K = 3
-MAX_CONTEXT_NOTES = 8
+# notes the candidate entries link to, the most linked first
+LINKED_NOTES_K = 8
+MAX_CONTEXT_NOTES = 12
 # comes out of MAX_RAW_CONTEXT_CHARS
 MAX_NOTE_CONTEXT_CHARS = 16_000
 # notes called "Go" or "Me" would match ordinary words all the time

@@ -28,6 +28,12 @@ fast_model = "llama3.2:3b"
 precise_model = "qwen3:14b"
 fast_model_think = false
 precise_model_think = true
+# The fast model always gets this window, so Ollama loads it once at that size
+# and there's room for the notes an entry links to. 0 means Ollama's default
+# (4096), raised only for prompts that need more. 8192 costs a 3B model about
+# 1 GB of memory; 16384 fits more notes and is slower on a CPU.
+fast_num_ctx = 8192
+precise_num_ctx = 0
 embed_model = "qwen3-embedding:0.6b"
 embed_num_ctx = 8192
 request_timeout_seconds = 120
@@ -38,6 +44,7 @@ path = "~/.journal_analyzer/journal.db"
 [indexing]
 watch_debounce_seconds = 45
 mood_scale_max = 10               # mood_score goes from 1 to this
+linked_note_chars = 600           # of each linked note sent along when an entry is read; 0 sends none
 
 [reranking]
 # Reorders search hits before answering, which gives better results.
@@ -49,6 +56,7 @@ model = "ms-marco-MiniLM-L-12-v2"
 # written by `journal rollup`. 0 turns them off.
 note_min_mentions = 8
 note_entries_per_year = 30         # entries per year that go into one; busier years are sampled
+linked_notes_chars = 6000          # room for linked notes in each digest's prompt; 0 sends none
 
 [insights]
 # `journal insights` only reports a tag, person or weekly/seasonal pattern once

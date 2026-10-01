@@ -18,6 +18,8 @@ class ParsedEntry:
     rel_path: str = ""  # vault-relative, forward slashes
     # the whole file's, so split sections share it
     frontmatter: dict[str, FrontmatterValue] = field(default_factory=dict)
+    # how a link was shown when it differs from its target, e.g. "john doe" -> ["John"]
+    link_labels: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass

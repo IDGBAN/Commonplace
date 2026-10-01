@@ -23,7 +23,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from . import store
+from . import context, store
 from .config import Config
 from .ollama_client import OllamaClient
 
@@ -32,6 +32,8 @@ console = Console()
 DOMINANT_TAG_COUNT = 5
 # the note's own text that goes in with the entries; its summary when it has one
 NOTE_DIGEST_TEXT_CHARS = 1500
+# of each linked note that goes in as background
+LINKED_NOTE_CHARS = 600
 
 _VOICE = (
     "Write it in the journal writer's own first-person voice (I, me, my), as "
@@ -40,16 +42,23 @@ _VOICE = (
     '"The user".'
 )
 
+_LINKED_HEADER = (
+    "Notes about the people, places and topics these entries link to, as "
+    "background. They aren't events of this period:"
+)
+
 _WEEK_MONTH_PROMPT = (
     "You summarize a period of someone's journal from per-entry one-line "
     "summaries, mood scores, tags, and the notes each entry links to (the "
-    "people, places and topics involved). Write a cohesive 2-4 sentence "
+    "people, places and topics involved, with what the writer's notes say "
+    "about them). Write a cohesive 2-4 sentence "
     "digest of the period: main themes, notable events, and the overall "
     f"emotional arc. {_VOICE} Do not invent events not present in the input."
 )
 
 _YEAR_PROMPT = (
-    "You summarize a year of someone's journal from its monthly digests. "
+    "You summarize a year of someone's journal from its monthly digests, with "
+    "notes about the people, places and topics it links to most as background. "
     "Write a cohesive 3-6 sentence digest of the year: dominant themes, key "
     f"turning points, and the overall emotional arc. {_VOICE} Do not invent "
     "events not present in the input."
@@ -118,6 +127,16 @@ def _member_stats(
     return dominant, avg_mood
 
 
+def _with_linked_notes(
+    text: str, config: Config, conn: sqlite3.Connection, entry_ids: list[int]
+) -> str:
+    blocks = context.linked_notes(
+        conn, entry_ids, config.vault.path,
+        config.rollups.linked_notes_chars, LINKED_NOTE_CHARS,
+    )
+    return f"{text}\n\n{_LINKED_HEADER}\n" + "\n".join(blocks) if blocks else text
+
+
 def _rollup_members_digest(
     conn: sqlite3.Connection, members: list[sqlite3.Row]
 ) -> tuple[str, list[str], float | None]:
@@ -150,11 +169,14 @@ def _write_period(
     client: OllamaClient,
 ) -> None:
     digest, dominant, avg_mood = _rollup_members_digest(conn, members)
+    text = _with_linked_notes(
+        f"Period {period_key} entries:\n{digest}", config, conn, [r["id"] for r in members]
+    )
     summary = client.chat(
         model=config.ollama.precise_model,
         messages=[
             {"role": "system", "content": _WEEK_MONTH_PROMPT},
-            {"role": "user", "content": f"Period {period_key} entries:\n{digest}"},
+            {"role": "user", "content": text},
         ],
     ).strip()
     store.upsert_rollup(
@@ -180,13 +202,6 @@ def _write_year(
     for m in months:
         mood_str = f"{m['avg_mood']:g}" if m["avg_mood"] is not None else "-"
         lines.append(f"- {m['period_key']} (avg mood {mood_str}): {m['summary']}")
-    summary = client.chat(
-        model=config.ollama.precise_model,
-        messages=[
-            {"role": "system", "content": _YEAR_PROMPT},
-            {"role": "user", "content": f"Year {year} months:\n" + "\n".join(lines)},
-        ],
-    ).strip()
     # The text comes from month digests, but the numbers come from the
     # entries: an average of monthly averages would let a one-entry month
     # count as much as a full one.
@@ -196,6 +211,16 @@ def _write_year(
         if key.startswith(f"{year}-")
         for row in rows
     ]
+    text = _with_linked_notes(
+        f"Year {year} months:\n" + "\n".join(lines), config, conn, [r["id"] for r in members]
+    )
+    summary = client.chat(
+        model=config.ollama.precise_model,
+        messages=[
+            {"role": "system", "content": _YEAR_PROMPT},
+            {"role": "user", "content": text},
+        ],
+    ).strip()
     tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in members])
     dominant, avg_mood = _member_stats(members, tags_by_entry)
     store.upsert_rollup(conn, "year", year, summary, json.dumps(dominant), avg_mood, len(members))
@@ -218,6 +243,15 @@ def note_digest_input(
     parsed = store.note_from_row(note, config.vault.path)
     own = note["summary"] or parsed.raw_text or "(the note has no text of its own)"
     lines = [f"Note: {parsed.header()}", f"What the note says: {own[:NOTE_DIGEST_TEXT_CHARS]}"]
+    outlinks = context.fit(
+        [
+            context.note_block(r, config.vault.path, LINKED_NOTE_CHARS)
+            for r in store.note_outlinks(conn, note["id"])
+        ],
+        config.rollups.linked_notes_chars,
+    )
+    if outlinks:
+        lines.append("Notes it links to:\n" + "\n".join(outlinks))
     mentions = store.mention_stats(conn, [note["id"]]).get(note["id"])
     rows = store.entries_mentioning(conn, note["id"], limit=-1)[::-1]  # oldest first
     moods = [r["mood_score"] for r in rows if r["mood_score"] is not None]

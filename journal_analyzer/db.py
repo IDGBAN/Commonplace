@@ -115,9 +115,23 @@ CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target);
 
 CREATE VIEW IF NOT EXISTS entities AS
   SELECT id, title AS name, kind AS type FROM notes;
-CREATE VIEW IF NOT EXISTS entry_entities AS
-  SELECT DISTINCT el.entry_id, n.id AS entity_id
-  FROM entry_links el JOIN notes n ON n.link_key = el.target;
+
+-- What a link points at: a note's file name, or failing that an alias only
+-- one note has, so [[John]] finds John Doe.md when John.md doesn't exist.
+-- Views hold no data, so they're rebuilt every time the schema is checked.
+DROP VIEW IF EXISTS entry_entities;
+DROP VIEW IF EXISTS link_targets;
+CREATE VIEW link_targets AS
+  SELECT link_key AS target, id AS note_id FROM notes
+  UNION
+  SELECT nn.key AS target, MIN(nn.note_id) AS note_id
+  FROM note_names nn
+  WHERE NOT EXISTS (SELECT 1 FROM notes n WHERE n.link_key = nn.key)
+  GROUP BY nn.key
+  HAVING COUNT(DISTINCT nn.note_id) = 1;
+CREATE VIEW entry_entities AS
+  SELECT DISTINCT el.entry_id, lt.note_id AS entity_id
+  FROM entry_links el JOIN link_targets lt ON lt.target = el.target;
 
 CREATE TABLE IF NOT EXISTS rollups (
   id            INTEGER PRIMARY KEY,

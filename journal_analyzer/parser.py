@@ -234,6 +234,19 @@ def clean_with_links(text: str) -> tuple[str, list[tuple[int, str]]]:
     return joined.strip(), [(max(pos - lead, 0), key) for pos, key in links]
 
 
+def link_labels(text: str) -> dict[str, list[str]]:
+    """For each link key, the display texts that differ from the target's name."""
+    labels: dict[str, dict[str, None]] = {}
+    for m in _WIKILINK_RE.finditer(text):
+        key = link_key(m.group(2))
+        if key is None:
+            continue
+        shown = _shown_text(m.group(2))
+        if shown and shown.casefold() != key:
+            labels.setdefault(key, {}).setdefault(shown, None)
+    return {key: list(names) for key, names in labels.items()}
+
+
 def clean_text(text: str) -> str:
     return clean_with_links(text)[0]
 
@@ -291,6 +304,10 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
     source = str(path)
     rel_path = relative_path(path, config.vault.path)
     file_links = _frontmatter_links(frontmatter)
+    labels = link_labels(body)
+
+    def labels_for(keys: list[str]) -> dict[str, list[str]]:
+        return {k: labels[k] for k in keys if k in labels}
 
     def whole_file() -> list[ParsedEntry]:
         if text_is_private(cleaned, config):
@@ -301,7 +318,9 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
                 f"(date_source={config.vault.date_source})"
             )
         links = _unique(file_links + [key for _, key in positions])
-        return [ParsedEntry(file_date, cleaned, source, links, rel_path, frontmatter)]
+        return [
+            ParsedEntry(file_date, cleaned, source, links, rel_path, frontmatter, labels_for(links))
+        ]
 
     split_re = config.vault.split_heading_regex
     if not split_re:
@@ -337,15 +356,16 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
                 "itself has none to fall back on."
             )
         if section:
-            section_links = [key for pos, key in positions if start <= pos < end]
+            section_links = _unique(file_links + [key for pos, key in positions if start <= pos < end])
             entries.append(
                 ParsedEntry(
                     section_date,
                     section,
                     source,
-                    _unique(file_links + section_links),
+                    section_links,
                     rel_path,
                     frontmatter,
+                    labels_for(section_links),
                 )
             )
     if not entries and not private_sections:

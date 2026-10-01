@@ -111,24 +111,45 @@ def _canonical_model(name: str) -> str:
     return name.strip().lower().removesuffix(":latest")
 
 
-def num_ctx_for(messages: list[dict[str, str]]) -> int | None:
-    """None if the default window is big enough."""
-    prompt_tokens = sum(
+def fixed_window(config: Config, model: str) -> int:
+    roles = config.ollama
+    if model == roles.fast_model:
+        return roles.fast_num_ctx
+    if model == roles.precise_model:
+        return roles.precise_num_ctx
+    return 0
+
+
+def context_window(config: Config, model: str) -> int:
+    """The window a prompt for this model gets without asking for more."""
+    return fixed_window(config, model) or DEFAULT_NUM_CTX
+
+
+def prompt_tokens(messages: list[dict[str, str]]) -> int:
+    return sum(
         len(m.get("content", "")) // CHARS_PER_TOKEN_ESTIMATE + MESSAGE_OVERHEAD_TOKENS
         for m in messages
     )
-    needed = prompt_tokens + REPLY_TOKENS
-    if needed <= DEFAULT_NUM_CTX:
-        return None
-    window = DEFAULT_NUM_CTX
+
+
+def num_ctx_for(messages: list[dict[str, str]], fixed: int = 0) -> int | None:
+    """None if the default window is big enough. With a fixed window, that one
+    unless the prompt needs more."""
+    needed = prompt_tokens(messages) + REPLY_TOKENS
+    base = fixed or DEFAULT_NUM_CTX
+    if needed <= base:
+        return fixed or None
+    window = base
     while window < needed:
         window *= 2
     return window
 
 
-def _options(messages: list[dict[str, str]], options: dict[str, Any] | None) -> dict[str, Any]:
+def _options(
+    messages: list[dict[str, str]], options: dict[str, Any] | None, fixed: int = 0
+) -> dict[str, Any]:
     opts = {"temperature": 0, **(options or {})}
-    if "num_ctx" not in opts and (window := num_ctx_for(messages)) is not None:
+    if "num_ctx" not in opts and (window := num_ctx_for(messages, fixed)) is not None:
         opts["num_ctx"] = window
     return opts
 
@@ -191,6 +212,12 @@ class OllamaClient:
                 raise self._rejected(model, exc) from exc
         raise AssertionError("unreachable")
 
+    def _fixed_ctx(self, model: str) -> int:
+        return fixed_window(self._config, model)
+
+    def window(self, model: str) -> int:
+        return context_window(self._config, model)
+
     def _think(self, model: str) -> bool | None:
         roles = self._config.ollama
         if model == roles.fast_model:
@@ -205,7 +232,7 @@ class OllamaClient:
         messages: list[dict[str, str]],
         options: dict[str, Any] | None = None,
     ) -> str:
-        opts = _options(messages, options)
+        opts = _options(messages, options, self._fixed_ctx(model))
         response = self._call(
             model,
             partial(
@@ -226,7 +253,7 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
     ) -> str:
         """Like chat, handing each piece of the reply to on_text as it arrives."""
-        opts = _options(messages, options)
+        opts = _options(messages, options, self._fixed_ctx(model))
         think = self._think(model)
         parts: list[str] = []
         visible = ThinkFilter()
@@ -285,7 +312,7 @@ class OllamaClient:
         last_error: Exception | None = None
         for _ in range(2):
             # per attempt, since the retry also carries the bad reply
-            opts = _options(convo, options)
+            opts = _options(convo, options, self._fixed_ctx(model))
             if think is False:
                 opts.setdefault("num_predict", STRUCTURED_MAX_TOKENS)
             response = self._call(

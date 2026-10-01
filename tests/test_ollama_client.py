@@ -216,11 +216,25 @@ def test_a_structured_retry_is_sized_with_the_failed_reply_in_it(tmp_path, monke
     inner = MagicMock()
     inner.chat.side_effect = [_reply("x" * 9_000), _reply('{"summary": "ok"}')]
     client = _client(tmp_path, monkeypatch, inner)
-    client.chat_structured("fake-fast", _long(3_000), Extraction)
+    client.chat_structured("m", _long(3_000), Extraction)
     first, retry = (c.kwargs["options"] for c in inner.chat.call_args_list)
     assert "num_ctx" not in first
     assert retry["num_ctx"] == 8192
-    assert retry["num_predict"] == ollama_client.STRUCTURED_MAX_TOKENS
+
+
+def test_a_fixed_window_is_always_sent_and_grown_only_when_needed(tmp_path, monkeypatch):
+    # one size for every call, so Ollama loads the model once
+    inner = MagicMock()
+    inner.chat.return_value = _reply("ok")
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat("fake-fast", _long(100))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 8192
+    client.chat("fake-fast", _long(30_000))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 16384
+    client.chat("fake-precise", _long(100))
+    assert "num_ctx" not in inner.chat.call_args.kwargs["options"]
+    assert client.window("fake-fast") == 8192
+    assert client.window("fake-precise") == ollama_client.DEFAULT_NUM_CTX
 
 
 def test_structured_calls_require_every_field_to_be_present(tmp_path, monkeypatch):

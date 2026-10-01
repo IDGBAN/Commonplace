@@ -6,7 +6,7 @@ import re
 import sqlite3
 from datetime import date, timedelta
 
-from . import store
+from . import context, store
 from .config import Config
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
 
@@ -24,8 +24,13 @@ _SYSTEM = (
 _NUMBER_PREFIX = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+")
 
 
+# room for the notes the recent entries link to
+LINKED_NOTES_CHARS = 3000
+LINKED_NOTE_CHARS = 400
+
+
 def _recent_context(
-    conn: sqlite3.Connection, date_from: date, date_to: date
+    conn: sqlite3.Connection, date_from: date, date_to: date, config: Config | None = None
 ) -> str:
     rows = store.entries_in_range(conn, date_from, date_to)
     ids = [r["id"] for r in rows]
@@ -43,6 +48,13 @@ def _recent_context(
             parts.append(f"who/what: {', '.join(ents)}")
         parts.append(f"- {row['summary'] or '(no summary)'}")
         lines.append(" ".join(parts))
+    if config is not None:
+        notes = context.linked_notes(
+            conn, ids, config.vault.path, LINKED_NOTES_CHARS, LINKED_NOTE_CHARS,
+        )
+        if notes:
+            lines.append("\nWho and what these entries link to:")
+            lines.extend(notes)
     return "\n".join(lines)
 
 
@@ -56,8 +68,8 @@ def generate_prompts(
 ) -> list[str]:
     today = today or date.today()
     date_from = today - timedelta(days=days)
-    context = _recent_context(conn, date_from, today)
-    if not context:
+    recent = _recent_context(conn, date_from, today, config)
+    if not recent:
         return []
     text = client.chat(
         model=config.ollama.precise_model,
@@ -67,7 +79,7 @@ def generate_prompts(
                 "role": "user",
                 "content": (
                     f"Recent entries from {date_from} to {today} "
-                    f"(oldest first):\n{context}"
+                    f"(oldest first):\n{recent}"
                 ),
             },
         ],

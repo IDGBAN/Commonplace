@@ -520,6 +520,23 @@ def find_notes(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
     return sorted(rows, key=lambda r: r["title"].casefold())
 
 
+def notes_for_targets(conn: sqlite3.Connection, targets: list[str]) -> dict[str, sqlite3.Row]:
+    """The note each link key resolves to, by file name or a unique alias."""
+    if not targets:
+        return {}
+    rows = conn.execute(
+        f"""SELECT lt.target AS link_target, n.* FROM link_targets lt
+            JOIN notes n ON n.id = lt.note_id
+            WHERE lt.target IN ({_JSON_VALUES})
+            ORDER BY n.id""",
+        (_json_list(targets),),
+    ).fetchall()
+    found: dict[str, sqlite3.Row] = {}
+    for r in rows:
+        found.setdefault(r["link_target"], r)
+    return found
+
+
 def notes_by_link_key(conn: sqlite3.Connection, link_key: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM notes WHERE link_key = ? ORDER BY id LIMIT 1", (link_key,)
@@ -696,7 +713,8 @@ def note_outlinks(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(
             """SELECT DISTINCT n.* FROM note_links nl
-               JOIN notes n ON n.link_key = nl.target
+               JOIN link_targets lt ON lt.target = nl.target
+               JOIN notes n ON n.id = lt.note_id
                WHERE nl.note_id = ? AND n.id != nl.note_id
                ORDER BY n.title""",
             (note_id,),
@@ -708,7 +726,8 @@ def note_backlinks(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(
             """SELECT DISTINCT src.* FROM notes dst
-               JOIN note_links nl ON nl.target = dst.link_key
+               JOIN link_targets lt ON lt.note_id = dst.id
+               JOIN note_links nl ON nl.target = lt.target
                JOIN notes src ON src.id = nl.note_id
                WHERE dst.id = ? AND src.id != dst.id
                ORDER BY src.title""",
@@ -780,12 +799,18 @@ def link_targets_for_entries(conn: sqlite3.Connection, entry_ids: list[int]) -> 
 
 
 def mark_note_digests_stale(conn: sqlite3.Connection, link_keys: Sequence[str]) -> None:
+    """Link keys as written, so an alias marks its note's digest too."""
     if not link_keys:
         return
+    keys = _json_list(list(dict.fromkeys(link_keys)))
     with conn:
         conn.execute(
-            f"UPDATE note_digests SET stale = 1 WHERE link_key IN ({_JSON_VALUES})",
-            (_json_list(list(dict.fromkeys(link_keys))),),
+            f"""UPDATE note_digests SET stale = 1
+                WHERE link_key IN ({_JSON_VALUES})
+                   OR link_key IN (SELECT n.link_key FROM link_targets lt
+                                   JOIN notes n ON n.id = lt.note_id
+                                   WHERE lt.target IN ({_JSON_VALUES}))""",
+            (keys, keys),
         )
 
 
@@ -1147,7 +1172,7 @@ def entities_for_entries(
         return {}
     out: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for r in conn.execute(
-        "SELECT ee.entry_id AS eid, en.name, en.type FROM entities en "
+        "SELECT ee.entry_id AS eid, en.id, en.name, en.type FROM entities en "
         "JOIN entry_entities ee ON ee.entity_id = en.id "
         f"WHERE ee.entry_id IN ({_JSON_VALUES}) "
         "ORDER BY ee.entry_id, en.type, en.name",
@@ -1591,7 +1616,7 @@ def adjacent_entries(
     return before, after
 
 
-_LINKS_NOTHING = """NOT EXISTS (SELECT 1 FROM notes n WHERE n.link_key = el.target)
+_LINKS_NOTHING = """NOT EXISTS (SELECT 1 FROM link_targets lt WHERE lt.target = el.target)
                  AND NOT EXISTS (SELECT 1 FROM entries d WHERE d.entry_date = el.target)"""
 
 
