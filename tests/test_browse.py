@@ -473,3 +473,12 @@ def test_note_pages_list_entries_that_name_it_without_a_link(browser, journal):
         "id": entry_id(journal, "2024-01-20"), "date": "2024-01-20", "name": "John",
         "snippet": "Called John about the hike.",
     }]
+
+
+def test_ask_streams_the_answer_text_as_it_is_written(browser, fake_client):
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "You hiked with John."
+    events = _events(browser.request("/api/ask?q=when"))
+    written = "".join(data["text"] for kind, data in events if kind == "text")
+    assert written == "You hiked with John."
+    assert events[-1][0] == "answer"

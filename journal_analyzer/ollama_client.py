@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import itertools
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import partial
 from typing import Any, TypeVar
 
@@ -49,6 +50,56 @@ def strip_thinking(text: str) -> str:
     if "<think>" in cleaned.lower():
         cleaned = cleaned[cleaned.lower().index("<think>") + len("<think>"):]
     return cleaned.strip()
+
+
+class ThinkFilter:
+    """Drops <think>...</think> from text that arrives a piece at a time."""
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside = False
+
+    @staticmethod
+    def _partial_tag(text: str, tag: str) -> int:
+        # how many trailing chars could be the start of tag
+        lowered = text.lower()
+        for k in range(min(len(tag) - 1, len(text)), 0, -1):
+            if lowered.endswith(tag[:k]):
+                return k
+        return 0
+
+    def feed(self, text: str) -> str:
+        self._buffer += text
+        shown: list[str] = []
+        while True:
+            lowered = self._buffer.lower()
+            if self._inside:
+                end = lowered.find(self._CLOSE)
+                if end == -1:
+                    keep = self._partial_tag(self._buffer, self._CLOSE)
+                    self._buffer = self._buffer[len(self._buffer) - keep:] if keep else ""
+                    break
+                self._buffer = self._buffer[end + len(self._CLOSE):].lstrip()
+                self._inside = False
+                continue
+            start = lowered.find(self._OPEN)
+            if start == -1:
+                keep = self._partial_tag(self._buffer, self._OPEN)
+                shown.append(self._buffer[: len(self._buffer) - keep])
+                self._buffer = self._buffer[len(self._buffer) - keep:]
+                break
+            shown.append(self._buffer[:start])
+            self._buffer = self._buffer[start + len(self._OPEN):]
+            self._inside = True
+        return "".join(shown)
+
+    def flush(self) -> str:
+        rest = "" if self._inside else self._buffer
+        self._buffer = ""
+        return rest
 
 
 def same_model(a: str, b: str) -> bool:
@@ -166,6 +217,60 @@ class OllamaClient:
             ),
         )
         return strip_thinking(response["message"]["content"])
+
+    def chat_stream(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        on_text: Callable[[str], None],
+        options: dict[str, Any] | None = None,
+    ) -> str:
+        """Like chat, handing each piece of the reply to on_text as it arrives."""
+        opts = _options(messages, options)
+        think = self._think(model)
+        parts: list[str] = []
+        visible = ThinkFilter()
+        try:
+            stream = iter(self._first_chunk(model, messages, opts, think))
+            for chunk in stream:
+                content = chunk["message"]["content"] or ""
+                parts.append(content)
+                shown = visible.feed(content)
+                if shown:
+                    on_text(shown)
+        except (*_CONNECT_ERRORS, httpx.HTTPError) as exc:
+            raise self._unavailable(exc) from exc
+        except ollama.ResponseError as exc:
+            raise self._rejected(model, exc) from exc
+        tail = visible.flush()
+        if tail:
+            on_text(tail)
+        return strip_thinking("".join(parts))
+
+    def _first_chunk(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        opts: dict[str, Any],
+        think: bool | None,
+    ) -> Iterator[Any]:
+        # The request only goes out when the first chunk is read, so that's
+        # where a connection refused during a restart shows up and gets retried.
+        for attempt in range(MAX_CONNECT_ATTEMPTS):
+            stream = self._client.chat(
+                model=model, messages=messages, options=opts, think=think, stream=True
+            )
+            try:
+                first = next(iter(stream))
+            except StopIteration:
+                return iter(())
+            except _CONNECT_ERRORS:
+                if attempt == MAX_CONNECT_ATTEMPTS - 1:
+                    raise
+                time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                continue
+            return itertools.chain([first], stream)
+        raise AssertionError("unreachable")
 
     def chat_structured(
         self,

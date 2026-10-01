@@ -340,8 +340,27 @@ def _source_link(label: str, path: str | None) -> Text:
     return Text(label, style=Style(link=parser.obsidian_url(path)) if path else "")
 
 
-def _print_answer(conn: sqlite3.Connection, answer: Answer, stage_label: str) -> None:
-    console.print(escape(answer.body))
+class _Streamed:
+    """Prints an answer as the model writes it, once the spinner is out of the way."""
+
+    def __init__(self, status: Status):
+        self.status = status
+        self.started = False
+
+    def __call__(self, text: str) -> None:
+        if not self.started:
+            self.status.stop()
+            self.started = True
+        console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
+
+
+def _print_answer(
+    conn: sqlite3.Connection, answer: Answer, stage_label: str, streamed: bool = False
+) -> None:
+    if streamed:
+        console.print()  # finish the streamed line
+    else:
+        console.print(escape(answer.body))
     links: list[Text] = []
     for day in answer.cited_dates:
         rows = store.entries_in_range(conn, day, day)
@@ -394,11 +413,12 @@ def ask(
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag)
         with _working("Thinking...") as status:
+            stream = _Streamed(status)
             result = query.answer(
                 question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status),
-                since=date_from, until=date_to, only=only,
+                since=date_from, until=date_to, only=only, on_text=stream,
             )
-        _print_answer(conn, result, "answered by stage")
+        _print_answer(conn, result, "answered by stage", streamed=stream.started)
         if sources:
             _print_reading(conn, result)
 
@@ -1168,21 +1188,27 @@ def _chat_loop(
             else:
                 _print_reading(conn, last)
             continue
+        stream: _Streamed | None = None
         try:
             with _working("Resolving your follow-up..." if history else "Thinking...") as status:
+                stream = _Streamed(status)
                 standalone = query.contextualize_question(question, history, cfg, client)
                 result = query.answer(
                     standalone, cfg, conn, client, on_stage=_show_stage(status),
-                    since=since, until=until, only=only,
+                    since=since, until=until, only=only, on_text=stream,
                 )
         except JournalError as exc:
+            if stream is not None and stream.started:
+                console.print()
             console.print(f"[red]{escape(str(exc))}[/red]")
             continue
         except KeyboardInterrupt:
+            if stream is not None and stream.started:
+                console.print()
             # Ctrl-C drops this answer but keeps the chat
             console.print("[dim](cancelled)[/dim]")
             continue
-        _print_answer(conn, result, "stage")
+        _print_answer(conn, result, "stage", streamed=stream.started)
         last = result
         # keep the rewritten question so the next follow-up can build on it
         history.append((standalone, result.text))

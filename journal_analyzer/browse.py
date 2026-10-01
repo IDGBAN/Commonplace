@@ -684,6 +684,7 @@ class _Handler(BaseHTTPRequestHandler):
                     result = query.answer(
                         standalone, config, conn, client,
                         on_stage=lambda stage: send("stage", {"text": stage}),
+                        on_text=lambda text: send("text", {"text": text}),
                     )
                     send("answer", {"question": standalone, **_answer_json(conn, result)})
             except JournalError as exc:

@@ -546,6 +546,8 @@ table.data .err { color: var(--alert); font-size: 0.86rem; }
 .turn-running { display: flex; align-items: center; gap: 1rem; }
 .turn-running .search-status { margin: 0; }
 .turn-answer { font: 1.06rem/1.65 var(--read); white-space: pre-wrap; overflow-wrap: anywhere; max-width: var(--measure); }
+.turn-answer.writing::after { content: "▍"; color: var(--pencil); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
 .turn-sources { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; margin-top: 0.9rem; }
 .turn-sources .gloss-label { margin: 0; }
 .turn-meta { margin: 0.7rem 0 0; color: var(--ink-faint); font-size: 0.86rem; }
@@ -595,5 +597,6 @@ code { font: 0.88em var(--mono); background: var(--paper-sunk); padding: 0.05rem
 
 @media (prefers-reduced-motion: reduce) {
   .page > * { animation: none; }
+  .turn-answer.writing::after { animation: none; }
   body.is-loading .topbar::after { animation: none; width: 100%; opacity: 0.5; }
 }

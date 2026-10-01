@@ -1160,6 +1160,7 @@ async function askQuestion(question) {
     }
     await readEvents(response, (event, data) => {
       if (event === "stage") turn.stage = data.text;
+      else if (event === "text") turn.partial = (turn.partial || "") + data.text;
       else if (event === "rewritten") turn.rewritten = data.question;
       else if (event === "answer") Object.assign(turn, { status: "done", answer: data });
       else if (event === "problem") Object.assign(turn, { status: "failed", error: data.error });
@@ -1168,7 +1169,9 @@ async function askQuestion(question) {
     if (turn.status === "running") {
       Object.assign(turn, { status: "failed", error: "The answer stopped partway. Is `journal browse` still running?" });
     }
+    delete turn.partial;
   } catch (err) {
+    delete turn.partial;
     if (controller.signal.aborted) turn.status = "cancelled";
     else Object.assign(turn, { status: "failed", error: err.message === "Failed to fetch" ? "The journal browser isn't answering. Is `journal browse` still running?" : err.message });
   } finally {
@@ -1195,8 +1198,9 @@ function turnView(turn, scale, index) {
   const parts = [h("p", { class: "turn-q" }, turn.question)];
   if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, turn.rewritten)));
   if (turn.status === "running") {
+    if (turn.partial) parts.push(h("div", { class: "turn-answer writing" }, turn.partial));
     parts.push(h("div", { class: "turn-running" },
-      h("p", { class: "search-status", role: "status" }, turn.stage),
+      h("p", { class: "search-status", role: "status" }, turn.partial ? "Writing…" : turn.stage),
       h("button", { class: "button", type: "button", onclick: () => ask.controller?.abort() }, "Cancel")));
   } else if (turn.status === "failed") {
     parts.push(h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't answer"), h("span", {}, turn.error)));

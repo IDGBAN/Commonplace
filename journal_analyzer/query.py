@@ -311,6 +311,7 @@ def _answer_aggregate(
     client: OllamaClient,
     named: list[int],
     only: store.EntryFilter | None = None,
+    on_text: TextSink | None = None,
 ) -> Answer:
     mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
     tag_rows = store.top_tags(
@@ -334,9 +335,10 @@ def _answer_aggregate(
     facts.append(f"Data covers {lo} to {hi}.")
     fact_block = "\n".join(facts)
 
-    text = client.chat(
-        model=config.ollama.fast_model,
-        messages=[
+    text = _chat(
+        client,
+        config.ollama.fast_model,
+        [
             {
                 "role": "system",
                 "content": (
@@ -347,7 +349,8 @@ def _answer_aggregate(
             },
             {"role": "user", "content": f"Question: {question}\n\nStatistics:\n{fact_block}"},
         ],
-        options={"temperature": SYNTHESIS_TEMPERATURE},
+        {"temperature": SYNTHESIS_TEMPERATURE},
+        on_text,
     ).strip()
     cited = [date.fromisoformat(d) for d in (lo, hi) if d]
     return _finalize(
@@ -669,6 +672,66 @@ def _summary_context(
 
 # small models like to send "**INSUFFICIENT**" or "Insufficient."
 _INSUFFICIENT_RE = re.compile(r"\W*insufficient\b", re.IGNORECASE)
+_INSUFFICIENT = "insufficient"
+
+TextSink = Callable[[str], None]
+
+
+class _TrimStart:
+    """Passes text on once the first non-space arrives, so a reply never opens on a blank."""
+
+    def __init__(self, sink: TextSink):
+        self._sink = sink
+        self._started = False
+
+    def __call__(self, text: str) -> None:
+        if not self._started:
+            text = text.lstrip()
+            if not text:
+                return
+            self._started = True
+        self._sink(text)
+
+
+class _HoldUntilAnswer:
+    """Holds a fast reply back until it can't turn out to be INSUFFICIENT."""
+
+    def __init__(self, sink: TextSink):
+        self._sink = sink
+        self._held = ""
+        self.passing: bool | None = None
+
+    def __call__(self, text: str) -> None:
+        if self.passing:
+            self._sink(text)
+            return
+        if self.passing is False:
+            return
+        self._held += text
+        word = re.sub(r"^\W+", "", self._held).lower()
+        if not word or (_INSUFFICIENT.startswith(word) and len(word) <= len(_INSUFFICIENT)):
+            return  # could still be the word, or the word with nothing after it yet
+        if _INSUFFICIENT_RE.match(self._held):
+            self.passing = False
+            return
+        self.passing = True
+        self._sink(self._held)
+
+    def finish(self, full: str) -> None:
+        if self.passing is None and not _INSUFFICIENT_RE.match(full):
+            self._sink(self._held)
+
+
+def _chat(
+    client: OllamaClient,
+    model: str,
+    messages: list[dict[str, str]],
+    options: dict[str, Any],
+    on_text: TextSink | None,
+) -> str:
+    if on_text is None:
+        return client.chat(model=model, messages=messages, options=options)
+    return client.chat_stream(model, messages, _TrimStart(on_text), options=options)
 
 
 def _fast_attempt(
@@ -676,10 +739,13 @@ def _fast_attempt(
     context: str,
     config: Config,
     client: OllamaClient,
+    on_text: TextSink | None = None,
 ) -> str | None:
-    response = client.chat(
-        model=config.ollama.fast_model,
-        messages=[
+    hold = _HoldUntilAnswer(on_text) if on_text else None
+    response = _chat(
+        client,
+        config.ollama.fast_model,
+        [
             {
                 "role": "system",
                 "content": (
@@ -696,8 +762,11 @@ def _fast_attempt(
             },
             {"role": "user", "content": f"Question: {question}\n\n{context}"},
         ],
-        options={"temperature": SYNTHESIS_TEMPERATURE},
+        {"temperature": SYNTHESIS_TEMPERATURE},
+        hold,
     ).strip()
+    if hold is not None:
+        hold.finish(response)
     if _INSUFFICIENT_RE.match(response):
         return None
     return response
@@ -710,6 +779,7 @@ def _precise_reanalysis(
     config: Config,
     client: OllamaClient,
     digests: dict[int, str] | None = None,
+    on_text: TextSink | None = None,
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     note_blocks: list[str] = []
     used_notes: list[sqlite3.Row] = []
@@ -750,9 +820,10 @@ def _precise_reanalysis(
         "\n\n(Note: some lower-ranked entries or notes were omitted to fit the "
         "context budget.)" if truncated else ""
     )
-    text = client.chat(
-        model=config.ollama.precise_model,
-        messages=[
+    text = _chat(
+        client,
+        config.ollama.precise_model,
+        [
             {
                 "role": "system",
                 "content": (
@@ -771,8 +842,11 @@ def _precise_reanalysis(
                 "content": f"Question: {question}\n\n" + "\n\n".join(note_blocks + entry_blocks),
             },
         ],
-        options={"temperature": SYNTHESIS_TEMPERATURE},
+        {"temperature": SYNTHESIS_TEMPERATURE},
+        on_text,
     ).strip() + omitted
+    if on_text and omitted:
+        on_text(omitted)
     return text, [row for row, _ in used], used_notes
 
 
@@ -790,9 +864,11 @@ def answer(
     since: date | None = None,
     until: date | None = None,
     only: store.EntryFilter | None = None,
+    on_text: TextSink | None = None,
 ) -> Answer:
     """`since`, `until` and `only` are what the person asked for, so they
-    override whatever the router reads into the question."""
+    override whatever the router reads into the question. With `on_text`, the
+    answer is handed over piece by piece as the model writes it."""
     today = today or date.today()
     on_stage("Working out what you're asking...")
     plan = _plan(question, config, client, today)
@@ -804,7 +880,7 @@ def answer(
 
     if plan.intent == "aggregate":
         on_stage("Putting the numbers into words...")
-        return _answer_aggregate(question, plan, config, conn, client, named, only)
+        return _answer_aggregate(question, plan, config, conn, client, named, only, on_text)
 
     on_stage("Searching entries and notes...")
     about = _named_notes(conn, plan, named)
@@ -828,7 +904,7 @@ def answer(
     if not plan.needs_raw_text:
         on_stage("Answering from summaries...")
         context = _summary_context(candidates, notes, plan, config, conn, about)
-        fast_answer = _fast_attempt(question, context, config, client)
+        fast_answer = _fast_attempt(question, context, config, client, on_text)
         if fast_answer is not None:
             return _finalize(
                 fast_answer,
@@ -843,6 +919,7 @@ def answer(
     text, used, used_notes = _precise_reanalysis(
         question, candidates, notes, config, client,
         digests=_relationship_digests(conn, config, about),
+        on_text=on_text,
     )
     return _finalize(
         text,

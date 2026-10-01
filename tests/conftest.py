@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import sqlite3
 from collections.abc import Iterable
@@ -40,6 +41,7 @@ class FakeOllamaClient:
             "NoteSummary": NoteSummary(summary="A canned note summary."),
         }
         self.chat_calls: list[tuple[str, list[dict]]] = []
+        self.streamed_calls: list[str] = []
         self.structured_calls: list[tuple[str, str]] = []
         self.embed_calls: list[str] = []
         self.embed_options: list[dict | None] = []
@@ -50,6 +52,14 @@ class FakeOllamaClient:
         if callable(self.chat_response):
             return self.chat_response(model, messages)
         return self.chat_response
+
+    def chat_stream(self, model, messages, on_text, options=None):
+        # the same reply as chat, handed over a word at a time
+        full = self.chat(model, messages, options)
+        self.streamed_calls.append(model)
+        for piece in re.findall(r"\s*\S+", full):
+            on_text(piece)
+        return full
 
     def chat_structured(self, model, messages, schema: type[BaseModel], options=None):
         self.structured_calls.append((model, schema.__name__))
