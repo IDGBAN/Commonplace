@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path, PurePath, PurePosixPath
 
 from .config import Config
-from .models import DateParseError, ParsedEntry, ParsedNote
+from .models import DateParseError, FrontmatterValue, ParsedEntry, ParsedNote
 
 # The closing --- has to be on its own line, so "----" inside the block doesn't end it.
 _FRONTMATTER_RE = re.compile(
@@ -30,8 +30,7 @@ _ATTACHMENT_EXTENSIONS = frozenset(
 _NON_PROPERTY_KEYS = frozenset(
     {"aliases", "alias", "tags", "tag", "cssclasses", "cssclass", "publish", "position"}
 )
-
-FrontmatterValue = str | list[str]
+_TAG_KEYS = frozenset({"tags", "tag"})
 
 
 def compute_hash(data: bytes) -> str:
@@ -93,6 +92,35 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, FrontmatterValue], str]:
             fields[key] = []
             list_key = key
     return fields, text[m.end():]
+
+
+def read_frontmatter(data: bytes) -> dict[str, FrontmatterValue]:
+    return _parse_frontmatter(data.decode("utf-8", errors="replace"))[0]
+
+
+def frontmatter_value(
+    fields: dict[str, FrontmatterValue], key: str
+) -> FrontmatterValue | None:
+    """Obsidian treats property names case-insensitively."""
+    wanted = key.strip().casefold()
+    for name, value in fields.items():
+        if name.casefold() == wanted:
+            return value
+    return None
+
+
+def frontmatter_tags(fields: dict[str, FrontmatterValue]) -> list[str]:
+    # tags: [a, b], a "- item" list, or one string that may hold several
+    seen: dict[str, None] = {}
+    for name, value in fields.items():
+        if name.casefold() not in _TAG_KEYS:
+            continue
+        for item in _as_list(value):
+            for word in re.split(r"[,\s]+", item):
+                tag = word.strip().lstrip("#").lower()
+                if tag:
+                    seen.setdefault(tag, None)
+    return list(seen)
 
 
 def _try_parse_date(text: str, date_format: str) -> date | None:
@@ -232,7 +260,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
                 f"(date_source={config.vault.date_source})"
             )
         links = _unique(file_links + [key for _, key in positions])
-        return [ParsedEntry(file_date, cleaned, source, links, rel_path)]
+        return [ParsedEntry(file_date, cleaned, source, links, rel_path, frontmatter)]
 
     split_re = config.vault.split_heading_regex
     if not split_re:
@@ -272,6 +300,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
                     source,
                     _unique(file_links + section_links),
                     rel_path,
+                    frontmatter,
                 )
             )
     if not entries:

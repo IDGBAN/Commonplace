@@ -71,6 +71,42 @@ def test_unparsable_date_raises_typed_error(tmp_path):
         parser.parse_file(bad, cfg)
 
 
+def test_entries_keep_their_files_frontmatter(tmp_path):
+    cfg = make_config(tmp_path, split_heading_regex=r"^## \d{4}-\d{2}-\d{2}")
+    path = tmp_path / "vault" / "log.md"
+    path.write_text(
+        "---\nmood: 6\ntags: [log]\n---\n## 2024-02-01\nOne.\n## 2024-02-02\nTwo.\n",
+        encoding="utf-8",
+    )
+    entries = parser.parse_file(path, cfg)
+    assert [e.frontmatter for e in entries] == [{"mood": "6", "tags": ["log"]}] * 2
+
+
+@pytest.mark.parametrize(
+    ("fields", "tags"),
+    [
+        ({"tags": ["Work", "#travel"]}, ["work", "travel"]),
+        ({"tags": "work, travel"}, ["work", "travel"]),
+        ({"Tags": "work travel"}, ["work", "travel"]),
+        ({"tag": "solo"}, ["solo"]),
+        ({"tags": []}, []),
+        ({"mood": "6"}, []),
+    ],
+)
+def test_frontmatter_tags(fields, tags):
+    assert parser.frontmatter_tags(fields) == tags
+
+
+def test_frontmatter_values_ignore_key_case():
+    assert parser.frontmatter_value({"Mood": "7"}, "mood") == "7"
+    assert parser.frontmatter_value({"Mood": "7"}, "energy") is None
+
+
+def test_read_frontmatter_from_bytes():
+    assert parser.read_frontmatter(b"---\nsleep: 7\n---\nBody") == {"sleep": "7"}
+    assert parser.read_frontmatter(b"No frontmatter") == {}
+
+
 def test_extract_literal_tags():
     tags = parser.extract_literal_tags("Went out #Hiking with friends #hiking #work/deep")
     assert tags == ["hiking", "work/deep"]

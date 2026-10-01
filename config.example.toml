@@ -11,6 +11,12 @@ split_heading_regex = ""          # set to split one file into several entries a
 # Folders and files to skip. Names without a "/" match anywhere in the tree,
 # patterns with a "/" match the path from the vault root. * and ? work.
 ignore_patterns = [".stversions", ".stfolder", ".smart-env", ".obsidian"]
+# Use the mood you write in each entry's frontmatter instead of the model's
+# guess. Empty leaves mood to the model. min and max are the scale you write
+# it on; it's converted to 1..mood_scale_max. "7/10" style values work too.
+frontmatter_mood_key = ""         # e.g. "mood"
+frontmatter_mood_min = 1
+frontmatter_mood_max = 10
 
 [ollama]
 host = "http://localhost:11434"
@@ -41,6 +47,10 @@ model = "ms-marco-MiniLM-L-12-v2"
 # 1..mood_scale_max scale). Lower them to see weaker patterns.
 min_sample_size = 3
 mood_deviation_threshold = 0.8
+
+[tags]
+from_frontmatter = true           # tags: in an entry's frontmatter count like inline #tags
+ignore = []                       # dropped from every entry, e.g. ["daily", "journal"]
 
 [notes]
 # Folders (or single files) of undated notes about people, places, topics and

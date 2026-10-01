@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .models import ConfigError
 
@@ -22,11 +22,23 @@ class VaultConfig(BaseModel):
     frontmatter_date_key: str = "date"
     split_heading_regex: str = ""
     ignore_patterns: list[str] = Field(default_factory=list)
+    # empty means the model's mood is used
+    frontmatter_mood_key: str = ""
+    frontmatter_mood_min: float = 1
+    frontmatter_mood_max: float = 10
 
     @field_validator("path")
     @classmethod
     def _abs_path(cls, v: Path) -> Path:
         return _expand(v)
+
+    @model_validator(mode="after")
+    def _mood_range(self) -> VaultConfig:
+        if self.frontmatter_mood_max <= self.frontmatter_mood_min:
+            raise ValueError(
+                "frontmatter_mood_max must be larger than frontmatter_mood_min"
+            )
+        return self
 
     @field_validator("split_heading_regex")
     @classmethod
@@ -77,6 +89,20 @@ class InsightsConfig(BaseModel):
     mood_deviation_threshold: float = Field(default=0.8, ge=0)
 
 
+def _tag_name(raw: str) -> str:
+    return raw.strip().lstrip("#").strip().lower()
+
+
+class TagsConfig(BaseModel):
+    from_frontmatter: bool = True
+    ignore: list[str] = Field(default_factory=list)
+
+    @field_validator("ignore")
+    @classmethod
+    def _normalize(cls, v: list[str]) -> list[str]:
+        return [name for name in (_tag_name(t) for t in v) if name]
+
+
 class NotesConfig(BaseModel):
     paths: list[str] = Field(default_factory=list)
     # 0 summarizes every non-empty note
@@ -96,6 +122,7 @@ class Config(BaseModel):
     reranking: RerankingConfig = RerankingConfig()
     insights: InsightsConfig = InsightsConfig()
     notes: NotesConfig = NotesConfig()
+    tags: TagsConfig = TagsConfig()
 
 
 def load_config(path: Path | str | None = None) -> Config:

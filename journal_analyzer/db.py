@@ -38,6 +38,20 @@ CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(entry_date);
 -- Added to existing caches by init_schema, so no format bump.
 CREATE INDEX IF NOT EXISTS idx_entries_file_path ON entries(file_path);
 
+-- What the model said before frontmatter and [tags] settings were applied, so
+-- changing those settings needs no model calls. Tables added since format 2
+-- are created by init_schema on existing caches, like the indexes above.
+CREATE TABLE IF NOT EXISTS entry_readings (
+  entry_id   INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+  mood_score REAL,
+  tags       TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS file_frontmatter (
+  path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
+  data TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS tags (
   id   INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE

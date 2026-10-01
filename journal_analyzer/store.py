@@ -10,7 +10,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from .models import Extraction, ParsedEntry, ParsedNote
+from .models import Extraction, FrontmatterValue, ParsedEntry, ParsedNote
 from .parser import relative_path
 
 # Lists go in as one JSON array rather than a placeholder each. An id list can
@@ -153,6 +153,140 @@ def save_entry(
             [(entry_id, target) for target in entry.links],
         )
     return entry_id
+
+
+def save_entry_reading(conn: sqlite3.Connection, entry_id: int, reading: Extraction) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO entry_readings(entry_id, mood_score, tags) VALUES (?, ?, ?)",
+            (entry_id, reading.mood_score, _json_list(reading.tags)),
+        )
+
+
+def save_file_frontmatter(
+    conn: sqlite3.Connection, path: str, fields: dict[str, FrontmatterValue]
+) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO file_frontmatter(path, data) VALUES (?, ?)",
+            (path, json.dumps(fields, ensure_ascii=False)),
+        )
+
+
+def delete_file_frontmatter(conn: sqlite3.Connection, path: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM file_frontmatter WHERE path = ?", (path,))
+
+
+def file_frontmatter(conn: sqlite3.Connection, path: str) -> dict[str, FrontmatterValue]:
+    try:
+        row = conn.execute(
+            "SELECT data FROM file_frontmatter WHERE path = ?", (path,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return {}  # a read-only connection to a cache from before the table
+    return json.loads(row["data"]) if row else {}
+
+
+def entry_reading(conn: sqlite3.Connection, entry_id: int) -> Extraction | None:
+    try:
+        row = conn.execute(
+            "SELECT mood_score, tags FROM entry_readings WHERE entry_id = ?", (entry_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    return Extraction(mood_score=row["mood_score"], tags=json.loads(row["tags"]))
+
+
+def backfill_entry_readings(conn: sqlite3.Connection) -> int:
+    """Entries indexed before readings were kept: what's stored is what the model said."""
+    missing = [
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_readings)"
+        )
+    ]
+    if not missing:
+        return 0
+    tags = tags_for_entries(conn, missing)
+    moods = {
+        r["id"]: r["mood_score"]
+        for r in conn.execute(
+            f"SELECT id, mood_score FROM entries WHERE id IN ({_JSON_VALUES})",
+            (_json_list(missing),),
+        )
+    }
+    with conn:
+        conn.executemany(
+            "INSERT INTO entry_readings(entry_id, mood_score, tags) VALUES (?, ?, ?)",
+            [(i, moods.get(i), _json_list(tags.get(i, []))) for i in missing],
+        )
+    return len(missing)
+
+
+def entry_files_without_frontmatter(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT f.path, f.content_hash FROM files f
+               WHERE EXISTS (SELECT 1 FROM entries e WHERE e.file_path = f.path)
+                 AND NOT EXISTS (SELECT 1 FROM file_frontmatter fm WHERE fm.path = f.path)
+               ORDER BY f.path"""
+        ).fetchall()
+    )
+
+
+@dataclass(frozen=True)
+class StoredReading:
+    entry_id: int
+    entry_date: date
+    mood_score: float | None
+    tags: list[str]
+    reading: Extraction
+    frontmatter: dict[str, FrontmatterValue]
+
+
+def stored_readings(conn: sqlite3.Connection) -> list[StoredReading]:
+    rows = conn.execute(
+        """SELECT e.id, e.entry_date, e.mood_score,
+                  r.mood_score AS reading_mood, r.tags AS reading_tags,
+                  COALESCE(fm.data, '{}') AS frontmatter
+           FROM entries e
+           JOIN entry_readings r ON r.entry_id = e.id
+           LEFT JOIN file_frontmatter fm ON fm.path = e.file_path
+           ORDER BY e.id"""
+    ).fetchall()
+    tags = tags_for_entries(conn, [r["id"] for r in rows])
+    return [
+        StoredReading(
+            entry_id=r["id"],
+            entry_date=date.fromisoformat(r["entry_date"]),
+            mood_score=r["mood_score"],
+            tags=tags.get(r["id"], []),
+            reading=Extraction(
+                mood_score=r["reading_mood"], tags=json.loads(r["reading_tags"])
+            ),
+            frontmatter=json.loads(r["frontmatter"]),
+        )
+        for r in rows
+    ]
+
+
+def update_entry_mood_and_tags(
+    conn: sqlite3.Connection, entry_id: int, mood: float | None, tags: list[str]
+) -> None:
+    with conn:
+        conn.execute("UPDATE entries SET mood_score = ? WHERE id = ?", (mood, entry_id))
+        conn.execute("DELETE FROM entry_tags WHERE entry_id = ?", (entry_id,))
+        _link_tags(conn, entry_id, tags)
+
+
+def prune_unused_tags(conn: sqlite3.Connection) -> None:
+    with conn:
+        conn.execute(
+            "DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM entry_tags)"
+        )
 
 
 def save_entry_vector(conn: sqlite3.Connection, entry_id: int, vector: list[float]) -> None:

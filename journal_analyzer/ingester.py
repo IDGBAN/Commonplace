@@ -17,7 +17,7 @@ from rich.progress import Progress
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import db, embedder, extractor, parser, store
+from . import db, embedder, extractor, fields, parser, store
 from .config import Config
 from .models import ConfigError, OllamaUnavailableError
 from .ollama_client import OllamaClient
@@ -80,6 +80,7 @@ def _clear_file(conn: sqlite3.Connection, key: str) -> None:
     for d in store.delete_entries_for_file(conn, key):
         store.mark_rollups_stale(conn, d)
     store.delete_note_for_file(conn, key)
+    store.delete_file_frontmatter(conn, key)
 
 
 def _forget_file(conn: sqlite3.Connection, key: str) -> None:
@@ -98,18 +99,24 @@ def _index_entries(
     entries = parser.parse_file(path, config)
     # Do the model calls before deleting anything, so if one fails the old
     # entries are still there.
-    extractions = [extractor.extract(entry, config, client) for entry in entries]
+    readings = [extractor.extract(entry, config, client) for entry in entries]
     vectors = [
-        embedder.entry_vector(entry.raw_text, config, client, summary=extraction.summary)
-        for entry, extraction in zip(entries, extractions, strict=True)
+        embedder.entry_vector(entry.raw_text, config, client, summary=reading.summary)
+        for entry, reading in zip(entries, readings, strict=True)
     ]
     _clear_file(conn, key)
     # entries have a foreign key on files
     store.upsert_file(conn, key, content_hash, "pending")
-    for entry, extraction, vector in zip(entries, extractions, vectors, strict=True):
+    if entries:
+        store.save_file_frontmatter(conn, key, entries[0].frontmatter)
+    for entry, reading, vector in zip(entries, readings, vectors, strict=True):
         entry_id = store.save_entry(
-            conn, entry, extraction, model_used=config.ollama.fast_model
+            conn,
+            entry,
+            fields.final_reading(reading, entry.frontmatter, config),
+            model_used=config.ollama.fast_model,
         )
+        store.save_entry_reading(conn, entry_id, reading)
         if vector is not None:
             store.save_entry_vector(conn, entry_id, vector)
         store.mark_rollups_stale(conn, entry.entry_date)
@@ -209,6 +216,7 @@ def run_backfill(
         "error": 0,
         "dropped": _prune_vanished(config, conn, files),
     }
+    _refresh_readings(config, conn)
     with Progress(console=console) as progress:
         task = progress.add_task("Indexing", total=len(files))
         for path in files:
@@ -222,6 +230,15 @@ def run_backfill(
         f"{counts['error']} errored{dropped}."
     )
     return counts
+
+
+def _refresh_readings(config: Config, conn: sqlite3.Connection) -> None:
+    changed = fields.refresh(config, conn)
+    if changed:
+        console.print(
+            f"Applied the frontmatter and tag settings to {changed} "
+            f"{'entry' if changed == 1 else 'entries'}."
+        )
 
 
 def _ensure_vec(config: Config, conn: sqlite3.Connection, client: OllamaClient) -> None:
@@ -317,6 +334,7 @@ def run_watch(
     _require_vault(config)
     client = client or OllamaClient(config)
     _ensure_vec(config, conn, client)
+    _refresh_readings(config, conn)
     handler = _DebounceHandler(config)
     observer = Observer()
     observer.schedule(handler, str(config.vault.path), recursive=True)

@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+FrontmatterValue = str | list[str]
+
 
 @dataclass
 class ParsedEntry:
@@ -14,6 +16,8 @@ class ParsedEntry:
     source_path: str
     links: list[str] = field(default_factory=list)  # casefolded note names
     rel_path: str = ""  # vault-relative, forward slashes
+    # the whole file's, so split sections share it
+    frontmatter: dict[str, FrontmatterValue] = field(default_factory=dict)
 
 
 @dataclass

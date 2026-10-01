@@ -21,6 +21,7 @@ from . import (
     db,
     embedder,
     export,
+    fields,
     ingester,
     insights,
     prompts,
@@ -289,14 +290,16 @@ def show(
 ) -> None:
     """Show what's stored for one day."""
     d = _parse_date(day, "DATE")
-    with _guard(), _open(config) as (_, conn):
+    with _guard(), _open(config) as (cfg, conn):
         rows = store.entries_in_range(conn, d, d)
         if not rows:
             console.print(f"No indexed entry on {d}.")
             raise typer.Exit(1)
         for r in rows:
+            own = fields.frontmatter_mood(store.file_frontmatter(conn, r["file_path"]), cfg)
+            source = " (yours, from the frontmatter)" if own is not None else ""
             console.print(f"[bold cyan]{r['entry_date']}[/bold cyan]  "
-                          f"mood {_mood_str(r['mood_score'])}  "
+                          f"mood {_mood_str(r['mood_score'])}{source}  "
                           f"({r['word_count']} words)  {escape(r['file_path'])}")
             tags = store.tags_for_entry(conn, r["id"])
             if tags:

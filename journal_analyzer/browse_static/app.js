@@ -610,18 +610,25 @@ async function entryView([id]) {
   currentNeighbours = { prev: e.prev && href.entry(e.prev.id), next: e.next && href.entry(e.next.id) };
 
   const moodClassName = moodClass(e.mood, scale);
+  const modelMood = e.model_reading ? e.model_reading.mood : null;
   const moodGloss = gloss("Mood",
     e.mood == null
       ? h("span", { class: "quiet" }, "No mood score")
       : [h("div", { class: "mood-big" }, h("span", { class: "num" }, fmtMood(e.mood)), h("span", { class: "of" }, `of ${scale}`)),
         h("div", { class: `scale ${moodClassName}`, "aria-hidden": "true" },
-          Array.from({ length: scale }, (_, i) => h("span", { class: i < Math.round(e.mood) ? "on" : null })))]);
+          Array.from({ length: scale }, (_, i) => h("span", { class: i < Math.round(e.mood) ? "on" : null })))],
+    e.mood_from_frontmatter && h("div", { class: "quiet" },
+      "Your own score, from the file's frontmatter. ",
+      modelMood == null ? "The model gave none." : `The model read it as ${fmtMood(modelMood)}.`));
+  const fmTags = new Set(e.frontmatter_tags || []);
 
   const margin = h("aside", { class: "margin", "aria-label": "What the app took from this entry" },
     h("p", { class: "margin-title" }, "The app's reading"),
     moodGloss,
     gloss("Summary", e.summary ? h("p", { class: "gloss-summary" }, e.summary) : h("span", { class: "quiet" }, "No summary stored")),
-    gloss("Tags", e.tags.length ? h("div", { class: "chips" }, e.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t) }, t))) : h("span", { class: "quiet" }, "No tags")),
+    gloss("Tags",
+      e.tags.length ? h("div", { class: "chips" }, e.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t), title: fmTags.has(t) ? "From the frontmatter" : null }, t))) : h("span", { class: "quiet" }, "No tags"),
+      e.tags.some((t) => fmTags.has(t)) && h("div", { class: "quiet" }, "Includes the tags in the file's frontmatter.")),
     gloss("Mentions",
       e.notes.length ? h("div", { class: "chips" }, e.notes.map((n) => h("a", { class: "chip pencil", href: href.note(n.id), title: kindLabel(n.kind) }, n.title))) : h("span", { class: "quiet" }, "Links to no indexed note"),
       e.unresolved_links.length ? h("div", { class: "quiet" },

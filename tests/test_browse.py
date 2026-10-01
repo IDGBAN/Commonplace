@@ -10,7 +10,7 @@ import pytest
 from conftest import add_entry, add_note
 
 from journal_analyzer import browse, db, store
-from journal_analyzer.models import DatabaseError, OllamaUnavailableError
+from journal_analyzer.models import DatabaseError, Extraction, OllamaUnavailableError
 
 
 class Browser:
@@ -172,6 +172,21 @@ def test_entry_shows_what_was_extracted_and_what_it_links(browser, journal):
     assert second["unresolved_links"] == ["nobody yet"]
     # markup in journal text is data, handed over untouched for textContent
     assert "<script>x</script>" in second["raw_text"]
+
+
+def test_entry_says_when_the_mood_is_your_own(browser, config, journal):
+    config.vault.frontmatter_mood_key = "mood"
+    first = entry_id(journal, "2024-01-15")
+    store.save_file_frontmatter(journal, "/vault/2024-01-15.md", {"mood": "8", "tags": "hiking"})
+    store.save_entry_reading(journal, first, Extraction(mood_score=5.0, tags=["friends"]))
+    data = browser.get(f"/api/entries/{first}")
+    assert data["mood_from_frontmatter"] is True
+    assert data["model_reading"] == {"mood": 5.0, "tags": ["friends"]}
+    assert data["frontmatter_tags"] == ["hiking"]
+
+    second = browser.get(f"/api/entries/{entry_id(journal, '2024-01-16')}")
+    assert second["mood_from_frontmatter"] is False
+    assert second["model_reading"] is None
 
 
 def test_links_to_other_days_point_at_those_entries(browser, journal):

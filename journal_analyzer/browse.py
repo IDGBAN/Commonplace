@@ -22,7 +22,7 @@ from importlib import resources
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from . import db, query, store
+from . import db, fields, parser, query, store
 from .config import Config
 from .models import JournalError
 from .ollama_client import OllamaClient
@@ -294,10 +294,17 @@ def entry(req: Request, entry_id: str) -> Json:
              "stale": bool(rollup["stale"]) if rollup else False,
              "summary": rollup["summary"] if rollup else None}
         )
+    frontmatter = store.file_frontmatter(conn, row["file_path"])
+    reading = store.entry_reading(conn, row["id"])
+    own_mood = fields.frontmatter_mood(frontmatter, req.config)
     return {
         "id": row["id"],
         "date": row["entry_date"],
         "mood": row["mood_score"],
+        "mood_from_frontmatter": own_mood is not None and own_mood == row["mood_score"],
+        "frontmatter_tags": parser.frontmatter_tags(frontmatter)
+        if req.config.tags.from_frontmatter else [],
+        "model_reading": {"mood": reading.mood_score, "tags": reading.tags} if reading else None,
         "mood_scale": req.config.indexing.mood_scale_max,
         "words": row["word_count"],
         "summary": row["summary"],
