@@ -5,7 +5,7 @@ from journal_analyzer.models import Extraction, NoteSummary, ParsedEntry, Parsed
 
 
 def _note(text: str, **extra) -> ParsedNote:
-    return ParsedNote(title="Sara", kind="people", raw_text=text, source_path="x", **extra)
+    return ParsedNote(title="John", kind="people", raw_text=text, source_path="x", **extra)
 
 
 def test_short_notes_are_their_own_summary(config, fake_client):
@@ -44,11 +44,11 @@ def test_the_model_reads_the_note_header_before_its_text(config, fake_client):
 
     fake_client.structured["NoteSummary"] = respond
     note = _note(
-        "word " * 100, properties={"Relationship": "Friend"}, rel_path="Links/People/Sara.md"
+        "word " * 100, properties={"Relationship": "Friend"}, rel_path="Links/People/John.md"
     )
     extractor.summarize_note(note, config, fake_client)
     assert seen["content"].startswith(
-        "Sara (people)\nFile: Links/People/Sara.md\nRelationship: Friend\n\nword"
+        "John (people)\nFile: Links/People/John.md\nRelationship: Friend\n\nword"
     )
 
 
@@ -111,16 +111,16 @@ def test_a_second_detached_summary_is_kept_rather_than_failing(config, fake_clie
 
 def test_note_summaries_get_the_same_second_chance(config, fake_client):
     replies = iter(
-        [NoteSummary(summary="This note is about Sara."), NoteSummary(summary="Sara is my friend.")]
+        [NoteSummary(summary="This note is about John."), NoteSummary(summary="John is my friend.")]
     )
     fake_client.structured["NoteSummary"] = lambda model, messages: next(replies)
     summary, _ = extractor.summarize_note(_note("word " * 100), config, fake_client)
-    assert summary == "Sara is my friend."
+    assert summary == "John is my friend."
 
 
 def test_ordinary_openings_are_not_mistaken_for_a_detached_voice():
     for summary in (
-        "Theatre night with Sara.",
+        "Theatre night with John.",
         "The entryway flooded again.",
         "The new user interface at work finally shipped.",
         "Authored the first chapter.",

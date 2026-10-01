@@ -46,6 +46,6 @@ mood_deviation_threshold = 0.8
 # Folders (or single files) of undated notes about people, places, topics and
 # so on. An entry that [[links]] to one counts as mentioning it, and answers
 # can use the notes themselves. A note's kind is the folder right under one of
-# these paths, so Links/People/Sara.md is "people".
+# these paths, so Links/People/John.md is "people".
 paths = []                        # e.g. ["Links"]
 summarize_over_chars = 280        # shorter notes are their own summary; 0 summarizes every note

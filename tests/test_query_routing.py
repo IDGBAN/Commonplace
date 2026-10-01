@@ -14,15 +14,15 @@ CANNED_PLANS = {
         date_from=date(2024, 3, 1),
         date_to=date(2024, 5, 31),
     ),
-    "When did I go hiking with Sara?": QueryPlan(
+    "When did I go hiking with John?": QueryPlan(
         intent="factual",
-        entities=["Sara"],
+        entities=["John"],
         keywords=["hiking"],
         needs_raw_text=False,
     ),
-    "What exactly did Sara say about the garden project?": QueryPlan(
+    "What exactly did John say about the garden project?": QueryPlan(
         intent="factual",
-        entities=["Sara"],
+        entities=["John"],
         keywords=["garden"],
         needs_raw_text=True,
     ),
@@ -75,9 +75,9 @@ def test_aggregate_answers_from_sql_without_retrieval(tmp_path, fake_client):
 
 def test_factual_answered_from_summaries_with_citations(tmp_path, fake_client):
     cfg, conn = _indexed(tmp_path, fake_client)
-    fake_client.chat_response = "You went hiking with Sara on 2024-01-15."
+    fake_client.chat_response = "You went hiking with John on 2024-01-15."
     result = query.answer(
-        "When did I go hiking with Sara?", cfg, conn, fake_client, today=TODAY
+        "When did I go hiking with John?", cfg, conn, fake_client, today=TODAY
     )
     assert result.stage_used == "fast_summary"
     assert date(2024, 1, 15) in result.cited_dates
@@ -93,11 +93,11 @@ def test_insufficient_escalates_to_precise_raw_text(tmp_path, fake_client):
         assert model == cfg.ollama.precise_model
         # full text, not the summary
         assert "garden-project" in messages[-1]["content"]
-        return "Sara talked about replanting the garden-project beds."
+        return "John talked about replanting the garden-project beds."
 
     fake_client.chat_response = chat
     result = query.answer(
-        "When did I go hiking with Sara?", cfg, conn, fake_client, today=TODAY
+        "When did I go hiking with John?", cfg, conn, fake_client, today=TODAY
     )
     assert result.stage_used == "precise_raw"
     assert date(2024, 1, 15) in result.cited_dates
@@ -109,7 +109,7 @@ def test_a_dressed_up_insufficient_still_escalates(tmp_path, fake_client):
         "**INSUFFICIENT**" if model == cfg.ollama.fast_model else "From the full text."
     )
     result = query.answer(
-        "When did I go hiking with Sara?", cfg, conn, fake_client, today=TODAY
+        "When did I go hiking with John?", cfg, conn, fake_client, today=TODAY
     )
     assert result.stage_used == "precise_raw"
 
@@ -135,7 +135,7 @@ def test_explicit_day_included_even_when_router_misses_range(tmp_path, fake_clie
     fake_client.structured["QueryPlan"] = lambda model, messages: QueryPlan(
         intent="factual", date_from=date(2023, 11, 1), date_to=date(2023, 11, 30)
     )
-    fake_client.chat_response = "You went hiking with Sara on 2024-01-15."
+    fake_client.chat_response = "You went hiking with John on 2024-01-15."
     result = query.answer(
         "What happened on January 15, 2024?", cfg, conn, fake_client, today=TODAY
     )
@@ -148,11 +148,11 @@ def test_needs_raw_text_skips_fast_attempt(tmp_path, fake_client):
 
     def chat(model, messages):
         assert model == cfg.ollama.precise_model
-        return "She said the beds need replanting."
+        return "He said the beds need replanting."
 
     fake_client.chat_response = chat
     result = query.answer(
-        "What exactly did Sara say about the garden project?",
+        "What exactly did John say about the garden project?",
         cfg, conn, fake_client, today=TODAY,
     )
     assert result.stage_used == "precise_raw"
@@ -165,36 +165,36 @@ def test_answers_see_the_notes_the_question_and_entries_point_at(tmp_path, fake_
 
     def chat(model, messages):
         seen["context"] = messages[-1]["content"]
-        return "You went hiking with Sara, your friend, on 2024-01-15."
+        return "You went hiking with John, your friend, on 2024-01-15."
 
     fake_client.chat_response = chat
     result = query.answer(
-        "When did I go hiking with Sara?", cfg, conn, fake_client, today=TODAY
+        "When did I go hiking with John?", cfg, conn, fake_client, today=TODAY
     )
     assert result.stage_used == "fast_summary"
     context = seen["context"]
     assert "Reference notes:" in context
     assert (
-        "[[Sara Miller]] (people; file: Links/People/Sara Miller.md; "
-        "Relationship: Friend; also called Sara" in context
+        "[[John Doe]] (people; file: Links/People/John Doe.md; "
+        "Relationship: Friend; also called John" in context
     )
     assert (
         "- [2024-01-15] A pleasant day with friends outdoors. (file: 2024-01-15.md; "
-        "links: Bear Mountain, Sara Miller, garden-project)" in context
+        "links: Bear Mountain, John Doe, garden-project)" in context
     )
-    assert "[[Sara Miller]]" in result.text
-    assert result.cited_notes == ["Sara Miller"]
+    assert "[[John Doe]]" in result.text
+    assert result.cited_notes == ["John Doe"]
 
 
 def test_notes_the_answer_names_are_cited_even_when_the_question_did_not(
     tmp_path, fake_client
 ):
     cfg, conn = _indexed(tmp_path, fake_client, with_notes=True)
-    fake_client.chat_response = "You hiked Bear Mountain with Sara and planned the garden project."
+    fake_client.chat_response = "You hiked Bear Mountain with John and planned the garden project."
     result = query.answer(
-        "When did I go hiking with Sara?", cfg, conn, fake_client, today=TODAY
+        "When did I go hiking with John?", cfg, conn, fake_client, today=TODAY
     )
-    assert result.cited_notes == ["Bear Mountain", "garden-project", "Sara Miller"]
+    assert result.cited_notes == ["Bear Mountain", "garden-project", "John Doe"]
 
 
 def test_a_question_only_the_notes_can_answer(tmp_path, fake_client):
@@ -219,17 +219,17 @@ def test_precise_answers_read_the_notes_in_full(tmp_path, fake_client):
     def chat(model, messages):
         assert model == cfg.ollama.precise_model
         content = messages[-1]["content"]
-        assert "### Note: Sara Miller (people)\nFile: Links/People/Sara Miller.md\n" in content
+        assert "### Note: John Doe (people)\nFile: Links/People/John Doe.md\n" in content
         assert "### Entry 2024-01-15\nFile: 2024-01-15.md\nWent hiking" in content
-        return "She said the beds need replanting."
+        return "He said the beds need replanting."
 
     fake_client.chat_response = chat
     result = query.answer(
-        "What exactly did Sara say about the garden project?",
+        "What exactly did John say about the garden project?",
         cfg, conn, fake_client, today=TODAY,
     )
     assert result.stage_used == "precise_raw"
-    assert "Sara Miller" in result.cited_notes
+    assert "John Doe" in result.cited_notes
 
 
 def test_aggregate_answers_count_links_to_named_notes(tmp_path, fake_client):
@@ -241,25 +241,25 @@ def test_aggregate_answers_count_links_to_named_notes(tmp_path, fake_client):
 
     def chat(model, messages):
         seen["facts"] = messages[-1]["content"]
-        return "You mentioned Sara once."
+        return "You mentioned John once."
 
     fake_client.chat_response = chat
     result = query.answer(
-        "How often do I write about Sara Miller?", cfg, conn, fake_client, today=TODAY
+        "How often do I write about John Doe?", cfg, conn, fake_client, today=TODAY
     )
     assert result.stage_used == "aggregate"
     assert (
-        "[[Sara Miller]] (people): linked from 1 entries, first 2024-01-15, "
+        "[[John Doe]] (people): linked from 1 entries, first 2024-01-15, "
         "last 2024-01-15; by year 2024: 1." in seen["facts"]
     )
-    assert result.cited_notes == ["Sara Miller"]
+    assert result.cited_notes == ["John Doe"]
 
 
 def test_search_returns_matching_notes_alongside_entries(tmp_path, fake_client):
     cfg, conn = _indexed(tmp_path, fake_client, with_notes=True)
-    results = query.search("Sara hiking", cfg, conn, fake_client, limit=5)
+    results = query.search("John hiking", cfg, conn, fake_client, limit=5)
     assert results.entries
-    assert results.notes[0]["title"] == "Sara Miller"
+    assert results.notes[0]["title"] == "John Doe"
 
 
 def test_a_backwards_range_from_the_router_is_turned_around():
@@ -290,10 +290,10 @@ def test_search_keywords_keep_words_that_start_with_an_accent():
 
 
 def test_note_names_in_questions_match_whole_words_longest_first(conn):
-    sara_miller = add_note(conn, "Sara Miller", aliases=["Sara"])
-    sara_topic = add_note(conn, "Sara", kind="topics")
+    john_doe = add_note(conn, "John Doe", aliases=["John"])
+    john_topic = add_note(conn, "John", kind="topics")
     add_note(conn, "Go", kind="games")
     work = add_note(conn, "Work", kind="topics")
-    assert query.notes_named_in("Did Sara Miller go to work?", conn) == [sara_miller, work]
-    assert query.notes_named_in("A trip to Saratoga", conn) == []
-    assert set(query.notes_named_in("Just Sara today", conn)) == {sara_miller, sara_topic}
+    assert query.notes_named_in("Did John Doe go to work?", conn) == [john_doe, work]
+    assert query.notes_named_in("A trip to Johnstown", conn) == []
+    assert set(query.notes_named_in("Just John today", conn)) == {john_doe, john_topic}

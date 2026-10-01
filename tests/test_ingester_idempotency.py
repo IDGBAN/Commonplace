@@ -230,7 +230,7 @@ def test_reference_notes_are_indexed_and_become_the_entities(tmp_path, fake_clie
     assert counts == {"indexed": 4, "skipped": 0, "error": 0, "dropped": 0}
     kinds = {r["title"]: r["kind"] for r in conn.execute("SELECT title, kind FROM notes")}
     assert kinds == {
-        "Sara Miller": "people",
+        "John Doe": "people",
         "Bear Mountain": "locations",
         "garden-project": "topics-things",
     }
@@ -245,8 +245,8 @@ def test_short_notes_skip_the_model_and_long_ones_are_summarized(tmp_path, fake_
     cfg, conn = _notes_vault(tmp_path)
     ingester.run_backfill(cfg, conn, client=fake_client)
     rows = {r["title"]: r for r in conn.execute("SELECT * FROM notes")}
-    assert rows["Sara Miller"]["summary"] == "A canned note summary."
-    assert rows["Sara Miller"]["model_used"] == "fake-fast"
+    assert rows["John Doe"]["summary"] == "A canned note summary."
+    assert rows["John Doe"]["model_used"] == "fake-fast"
     assert rows["Bear Mountain"]["summary"] == (
         "State park an hour north with a steep summit trail."
     )
@@ -267,19 +267,19 @@ def test_notes_outside_the_daily_glob_are_still_found(tmp_path):
     cfg = make_config(tmp_path, notes_paths=["Links"], daily_note_glob="Journal/**/*.md")
     vault = cfg.vault.path
     copy_note_fixtures(vault)
-    assert "Sara Miller.md" in {p.name for p in ingester._vault_files(cfg)}
-    assert ingester._matches_glob(vault / "Links" / "People" / "Sara Miller.md", cfg)
+    assert "John Doe.md" in {p.name for p in ingester._vault_files(cfg)}
+    assert ingester._matches_glob(vault / "Links" / "People" / "John Doe.md", cfg)
     assert not ingester._matches_glob(vault / "Links" / "People" / "photo.jpg", cfg)
 
 
 def test_deleting_a_note_removes_it_from_the_entities(tmp_path, fake_client):
     cfg, conn = _notes_vault(tmp_path)
     ingester.run_backfill(cfg, conn, client=fake_client)
-    sara = cfg.vault.path / "Links" / "People" / "Sara Miller.md"
-    sara.unlink()
-    ingester._apply_event(str(sara), "delete", cfg, conn, fake_client)
+    john = cfg.vault.path / "Links" / "People" / "John Doe.md"
+    john.unlink()
+    ingester._apply_event(str(john), "delete", cfg, conn, fake_client)
     names = {r["name"] for r in store.top_entities(conn, None, None)}
-    assert "Sara Miller" not in names
+    assert "John Doe" not in names
     assert "Bear Mountain" in names
 
 
@@ -435,8 +435,8 @@ def test_the_models_are_told_where_each_file_sits(tmp_path, fake_client):
         "Journal entry dated 2024-01-20\nFile: Trips/2024-01-20.md\n\nPacked for the coast."
         in prompts["Extraction"]
     )
-    [sara] = prompts["NoteSummary"]
-    assert sara.startswith("Sara Miller (people)\nFile: Links/People/Sara Miller.md\n")
+    [john] = prompts["NoteSummary"]
+    assert john.startswith("John Doe (people)\nFile: Links/People/John Doe.md\n")
     assert any(
         text.startswith("Bear Mountain (locations)\nFile: Links/Locations/Bear Mountain.md")
         for text in fake_client.embed_calls

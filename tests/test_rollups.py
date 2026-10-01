@@ -120,8 +120,8 @@ def test_no_entries_generates_nothing(conn, config, fake_client):
 
 
 def test_period_digests_name_the_notes_entries_link_to(conn, config, fake_client):
-    add_note(conn, "Sara Miller")
-    _add(conn, date(2024, 1, 15), links=["Sara Miller"])
+    add_note(conn, "John Doe")
+    _add(conn, date(2024, 1, 15), links=["John Doe"])
     prompts = []
 
     def chat(model, messages):
@@ -130,4 +130,4 @@ def test_period_digests_name_the_notes_entries_link_to(conn, config, fake_client
 
     fake_client.chat_response = chat
     rollups.generate_rollups(config, conn, fake_client, period_types=("week",))
-    assert "(links: Sara Miller)" in prompts[0]
+    assert "(links: John Doe)" in prompts[0]

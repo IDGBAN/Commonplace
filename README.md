@@ -71,7 +71,7 @@ journal stats             # entries, notes, links, date range, DB size, errored 
 
 # questions
 journal ask "When did I go hiking with John?"
-journal ask "Who is John, and when did I last see her?"
+journal ask "Who is John, and when did I last see him?"
 journal ask "How did my mood change over spring?"     # answered from SQL
 
 # digests

@@ -194,7 +194,7 @@ def _day_in_year(
 def notes_named_in(question: str, conn: sqlite3.Connection) -> list[int]:
     """Notes whose title or alias appears in the question as whole words.
 
-    Longer names go first, so "Sara Miller" doesn't also match a note called "Sara".
+    Longer names go first, so "John Doe" doesn't also match a note called "John".
     """
     text = question.casefold()
     claimed: list[tuple[int, int, str]] = []

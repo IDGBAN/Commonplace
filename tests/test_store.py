@@ -46,16 +46,16 @@ def test_batch_lookups_are_not_capped_by_the_sqlite_variable_limit(conn):
 
 def test_links_resolve_whichever_side_was_indexed_first(conn):
     # entry indexed before the note it links to
-    entry = add_entry(conn, date(2024, 1, 1), links=["Sara Miller"])
+    entry = add_entry(conn, date(2024, 1, 1), links=["John Doe"])
     assert store.entities_for_entry(conn, entry) == []
-    add_note(conn, "Sara Miller")
-    assert _named(store.entities_for_entry(conn, entry)) == [("Sara Miller", "people")]
+    add_note(conn, "John Doe")
+    assert _named(store.entities_for_entry(conn, entry)) == [("John Doe", "people")]
 
 
 def test_links_ignore_case_like_obsidian(conn):
-    entry = add_entry(conn, date(2024, 1, 1), links=["sara MILLER"])
-    add_note(conn, "Sara Miller")
-    assert _named(store.entities_for_entry(conn, entry)) == [("Sara Miller", "people")]
+    entry = add_entry(conn, date(2024, 1, 1), links=["john DOE"])
+    add_note(conn, "John Doe")
+    assert _named(store.entities_for_entry(conn, entry)) == [("John Doe", "people")]
 
 
 def test_links_to_missing_notes_are_not_entities(conn):
@@ -65,10 +65,10 @@ def test_links_to_missing_notes_are_not_entities(conn):
 
 
 def test_cascade_delete_removes_joins_links_fts_and_vec(conn):
-    add_note(conn, "Sara")
+    add_note(conn, "John")
     eid = add_entry(
         conn, date(2024, 1, 1), text="walking in the rain", tags=["walk"],
-        links=["Sara"], path="/vault/x.md",
+        links=["John"], path="/vault/x.md",
     )
     conn.execute(
         "INSERT INTO entries_vec(entry_id, embedding) VALUES (?, ?)",
@@ -89,9 +89,9 @@ def test_cascade_delete_removes_joins_links_fts_and_vec(conn):
 
 
 def test_deleting_a_note_clears_its_rows_but_not_the_entry_links(conn):
-    path = "/vault/Links/people/Sara.md"
-    nid = add_note(conn, "Sara", aliases=["S"], links=["Bear Mountain"], text="climbs a lot")
-    eid = add_entry(conn, date(2024, 1, 1), links=["Sara"])
+    path = "/vault/Links/people/John.md"
+    nid = add_note(conn, "John", aliases=["J"], links=["Bear Mountain"], text="climbs a lot")
+    eid = add_entry(conn, date(2024, 1, 1), links=["John"])
     conn.execute(
         "INSERT INTO notes_vec(note_id, embedding) VALUES (?, ?)",
         (nid, sqlite_vec.serialize_float32([0.1] * 8)),
@@ -129,10 +129,10 @@ def test_period_keys_iso_week():
 
 
 def test_filtered_entry_ids_by_note_title_or_alias(conn):
-    add_note(conn, "Sara Miller", aliases=["Sunny"])
-    linked = add_entry(conn, date(2024, 1, 1), links=["Sara Miller"])
+    add_note(conn, "John Doe", aliases=["Sunny"])
+    linked = add_entry(conn, date(2024, 1, 1), links=["John Doe"])
     other = add_entry(conn, date(2024, 1, 2))
-    assert store.filtered_entry_ids(conn, entity_names=["Sara"]) == [linked]
+    assert store.filtered_entry_ids(conn, entity_names=["John"]) == [linked]
     assert store.filtered_entry_ids(conn, entity_names=["sunny"]) == [linked]
     # unknown names drop the filter instead of matching nothing
     assert store.filtered_entry_ids(conn, entity_names=["Nobody"]) == [linked, other]
@@ -140,9 +140,9 @@ def test_filtered_entry_ids_by_note_title_or_alias(conn):
 
 
 def test_a_named_note_nothing_links_to_drops_the_filter_too(conn):
-    add_note(conn, "Sara")
+    add_note(conn, "John")
     eid = add_entry(conn, date(2024, 1, 1))
-    assert store.filtered_entry_ids(conn, entity_names=["Sara"]) == [eid]
+    assert store.filtered_entry_ids(conn, entity_names=["John"]) == [eid]
 
 
 def test_fts_search_survives_a_junk_keyword(conn):
@@ -181,11 +181,11 @@ def test_vec_search_finds_allowed_entries_however_far_down_they_rank(conn):
 
 
 def test_notes_fts_search_covers_titles_aliases_and_text(conn):
-    sara = add_note(conn, "Sara Miller", aliases=["Sunny"], text="climbs on weekends")
+    john = add_note(conn, "John Doe", aliases=["Sunny"], text="climbs on weekends")
     add_note(conn, "Bear Mountain", kind="locations", text="a state park")
-    assert store.notes_fts_search(conn, ["miller"], 5) == [sara]
-    assert store.notes_fts_search(conn, ["sunny"], 5) == [sara]
-    assert store.notes_fts_search(conn, ["climbs"], 5) == [sara]
+    assert store.notes_fts_search(conn, ["doe"], 5) == [john]
+    assert store.notes_fts_search(conn, ["sunny"], 5) == [john]
+    assert store.notes_fts_search(conn, ["climbs"], 5) == [john]
     assert store.notes_fts_search(conn, ['"'], 5) == []
 
 
@@ -197,10 +197,10 @@ def test_notes_vec_search_is_empty_before_the_vector_table_exists(config):
 
 
 def test_batch_tag_and_link_lookups_match_the_per_entry_ones(conn):
-    add_note(conn, "Sara")
+    add_note(conn, "John")
     add_note(conn, "Park", kind="locations")
     ids = [
-        add_entry(conn, date(2024, 1, d), tags=["work"], links=["Sara", "Park"])
+        add_entry(conn, date(2024, 1, d), tags=["work"], links=["John", "Park"])
         for d in (1, 2)
     ]
     tags = store.tags_for_entries(conn, ids)
@@ -217,13 +217,13 @@ def test_batch_lookups_on_an_empty_id_list(conn):
 
 
 def test_top_entities_counts_links_and_filters_by_kind(conn):
-    add_note(conn, "Sara")
+    add_note(conn, "John")
     add_note(conn, "Park", kind="locations")
-    add_entry(conn, date(2024, 1, 1), links=["Sara", "Park"])
-    add_entry(conn, date(2024, 1, 2), links=["Sara"])
+    add_entry(conn, date(2024, 1, 1), links=["John", "Park"])
+    add_entry(conn, date(2024, 1, 2), links=["John"])
     rows = store.top_entities(conn, None, None)
     assert [(r["name"], r["type"], r["n"]) for r in rows] == [
-        ("Sara", "people", 2),
+        ("John", "people", 2),
         ("Park", "locations", 1),
     ]
     by_kind = store.top_entities(conn, None, None, entity_type="Locations")
@@ -248,35 +248,35 @@ def test_note_name_matching_treats_like_wildcards_literally(conn):
 
 
 def test_mention_stats_and_recent_mentions(conn):
-    sara = add_note(conn, "Sara")
+    john = add_note(conn, "John")
     lonely = add_note(conn, "Lonely Topic", kind="topics")
     for day in (3, 1, 2):
-        add_entry(conn, date(2024, 1, day), links=["Sara"])
-    stats = store.mention_stats(conn, [sara, lonely])
-    assert stats[sara] == store.Mentions(3, "2024-01-01", "2024-01-03")
+        add_entry(conn, date(2024, 1, day), links=["John"])
+    stats = store.mention_stats(conn, [john, lonely])
+    assert stats[john] == store.Mentions(3, "2024-01-01", "2024-01-03")
     assert lonely not in stats
-    assert store.mention_stats(conn, [sara], date_from=date(2024, 1, 2))[sara].count == 2
-    recent = store.entries_mentioning(conn, sara, 2)
+    assert store.mention_stats(conn, [john], date_from=date(2024, 1, 2))[john].count == 2
+    recent = store.entries_mentioning(conn, john, 2)
     assert [r["entry_date"] for r in recent] == ["2024-01-03", "2024-01-02"]
-    assert [tuple(r) for r in store.mentions_by_year(conn, sara)] == [("2024", 3)]
-    assert len(store.entry_ids_mentioning(conn, [sara])) == 3
+    assert [tuple(r) for r in store.mentions_by_year(conn, john)] == [("2024", 3)]
+    assert len(store.entry_ids_mentioning(conn, [john])) == 3
 
 
 def test_notes_linked_from_entries_ranks_by_frequency(conn):
-    sara = add_note(conn, "Sara")
+    john = add_note(conn, "John")
     park = add_note(conn, "Park", kind="locations")
-    e1 = add_entry(conn, date(2024, 1, 1), links=["Sara", "Park"])
-    e2 = add_entry(conn, date(2024, 1, 2), links=["Sara"])
+    e1 = add_entry(conn, date(2024, 1, 1), links=["John", "Park"])
+    e2 = add_entry(conn, date(2024, 1, 2), links=["John"])
     rows = store.notes_linked_from_entries(conn, [e1, e2], limit=5)
-    assert [(r["note_id"], r["n"]) for r in rows] == [(sara, 2), (park, 1)]
+    assert [(r["note_id"], r["n"]) for r in rows] == [(john, 2), (park, 1)]
 
 
 def test_links_between_notes_read_both_ways(conn):
-    sara = add_note(conn, "Sara", links=["Garden", "Sara", "Nowhere"])
+    john = add_note(conn, "John", links=["Garden", "John", "Nowhere"])
     garden = add_note(conn, "Garden", kind="topics")
-    assert [r["title"] for r in store.note_outlinks(conn, sara)] == ["Garden"]
-    assert [r["title"] for r in store.note_backlinks(conn, garden)] == ["Sara"]
-    assert store.note_backlinks(conn, sara) == []
+    assert [r["title"] for r in store.note_outlinks(conn, john)] == ["Garden"]
+    assert [r["title"] for r in store.note_backlinks(conn, garden)] == ["John"]
+    assert store.note_backlinks(conn, john) == []
 
 
 def test_writing_stats_streaks(conn):
@@ -311,8 +311,8 @@ def test_same_day_entries_do_not_inflate_a_streak(conn):
 
 
 def test_stats_counts_notes_links_and_errored_files(conn):
-    add_note(conn, "Sara")
-    add_entry(conn, date(2024, 1, 1), links=["Sara", "Ghost"])
+    add_note(conn, "John")
+    add_entry(conn, date(2024, 1, 1), links=["John", "Ghost"])
     store.upsert_file(conn, "/vault/bad.md", "h2", "error", "no date")
     s = store.stats(conn)
     assert (s.entries, s.notes, s.links, s.files) == (1, 1, 1, 3)

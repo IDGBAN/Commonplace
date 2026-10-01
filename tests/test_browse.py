@@ -35,12 +35,12 @@ class Browser:
 
 @pytest.fixture
 def journal(conn):
-    add_note(conn, "Sara Miller", kind="people", text="Friend from <b>school</b>.",
-             aliases=["Sara"], properties={"Relationship": "Friend"}, links=["Bear Mountain"])
+    add_note(conn, "John Doe", kind="people", text="Friend from <b>school</b>.",
+             aliases=["John"], properties={"Relationship": "Friend"}, links=["Bear Mountain"])
     add_note(conn, "Bear Mountain", kind="locations", summary="A hill we climb.")
-    add_entry(conn, date(2024, 1, 15), text="Hiked Bear Mountain with Sara Miller.",
-              mood=8.0, tags=["hiking", "friends"], links=["Sara Miller", "Bear Mountain"],
-              summary="Hiked with Sara and felt calmer after", path="/vault/2024-01-15.md")
+    add_entry(conn, date(2024, 1, 15), text="Hiked Bear Mountain with John Doe.",
+              mood=8.0, tags=["hiking", "friends"], links=["John Doe", "Bear Mountain"],
+              summary="Hiked with John and felt calmer after", path="/vault/2024-01-15.md")
     add_entry(conn, date(2024, 1, 16), text="Rainy day inside with <script>x</script>.",
               mood=4.0, tags=["rain"], links=["Nobody Yet"],
               summary="Stayed in while it rained", path="/vault/2024-01-16.md")
@@ -121,7 +121,7 @@ def test_only_listed_static_files_are_served(browser):
 def test_refuses_requests_for_another_host_name(browser):
     response = browser.request("/api/overview", host="attacker.example:80")
     assert response.status == 403
-    assert "Sara" not in response.read().decode()
+    assert "John" not in response.read().decode()
 
 
 def test_is_read_only(browser):
@@ -146,8 +146,8 @@ def test_overview_reports_counts_problems_and_setup(browser):
 def test_catalog_lists_everything_the_jump_box_needs(browser):
     data = browser.get("/api/catalog")
     assert [e["date"] for e in data["entries"]] == ["2024-01-15", "2024-01-16"]
-    sara = next(n for n in data["notes"] if n["title"] == "Sara Miller")
-    assert sara["aliases"] == ["Sara"]
+    john = next(n for n in data["notes"] if n["title"] == "John Doe")
+    assert john["aliases"] == ["John"]
     assert {t["name"] for t in data["tags"]} == {"hiking", "friends", "rain"}
 
 
@@ -155,9 +155,9 @@ def test_entry_shows_what_was_extracted_and_what_it_links(browser, journal):
     first = entry_id(journal, "2024-01-15")
     data = browser.get(f"/api/entries/{first}")
     assert data["mood"] == 8.0
-    assert data["summary"] == "Hiked with Sara and felt calmer after"
+    assert data["summary"] == "Hiked with John and felt calmer after"
     assert data["tags"] == ["friends", "hiking"]
-    assert {n["title"] for n in data["notes"]} == {"Sara Miller", "Bear Mountain"}
+    assert {n["title"] for n in data["notes"]} == {"John Doe", "Bear Mountain"}
     assert data["unresolved_links"] == []
     assert data["model_used"] == "m"
     assert data["prev"] is None
@@ -218,10 +218,10 @@ def test_entries_filter_by_tag_note_text_and_dates(browser, journal):
     assert [e["date"] for e in browser.get("/api/entries?order=oldest")["items"]] == [
         "2024-01-15", "2024-01-16"]
     assert [e["date"] for e in browser.get("/api/entries?tag=rain")["items"]] == ["2024-01-16"]
-    sara = note_id(journal, "Sara Miller")
-    by_note = browser.get(f"/api/entries?note={sara}")
+    john = note_id(journal, "John Doe")
+    by_note = browser.get(f"/api/entries?note={john}")
     assert by_note["total"] == 1
-    assert by_note["note"]["title"] == "Sara Miller"
+    assert by_note["note"]["title"] == "John Doe"
     assert browser.get("/api/entries?q=rained")["total"] == 1
     assert browser.get("/api/entries?q=100%25")["total"] == 0
     assert browser.get("/api/entries?from=2024-01-16")["total"] == 1
@@ -232,11 +232,11 @@ def test_entries_filter_by_tag_note_text_and_dates(browser, journal):
 
 def test_notes_list_and_detail(browser, journal):
     data = browser.get("/api/notes")
-    sara = next(n for n in data["notes"] if n["title"] == "Sara Miller")
-    assert sara["mentions"] == 1
+    john = next(n for n in data["notes"] if n["title"] == "John Doe")
+    assert john["mentions"] == 1
     assert data["unresolved_links"][0]["target"] == "nobody yet"
 
-    detail = browser.get(f"/api/notes/{sara['id']}")
+    detail = browser.get(f"/api/notes/{john['id']}")
     assert detail["properties"] == {"Relationship": "Friend"}
     assert detail["raw_text"] == "Friend from <b>school</b>."
     assert detail["summary_source"] is None
@@ -247,7 +247,7 @@ def test_notes_list_and_detail(browser, journal):
 
     mountain = browser.get(f"/api/notes/{note_id(journal, 'Bear Mountain')}")
     assert mountain["summary_source"] == "own_text"
-    assert [b["title"] for b in mountain["backlinks"]] == ["Sara Miller"]
+    assert [b["title"] for b in mountain["backlinks"]] == ["John Doe"]
 
 
 def test_tags_and_tag_detail(browser):
@@ -266,13 +266,13 @@ def test_mood_averages_cover_entries_past_the_listed_ones(browser, journal, monk
     monkeypatch.setattr(browse, "TAG_ENTRIES_LIMIT", 1)
     monkeypatch.setattr(browse, "NOTE_ENTRIES_LIMIT", 1)
     add_entry(journal, date(2024, 2, 1), mood=2.0, tags=["hiking"],
-              links=["Sara Miller"], path="/vault/2024-02-01.md")
+              links=["John Doe"], path="/vault/2024-02-01.md")
 
     tag = browser.get("/api/tags/hiking")
     assert (tag["total"], len(tag["entries"]), tag["entries_capped"]) == (2, 1, True)
     assert tag["avg_mood"] == 5.0
 
-    note = browser.get(f"/api/notes/{note_id(journal, 'Sara Miller')}")
+    note = browser.get(f"/api/notes/{note_id(journal, 'John Doe')}")
     assert (len(note["entries"]), note["entries_capped"]) == (1, True)
     assert note["avg_mood"] == 5.0
 
@@ -304,8 +304,8 @@ def test_files_show_status_and_what_each_became(browser, journal):
     assert files["/vault/broken.md"]["status"] == "error"
     assert files["/vault/2024-01-15.md"]["entries"] == 1
     assert files["/vault/2024-01-15.md"]["entry_id"] == entry_id(journal, "2024-01-15")
-    sara = next(f for f in files.values() if f["note_id"] == note_id(journal, "Sara Miller"))
-    assert sara["entries"] == 0
+    john = next(f for f in files.values() if f["note_id"] == note_id(journal, "John Doe"))
+    assert john["entries"] == 0
     # problems first
     assert next(iter(files)) == "/vault/broken.md"
 
@@ -314,9 +314,9 @@ def test_keyword_search_needs_no_model(browser, fake_client):
     data = browser.get("/api/search?q=rainy&mode=keyword")
     assert data["mode"] == "keyword"
     assert fake_client.embed_calls == []
-    data = browser.get(f"/api/search?q={quote('Sara Miller')}&mode=keyword")
+    data = browser.get(f"/api/search?q={quote('John Doe')}&mode=keyword")
     assert [e["date"] for e in data["entries"]] == ["2024-01-15"]
-    assert data["notes"][0]["title"] == "Sara Miller"
+    assert data["notes"][0]["title"] == "John Doe"
     assert browser.get("/api/search?q=%20", status=400)["error"]
 
 
