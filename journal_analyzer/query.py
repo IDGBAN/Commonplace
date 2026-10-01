@@ -293,6 +293,21 @@ def _mention_facts(
     return facts, titles, note_ids
 
 
+def metrics_named_in(question: str, conn: sqlite3.Connection) -> list[str]:
+    """Metric keys the question uses as words, like "sleep" in "how did I sleep"."""
+    text = _words(question)
+    named = []
+    for row in store.metric_keys(conn):
+        words = _words(row["key"])
+        if words and f" {words} " in f" {text} ":
+            named.append(row["key"])
+    return named
+
+
+def _metric_text(metrics: dict[str, float]) -> str:
+    return ", ".join(f"{key} {value:g}" for key, value in metrics.items())
+
+
 def _filter_facts(conn: sqlite3.Connection, only: store.EntryFilter | None) -> list[str]:
     facts = []
     if only and only.note_ids:
@@ -332,6 +347,11 @@ def _answer_aggregate(
         facts.append("Top tags: " + ", ".join(f"{r['name']} ({r['n']})" for r in tag_rows))
     note_facts, cited_notes, note_ids = _mention_facts(conn, plan, named)
     facts.extend(note_facts)
+    for key in metrics_named_in(question, conn):
+        months = store.monthly_metric(conn, key, plan.date_from, plan.date_to, only)
+        if months:
+            facts.append(f"Monthly average of '{key}', a number recorded in the entries:")
+            facts.extend(f"- {r['month']}: {r['avg']:g} over {r['n']} entries" for r in months)
     facts.append(f"Data covers {lo} to {hi}.")
     fact_block = "\n".join(facts)
 
@@ -642,12 +662,15 @@ def _summary_context(
     vault = config.vault.path
     sections: list[str] = []
     linked = store.entities_for_entries(conn, [r["id"] for r in candidates])
+    metrics = store.metrics_for_entries(conn, [r["id"] for r in candidates])
     lines = []
     for r in candidates:
         details = [f"file: {parser.relative_path(r['file_path'], vault)}"]
         names = [n["name"] for n in linked.get(r["id"], [])]
         if names:
             details.append(f"links: {', '.join(names)}")
+        if r["id"] in metrics:
+            details.append(f"recorded: {_metric_text(metrics[r['id']])}")
         lines.append(
             f"- [{r['entry_date']}] {r['summary'] or '(no summary)'} ({'; '.join(details)})"
         )
@@ -780,6 +803,7 @@ def _precise_reanalysis(
     client: OllamaClient,
     digests: dict[int, str] | None = None,
     on_text: TextSink | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     note_blocks: list[str] = []
     used_notes: list[sqlite3.Row] = []
@@ -800,11 +824,14 @@ def _precise_reanalysis(
     budget = MAX_RAW_CONTEXT_CHARS - note_chars
     used: list[tuple[sqlite3.Row, str]] = []
     total = 0
+    recorded = store.metrics_for_entries(conn, [r["id"] for r in candidates]) if conn else {}
     for row in candidates:  # best first
         heading = (
             f"### Entry {row['entry_date']}\n"
             f"File: {parser.relative_path(row['file_path'], vault)}\n"
         )
+        if row["id"] in recorded:
+            heading += f"Recorded: {_metric_text(recorded[row['id']])}\n"
         cost = len(heading) + len(row["raw_text"])
         if used and total + cost > budget:
             continue
@@ -920,6 +947,7 @@ def answer(
         question, candidates, notes, config, client,
         digests=_relationship_digests(conn, config, about),
         on_text=on_text,
+        conn=conn,
     )
     return _finalize(
         text,

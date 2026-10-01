@@ -1,7 +1,9 @@
-"""Mood and tags as stored: the model's reading, adjusted by frontmatter and [tags].
+"""What's stored for each entry beyond its text: mood, tags and metrics.
 
-The model's own reading is kept in entry_readings, so when these settings
-change, `refresh` recomputes every entry without calling a model.
+Mood and tags are the model's reading adjusted by frontmatter and [tags];
+metrics are numbers from the frontmatter. The model's own reading is kept in
+entry_readings and the frontmatter in file_frontmatter, so when these
+settings change, `refresh` recomputes every entry without calling a model.
 """
 
 from __future__ import annotations
@@ -21,6 +23,15 @@ _SETTINGS_META_KEY = "reading_settings"
 SIMILAR_TAG_RATIO = 0.85
 # "7", "7.5", "7,5" or "7/10"
 _SCORE_RE = re.compile(r"^\s*([-+]?\d+(?:[.,]\d+)?)\s*(?:/\s*(\d+(?:[.,]\d+)?))?\s*$")
+# "7", "7.5h", "30 min", "8k"
+_AMOUNT_RE = re.compile(r"^\s*([-+]?\d+(?:[.,]\d+)?)\s*([a-z%]*)\s*$", re.IGNORECASE)
+_CLOCK_RE = re.compile(r"^\s*(\d{1,2}):([0-5]\d)\s*$")
+_TRUE = frozenset({"true", "yes", "y", "done"})
+_FALSE = frozenset({"false", "no", "n"})
+# Obsidian's own keys, and ones that are never a measure
+_NOT_METRICS = frozenset(
+    {"aliases", "alias", "tags", "tag", "cssclasses", "cssclass", "publish", "position", "date"}
+)
 
 
 def _first(value: FrontmatterValue | None) -> str | None:
@@ -50,6 +61,43 @@ def frontmatter_mood(fields: dict[str, FrontmatterValue], config: Config) -> flo
     clamped = min(max(value, lo), hi)
     top = config.indexing.mood_scale_max
     return round(1 + (clamped - lo) * (top - 1) / (hi - lo), 2)
+
+
+def metric_value(raw: FrontmatterValue | None) -> float | None:
+    """A number from a frontmatter value, or None if it isn't one."""
+    text = _first(raw)
+    if text is None:
+        return None
+    word = text.strip().casefold()
+    if word in _TRUE:
+        return 1.0
+    if word in _FALSE:
+        return 0.0
+    clock = _CLOCK_RE.match(text)
+    if clock:
+        return round(int(clock.group(1)) + int(clock.group(2)) / 60, 2)
+    amount = _AMOUNT_RE.match(text)
+    if amount is None:
+        return None
+    value = _number(amount.group(1))
+    return value * 1000 if amount.group(2).casefold() == "k" else value
+
+
+def entry_metrics(fields: dict[str, FrontmatterValue], config: Config) -> dict[str, float]:
+    skip = set(_NOT_METRICS) | set(config.metrics.ignore)
+    skip.add(config.vault.frontmatter_date_key.casefold())
+    if config.vault.frontmatter_mood_key:
+        skip.add(config.vault.frontmatter_mood_key.casefold())
+    wanted = set(config.metrics.keys)
+    found: dict[str, float] = {}
+    for name, raw in fields.items():
+        key = name.strip().casefold()
+        if key in skip or (wanted and key not in wanted):
+            continue
+        value = metric_value(raw)
+        if value is not None:
+            found[key] = value
+    return found
 
 
 def final_tags(
@@ -91,6 +139,9 @@ def settings_fingerprint(config: Config) -> str:
             "frontmatter_tags": config.tags.from_frontmatter,
             "ignore": sorted(config.tags.ignore),
             "merge": sorted(config.tags.merge.items()),
+            "date_key": config.vault.frontmatter_date_key.casefold(),
+            "metric_keys": sorted(config.metrics.keys),
+            "metric_ignore": sorted(config.metrics.ignore),
         },
         sort_keys=True,
     )
@@ -144,11 +195,17 @@ def refresh(config: Config, conn: sqlite3.Connection) -> int:
     if not added and not loaded and db.get_meta(conn, _SETTINGS_META_KEY) == fingerprint:
         return 0
     changed = 0
-    for row in store.stored_readings(conn):
+    rows = store.stored_readings(conn)
+    current_metrics = store.metrics_for_entries(conn, [r.entry_id for r in rows])
+    for row in rows:
         final = final_reading(row.reading, row.frontmatter, config)
-        if final.mood_score == row.mood_score and sorted(final.tags) == sorted(row.tags):
+        metrics = entry_metrics(row.frontmatter, config)
+        same_reading = final.mood_score == row.mood_score and sorted(final.tags) == sorted(row.tags)
+        if same_reading and metrics == current_metrics.get(row.entry_id, {}):
             continue
-        store.update_entry_mood_and_tags(conn, row.entry_id, final.mood_score, final.tags)
+        if not same_reading:
+            store.update_entry_mood_and_tags(conn, row.entry_id, final.mood_score, final.tags)
+        store.replace_entry_metrics(conn, row.entry_id, metrics)
         store.mark_rollups_stale(conn, row.entry_date)
         store.mark_note_digests_stale(conn, store.link_targets_for_entries(conn, [row.entry_id]))
         changed += 1

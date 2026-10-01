@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS file_frontmatter (
   data TEXT NOT NULL DEFAULT '{}'
 );
 
+-- numbers from an entry's frontmatter, like sleep: 7
+CREATE TABLE IF NOT EXISTS entry_metrics (
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  key      TEXT NOT NULL,
+  value    REAL NOT NULL,
+  PRIMARY KEY (entry_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_entry_metrics_key ON entry_metrics(key);
+
 CREATE TABLE IF NOT EXISTS tags (
   id   INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE

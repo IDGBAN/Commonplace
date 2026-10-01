@@ -282,6 +282,88 @@ def update_entry_mood_and_tags(
         _link_tags(conn, entry_id, tags)
 
 
+def replace_entry_metrics(
+    conn: sqlite3.Connection, entry_id: int, metrics: dict[str, float]
+) -> None:
+    with conn:
+        conn.execute("DELETE FROM entry_metrics WHERE entry_id = ?", (entry_id,))
+        conn.executemany(
+            "INSERT INTO entry_metrics(entry_id, key, value) VALUES (?, ?, ?)",
+            [(entry_id, key, value) for key, value in metrics.items()],
+        )
+
+
+def metrics_for_entries(
+    conn: sqlite3.Connection, entry_ids: list[int]
+) -> dict[int, dict[str, float]]:
+    if not entry_ids:
+        return {}
+    out: dict[int, dict[str, float]] = defaultdict(dict)
+    try:
+        rows = conn.execute(
+            f"""SELECT entry_id, key, value FROM entry_metrics
+                WHERE entry_id IN ({_JSON_VALUES}) ORDER BY entry_id, key""",
+            (_json_list(entry_ids),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # a read-only connection to a cache from before the table
+    for r in rows:
+        out[r["entry_id"]][r["key"]] = r["value"]
+    return dict(out)
+
+
+def metric_keys(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """SELECT m.key, COUNT(*) AS n, MIN(m.value) AS lo, MAX(m.value) AS hi,
+                          ROUND(AVG(m.value), 2) AS avg,
+                          MIN(e.entry_date) AS first, MAX(e.entry_date) AS last
+                   FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+                   GROUP BY m.key ORDER BY n DESC, m.key"""
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def monthly_metric(
+    conn: sqlite3.Connection,
+    key: str,
+    date_from: date | None,
+    date_to: date | None,
+    only: EntryFilter | None = None,
+) -> list[sqlite3.Row]:
+    clauses, params = _filter_clauses(date_from, date_to, only, alias="e.")
+    where = " AND ".join(["m.key = ?", *clauses])
+    return list(
+        conn.execute(
+            f"""SELECT substr(e.entry_date, 1, 7) AS month,
+                       ROUND(AVG(m.value), 2) AS avg, COUNT(*) AS n
+                FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+                WHERE {where}
+                GROUP BY month ORDER BY month""",
+            [key, *params],
+        ).fetchall()
+    )
+
+
+def metric_mood_pairs(
+    conn: sqlite3.Connection, key: str, date_from: date | None, date_to: date | None
+) -> list[tuple[float, float]]:
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    where = " AND ".join(["m.key = ?", "e.mood_score IS NOT NULL", *clauses])
+    return [
+        (r["value"], r["mood_score"])
+        for r in conn.execute(
+            f"""SELECT m.value, e.mood_score
+                FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+                WHERE {where}""",
+            [key, *params],
+        )
+    ]
+
+
 def prune_unused_tags(conn: sqlite3.Connection) -> None:
     with conn:
         conn.execute(

@@ -22,6 +22,7 @@ def collect_entries(
     # batched, since an export is usually the whole journal
     tags_by_entry = store.tags_for_entries(conn, ids)
     entities_by_entry = store.entities_for_entries(conn, ids)
+    metrics_by_entry = store.metrics_for_entries(conn, ids)
     out: list[ExportEntry] = []
     for r in rows:
         item: ExportEntry = {
@@ -35,6 +36,7 @@ def collect_entries(
                 {"name": e["name"], "type": e["type"]}
                 for e in entities_by_entry.get(r["id"], [])
             ],
+            "metrics": metrics_by_entry.get(r["id"], {}),
         }
         if include_raw:
             item["raw_text"] = r["raw_text"]
@@ -57,6 +59,7 @@ def to_markdown(entries: list[ExportEntry]) -> str:
         ents = e["entities"]
         if ents:
             meta.append("mentions: " + ", ".join(x["name"] for x in ents))
+        meta.extend(f"{key} {value:g}" for key, value in e["metrics"].items())
         lines.append(f"*{' · '.join(meta)}*")
         lines.append("")
         if e["summary"]:

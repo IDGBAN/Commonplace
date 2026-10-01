@@ -482,3 +482,10 @@ def test_ask_streams_the_answer_text_as_it_is_written(browser, fake_client):
     written = "".join(data["text"] for kind, data in events if kind == "text")
     assert written == "You hiked with John."
     assert events[-1][0] == "answer"
+
+
+def test_entry_pages_show_the_numbers_from_the_frontmatter(browser, journal):
+    first = entry_id(journal, "2024-01-15")
+    assert browser.get(f"/api/entries/{first}")["metrics"] == {}
+    store.replace_entry_metrics(journal, first, {"sleep": 7.5})
+    assert browser.get(f"/api/entries/{first}")["metrics"] == {"sleep": 7.5}

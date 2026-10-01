@@ -125,14 +125,16 @@ def _rollup_members_digest(
     ids = [r["id"] for r in members]
     tags_by_entry = store.tags_for_entries(conn, ids)
     notes_by_entry = store.entities_for_entries(conn, ids)
+    metrics = store.metrics_for_entries(conn, ids)
     for row in members:
         tags = tags_by_entry.get(row["id"], [])
         mood = row["mood_score"]
         mood_str = f"{mood:g}" if mood is not None else "-"
+        numbers = "".join(f", {k} {v:g}" for k, v in metrics.get(row["id"], {}).items())
         names = [n["name"] for n in notes_by_entry.get(row["id"], [])]
         links = f" (links: {', '.join(names)})" if names else ""
         lines.append(
-            f"- {row['entry_date']} (mood {mood_str}) "
+            f"- {row['entry_date']} (mood {mood_str}{numbers}) "
             f"[{', '.join(tags)}]{links}: {row['summary'] or '(no summary)'}"
         )
     dominant, avg_mood = _member_stats(members, tags_by_entry)

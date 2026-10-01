@@ -332,6 +332,7 @@ def entry(req: Request, entry_id: str) -> Json:
             "error": file["error_message"],
         } if file else None,
         "tags": store.tags_for_entry(conn, row["id"]),
+        "metrics": store.metrics_for_entries(conn, [row["id"]]).get(row["id"], {}),
         "notes": [
             {"id": r["id"], "title": r["name"], "kind": r["type"]}
             for r in store.entities_for_entry(conn, row["id"])

@@ -50,6 +50,7 @@ Then open `config.toml` and set these:
 - `ignore_patterns` lists folders and files to skip, like `[".stversions", ".stfolder", ".smart-env", ".obsidian"]`. A name without a `/` matches anywhere in the tree. A pattern with a `/` is matched against the path from the vault root. `*` and `?` work in both.
 - `frontmatter_mood_key` is for when you already score your own mood in each entry's frontmatter, like `mood: 7`. Set it to `"mood"` and your number is used instead of the model's guess. `frontmatter_mood_min` and `frontmatter_mood_max` give the scale you write it on (1 to 10 by default), and it's converted to the app's scale. A value like `3/5` brings its own scale. Words like `mood: tired` are ignored.
 - `[tags]` controls tags. With `from_frontmatter = true` (the default), tags in an entry's frontmatter count the same as inline `#tags`. `ignore` drops tags from every entry, which helps when a template puts `daily` on every note. `merge` makes one tag count as another, like `{ friendship = "friends" }`; `journal tags --similar` lists tags that look like duplicates and prints a `merge` line you can paste in. When the model tags an entry it's shown the `known_in_prompt` most used tags (40 by default) and asked to reuse them, so near-duplicates stop piling up.
+- `[metrics]` is for numbers you keep in entry frontmatter, like `sleep: 7.5`, `steps: 8k`, `bedtime: 23:30` or `exercise: true` (true and false count as 1 and 0). By default every numeric property counts except the date and mood keys; `keys` limits it to a list and `ignore` leaves some out. See [Metrics](#metrics).
 - `[notes] paths` points at the folders with your undated reference notes, e.g. `["Links"]`. See [Reference notes](#reference-notes).
 - `[ollama]` has the host, the three model names, whether the fast and precise models think before answering (`fast_model_think`, `precise_model_think`), the embedding context window (`embed_num_ctx`) and the request timeout. The chat models run at Ollama's default context window. When a prompt won't fit (a very long entry, a big pile of digests), the request asks for a bigger window instead of letting the prompt get cut, and Ollama reloads the model at that size. Thinking is off for the fast model by default, because on a reasoning model it makes extraction a lot slower without helping much. If you change `embed_model` later you'll have to rebuild the cache, since vectors from different models can't be compared.
 - `[db] path` is where the SQLite cache goes.
@@ -126,13 +127,15 @@ journal unlinked                         # notes your entries name without linki
 journal unlinked "John Doe"              # the entries that name John without a link
 journal mood --since 2023-01-01          # average mood per month, with a bar chart
 journal mood --about "John Doe"          # only the days you linked John
+journal metric                           # numbers you keep in frontmatter, like sleep: 7
+journal metric sleep --since 2024-01-01  # one of them by month
 journal streaks                          # days written, words, longest run
 journal on-this-day                      # what you wrote on this date in earlier years
 journal similar 2024-01-15               # closest entries by stored embedding
 journal export --format markdown --out ~/journal-export.md
 ```
 
-`search`, `tags`, `entities`, `mood`, `insights` and `export` take `--since` and `--until` as ISO dates. `search`, `mood` and `export`, as well as `ask` and `chat`, also take `--about NOTE` (only entries that link that note, by title or alias) and `--tag TAG`. On `ask` and `chat`, `--since` and `--until` replace whatever dates the question's wording suggests, which helps when the small routing model reads a date wrong; with `chat` the filters apply to every question in the conversation. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
+`search`, `tags`, `entities`, `mood`, `metric`, `insights` and `export` take `--since` and `--until` as ISO dates. `search`, `mood`, `metric` and `export`, as well as `ask` and `chat`, also take `--about NOTE` (only entries that link that note, by title or alias) and `--tag TAG`. On `ask` and `chat`, `--since` and `--until` replace whatever dates the question's wording suggests, which helps when the small routing model reads a date wrong; with `chat` the filters apply to every question in the conversation. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
 
 ### Browsing in a web page
 
@@ -151,11 +154,22 @@ It opens the cache read-only and never touches your notes, so it's safe to leave
 
 `journal chat` is `ask` with memory. It keeps the last few turns so follow-ups work: ask "How was March?", then "what about the month after that?", and the second question gets rewritten into a standalone one before the usual retrieval runs. Each answer still shows which stage produced it. Ctrl-C while it's answering drops that answer and keeps the conversation going. Type `exit` or press Ctrl-D to leave.
 
-`journal insights` runs statistics over the cache in plain SQL, then has the model describe only the findings that pass a threshold: tags and linked notes whose average mood differs from your baseline, weekday and seasonal patterns, and themes that show up together. These are correlations, not causes, and raw entries are never sent to a model. Use `--since` and `--until` (ISO dates) to limit the range, and set the thresholds in `[insights]` (`min_sample_size`, `mood_deviation_threshold`).
+`journal insights` runs statistics over the cache in plain SQL, then has the model describe only the findings that pass a threshold: tags and linked notes whose average mood differs from your baseline, weekday and seasonal patterns, numbers you keep in frontmatter (see [Metrics](#metrics)), and themes that show up together. These are correlations, not causes, and raw entries are never sent to a model. Use `--since` and `--until` (ISO dates) to limit the range, and set the thresholds in `[insights]` (`min_sample_size`, `mood_deviation_threshold`).
 
 `journal review 2025` puts a year on one page in Markdown: the year digest, writing numbers, mood by month, your best and hardest days by mood, the notes you linked most and the ones that first appear that year, your top tags against the year before, and tags that fell away. Days and notes are `[[links]]`, so it reads well pasted into Obsidian. It makes no model calls; if the year digest isn't written yet it says how to write it. Leave out the year for the latest one you wrote in, and add `--out FILE` to save it (outside the vault).
 
 `journal prompt` looks back over recent entries (14 days by default, or `--days N`) and suggests open-ended writing prompts that pick up loose threads, like a project you named, a person who keeps coming up, or a feeling you left unresolved. `--count N` sets how many. It only reads the cache and never touches your notes.
+
+## Metrics
+
+Numbers in your entries' frontmatter are stored with each entry without any model reading them. `journal metric` lists them with their range and average, and `journal metric sleep` shows one by month (it takes `--since`, `--until`, `--about` and `--tag`). They also turn up where they help:
+
+- `journal insights` compares your mood on either side of each metric's median, or on the yes and no days of a true/false one, and reports the differences that pass the `[insights]` thresholds
+- a question that names one, like "how did I sleep in March?", gets its monthly averages when it's answered from statistics, and the entries an answer reads list their numbers
+- week and month digests see each day's numbers next to its mood
+- `journal show`, `journal export` and the entry pages in `journal browse` show them
+
+Changing `[metrics]` takes effect on the next `journal index` with no model calls.
 
 ## Reference notes
 

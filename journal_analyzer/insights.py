@@ -15,9 +15,10 @@ from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
 MAX_TAG_FINDINGS = 6
 MAX_ENTITY_FINDINGS = 5
 MAX_COOCCURRENCE_FINDINGS = 3
+MAX_METRIC_FINDINGS = 4
 
 FindingKind = Literal[
-    "tag_mood", "entity_mood", "weekday", "season", "cooccurrence"
+    "tag_mood", "entity_mood", "weekday", "season", "cooccurrence", "metric_mood"
 ]
 
 _WEEKDAYS = [
@@ -31,8 +32,8 @@ _MONTHS = [
 _NARRATE_SYSTEM = (
     "You are a reflective journaling analyst. Below are statistical patterns "
     "computed from the reader's own journal: correlations between their mood "
-    "and their tags, people, the day of week, the season, and themes that "
-    "recur together. Write a warm, concrete 3-6 sentence reflection, spoken "
+    "and their tags, people, the day of week, the season, numbers they track "
+    "in their notes (like hours of sleep), and themes that recur together. Write a warm, concrete 3-6 sentence reflection, spoken "
     'to them directly as "you", that ties the strongest signals together '
     'into observations they might not have noticed. Never call them "the '
     'user" or "the author", and do not open with a frame like "The data '
@@ -118,6 +119,45 @@ def _rhythm_finding(
     return Finding(kind, text, spread)
 
 
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+
+def _metric_finding(
+    key: str, pairs: list[tuple[float, float]], threshold: float, min_count: int
+) -> Finding | None:
+    values = sorted({v for v, _ in pairs})
+    if len(values) < 2:
+        return None
+    if set(values) <= {0.0, 1.0}:
+        # a yes/no property, like exercise: true
+        yes = [m for v, m in pairs if v == 1.0]
+        no = [m for v, m in pairs if v == 0.0]
+        if len(yes) < min_count or len(no) < min_count:
+            return None
+        diff = _mean(yes) - _mean(no)
+        text = (
+            f"Days with '{key}': average mood {_mean(yes):.1f}, against "
+            f"{_mean(no):.1f} on days without ({len(yes)} and {len(no)} entries)"
+        )
+    else:
+        ordered = sorted(v for v, _ in pairs)
+        median = ordered[len(ordered) // 2]
+        low = [m for v, m in pairs if v < median]
+        high = [m for v, m in pairs if v >= median]
+        if len(low) < min_count or len(high) < min_count:
+            return None
+        diff = _mean(high) - _mean(low)
+        text = (
+            f"Days with '{key}' below its median of {median:g}: average mood "
+            f"{_mean(low):.1f}, against {_mean(high):.1f} at or above it "
+            f"({len(low)} and {len(high)} entries)"
+        )
+    if abs(diff) < threshold:
+        return None
+    return Finding("metric_mood", text, abs(diff))
+
+
 def compute_insights(
     config: Config,
     conn: sqlite3.Connection,
@@ -163,6 +203,17 @@ def compute_insights(
         ),
     ]
     result.findings.extend(f for f in rhythms if f is not None)
+
+    metric_findings = [
+        f
+        for row in store.metric_keys(conn)
+        if (f := _metric_finding(
+            row["key"], store.metric_mood_pairs(conn, row["key"], date_from, date_to),
+            threshold, min_count,
+        )) is not None
+    ]
+    metric_findings.sort(key=lambda f: -f.magnitude)
+    result.findings.extend(metric_findings[:MAX_METRIC_FINDINGS])
 
     cooccurring = store.tag_cooccurrence(conn, date_from, date_to, min_count)
     for r in cooccurring[:MAX_COOCCURRENCE_FINDINGS]:

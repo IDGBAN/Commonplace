@@ -62,6 +62,12 @@ ignore = []                       # dropped from every entry, e.g. ["daily", "jo
 merge = {}
 known_in_prompt = 40              # most used tags shown to the model when it tags an entry; 0 turns it off
 
+[metrics]
+# Numbers in entry frontmatter, like sleep: 7 or exercise: true. Empty keys
+# means every numeric property; ignore leaves some out, e.g. ["week"].
+keys = []
+ignore = []
+
 [notes]
 # Folders (or single files) of undated notes about people, places, topics and
 # so on. An entry that [[links]] to one counts as mentioning it, and answers

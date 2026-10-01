@@ -122,6 +122,7 @@ def _index_entries(
             model_used=config.ollama.fast_model,
         )
         store.save_entry_reading(conn, entry_id, reading)
+        store.replace_entry_metrics(conn, entry_id, fields.entry_metrics(entry.frontmatter, config))
         if vector is not None:
             store.save_entry_vector(conn, entry_id, vector)
         store.mark_rollups_stale(conn, entry.entry_date)

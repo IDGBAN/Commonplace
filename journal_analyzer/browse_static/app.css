@@ -496,6 +496,8 @@ table.data .err { color: var(--alert); font-size: 0.86rem; }
 .props { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.3rem 1rem; margin: 1rem 0 0; }
 .props dt { color: var(--ink-faint); }
 .props dd { margin: 0; }
+.props.numbers { margin: 0.1rem 0 0.2rem; gap: 0.1rem 0.8rem; }
+.props.numbers dt { color: var(--pencil-soft); }
 
 .year-bars { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; gap: 0.25rem 0.6rem; align-items: center; font-size: 0.85rem; }
 .year-bars .hbar { background: var(--pencil); opacity: 0.6; }

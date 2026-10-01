@@ -664,6 +664,11 @@ def show(
             tags = store.tags_for_entry(conn, r["id"])
             if tags:
                 console.print(f"  tags: {escape(', '.join(tags))}")
+            numbers = store.metrics_for_entries(conn, [r["id"]]).get(r["id"])
+            if numbers:
+                console.print(
+                    "  numbers: " + escape(", ".join(f"{k} {v:g}" for k, v in numbers.items()))
+                )
             ents = store.entities_for_entry(conn, r["id"])
             if ents:
                 console.print(
@@ -936,6 +941,65 @@ def mood(
         bar = "█" * round((avg / scale) * MOOD_BAR_WIDTH) if avg is not None else ""
         table.add_row(r["month"], _mood_str(avg), f"[green]{bar}[/green]",
                       str(r["entry_count"]))
+    console.print(table)
+
+
+@app.command()
+def metric(
+    key: Annotated[
+        str | None, typer.Argument(help="Which number, e.g. sleep. Leave out to list them.")
+    ] = None,
+    config: ConfigOpt = None,
+    since: SinceOpt = None,
+    until: UntilOpt = None,
+    about: AboutOpt = None,
+    tag: TagOpt = None,
+) -> None:
+    """Numbers you record in entry frontmatter, like sleep: 7, by month."""
+    date_from, date_to = _parse_range(since, until)
+    with _guard(), _open(config) as (_, conn):
+        known = store.metric_keys(conn)
+        if not known:
+            console.print(
+                "No numbers found in your entries' frontmatter. Add one like 'sleep: 7' "
+                "to a daily note and run 'journal index'."
+            )
+            return
+        if key is None:
+            table = Table(title="Numbers in your entries")
+            table.add_column("Metric", style="cyan")
+            for name in ("Entries", "Min", "Max", "Average"):
+                table.add_column(name, justify="right")
+            table.add_column("First .. last", no_wrap=True)
+            for r in known:
+                table.add_row(
+                    escape(r["key"]), str(r["n"]), f"{r['lo']:g}", f"{r['hi']:g}",
+                    f"{r['avg']:g}", f"{r['first']} .. {r['last']}",
+                )
+            console.print(table)
+            return
+        name = key.strip().casefold()
+        if name not in {r["key"] for r in known}:
+            console.print(
+                f"[red]No entry records '{escape(name)}'. Known: "
+                f"{escape(', '.join(r['key'] for r in known))}.[/red]"
+            )
+            raise typer.Exit(1)
+        only = _entry_filter(conn, about, tag)
+        rows = store.monthly_metric(conn, name, date_from, date_to, only)
+        label = _filter_label(conn, only)
+    if not rows:
+        console.print(f"No entries record '{escape(name)}' in this range.")
+        return
+    top = max(abs(r["avg"]) for r in rows) or 1
+    table = Table(title=f"Average {escape(name)} by month{escape(label)}")
+    table.add_column("Month", style="cyan", no_wrap=True)
+    table.add_column(escape(name), justify="right")
+    table.add_column("")
+    table.add_column("Entries", justify="right")
+    for r in rows:
+        bar = "█" * round(abs(r["avg"]) / top * MOOD_BAR_WIDTH)
+        table.add_row(r["month"], f"{r['avg']:g}", f"[cyan]{bar}[/cyan]", str(r["n"]))
     console.print(table)
 
 
