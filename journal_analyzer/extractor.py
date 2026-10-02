@@ -21,7 +21,7 @@ SUMMARY_MAX_CHARS = 200
 DETAIL_MEDIUM_CHARS = 450
 DETAIL_LONG_CHARS = 800
 NOTE_SUMMARY_MAX_CHARS = 400
-# keeps the prompt inside Ollama's default window so the model isn't reloaded
+# keeps the prompt inside the 4096-token default window so the model isn't reloaded
 NOTE_INPUT_MAX_CHARS = 8_000
 
 _SYSTEM_PROMPT = """You extract structured data from a personal journal entry.

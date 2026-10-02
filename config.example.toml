@@ -29,9 +29,10 @@ precise_model = "qwen3:14b"
 fast_model_think = false
 precise_model_think = true
 # The fast model always gets this window, so Ollama loads it once at that size
-# and there's room for the notes an entry links to. 0 means Ollama's default
-# (4096), raised only for prompts that need more. 8192 costs a 3B model about
-# 1 GB of memory; 16384 fits more notes and is slower on a CPU.
+# and there's room for the notes an entry links to. 0 means 4096, raised only
+# for prompts that need more; the context length set in the Ollama app isn't
+# used. 8192 costs a 3B model about 1 GB of memory; 16384 fits more notes and
+# is slower on a CPU.
 fast_num_ctx = 8192
 precise_num_ctx = 0
 embed_model = "qwen3-embedding:0.6b"

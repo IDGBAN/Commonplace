@@ -38,9 +38,10 @@ RETRY_BACKOFF_SECONDS = 0.5
 # in a loop.
 STRUCTURED_MAX_TOKENS = 1024
 
-# Ollama's default window. A longer prompt gets cut from the middle without
-# any error, so those ask for more room. Prompts that fit leave num_ctx unset
-# because changing it makes Ollama reload the model.
+# The window a prompt gets unless it needs more. It's always sent: Ollama's
+# own default is whatever its app's context length setting says, up to 256k,
+# and at that size a 27B model's cache alone is 16 GB. A longer prompt gets
+# cut from the middle without any error, so those ask for more room.
 DEFAULT_NUM_CTX = 4096
 REPLY_TOKENS = 1024
 # low on purpose so "fits" really means fits
@@ -141,14 +142,11 @@ def prompt_tokens(messages: list[dict[str, str]]) -> int:
     )
 
 
-def num_ctx_for(messages: list[dict[str, str]], fixed: int = 0) -> int | None:
-    """None if the default window is big enough. With a fixed window, that one
-    unless the prompt needs more."""
+def num_ctx_for(messages: list[dict[str, str]], fixed: int = 0) -> int:
+    """The fixed window, or DEFAULT_NUM_CTX without one, doubled until the
+    prompt and a reply fit."""
     needed = prompt_tokens(messages) + REPLY_TOKENS
-    base = fixed or DEFAULT_NUM_CTX
-    if needed <= base:
-        return fixed or None
-    window = base
+    window = fixed or DEFAULT_NUM_CTX
     while window < needed:
         window *= 2
     return window
@@ -158,8 +156,7 @@ def _options(
     messages: list[dict[str, str]], options: dict[str, Any] | None, fixed: int = 0
 ) -> dict[str, Any]:
     opts = {"temperature": 0, **(options or {})}
-    if "num_ctx" not in opts and (window := num_ctx_for(messages, fixed)) is not None:
-        opts["num_ctx"] = window
+    opts.setdefault("num_ctx", num_ctx_for(messages, fixed))
     return opts
 
 

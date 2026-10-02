@@ -69,8 +69,8 @@ class OllamaConfig(BaseModel):
     fast_model_think: bool | None = False
     precise_model_think: bool | None = None
     # A fixed window means Ollama loads the model once at that size instead
-    # of reloading whenever a prompt needs more room. 0 is Ollama's default,
-    # raised only for prompts that need it.
+    # of reloading whenever a prompt needs more room. 0 means 4096, raised
+    # only for prompts that need it.
     fast_num_ctx: int = Field(default=8192, ge=0)
     precise_num_ctx: int = Field(default=0, ge=0)
     embed_model: str = "qwen3-embedding:0.6b"

@@ -187,12 +187,13 @@ def _long(chars: int) -> list[dict[str, str]]:
     return [{"role": "user", "content": "x" * chars}]
 
 
-def test_prompts_that_fit_the_default_window_leave_it_alone(tmp_path, monkeypatch):
-    # setting num_ctx at all, even to the default, can make Ollama reload
+def test_prompts_that_fit_still_say_which_window_they_want(tmp_path, monkeypatch):
+    # Ollama's own default can be set as high as 256k tokens, which is a lot of
+    # memory for a prompt this size
     inner = MagicMock()
     inner.chat.return_value = _reply("ok")
     _client(tmp_path, monkeypatch, inner).chat("m", _long(6_000))
-    assert "num_ctx" not in inner.chat.call_args.kwargs["options"]
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == ollama_client.DEFAULT_NUM_CTX
 
 
 def test_a_long_prompt_gets_a_window_it_fits_in(tmp_path, monkeypatch):
@@ -218,7 +219,7 @@ def test_a_structured_retry_is_sized_with_the_failed_reply_in_it(tmp_path, monke
     client = _client(tmp_path, monkeypatch, inner)
     client.chat_structured("m", _long(3_000), Extraction)
     first, retry = (c.kwargs["options"] for c in inner.chat.call_args_list)
-    assert "num_ctx" not in first
+    assert first["num_ctx"] == ollama_client.DEFAULT_NUM_CTX
     assert retry["num_ctx"] == 8192
 
 
@@ -232,7 +233,7 @@ def test_a_fixed_window_is_always_sent_and_grown_only_when_needed(tmp_path, monk
     client.chat("fake-fast", _long(30_000))
     assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 16384
     client.chat("fake-precise", _long(100))
-    assert "num_ctx" not in inner.chat.call_args.kwargs["options"]
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == ollama_client.DEFAULT_NUM_CTX
     assert client.window("fake-fast") == 8192
     assert client.window("fake-precise") == ollama_client.DEFAULT_NUM_CTX
 
