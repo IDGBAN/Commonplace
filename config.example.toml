@@ -103,5 +103,5 @@ watch_update_minutes = 30         # `journal watch` rewrites it at most this oft
 # so on. An entry that [[links]] to one counts as mentioning it, and answers
 # can use the notes themselves. A note's kind is the folder right under one of
 # these paths, so Links/People/John.md is "people".
-paths = []                        # e.g. ["Links"]
+paths = []
 summarize_over_chars = 280        # shorter notes are their own summary; 0 summarizes every note
