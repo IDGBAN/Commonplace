@@ -129,6 +129,7 @@ journal note "John Doe"               # a reference note and the entries that li
 journal tags --limit 30                  # most used tags
 journal tags --similar                   # tags that look like the same thing, as a merge table
 journal entities --type people           # most-linked notes, optionally of one kind
+journal entities --with "John Doe"       # notes linked from the same entries as John
 journal unlinked                         # notes your entries name without linking
 journal unlinked "John Doe"              # the entries that name John without a link
 journal links                            # links that find no note or day, and why
@@ -230,6 +231,8 @@ For each note, the cache keeps:
 A link to a heading or block counts as a link to the whole note or day. The part it points at is kept too: it's what the model reads for that link, `journal show` lists it after the day or note (`other days: 2024-03-04 (Work)`), and in the browser it opens the day or note with that part marked. Entries indexed before this get the parts' text in their reading after `journal index --force`, which only calls the model for entries with such links. The next `journal index` or `journal watch` reads which parts your links point at from the files without calling a model, so `journal show` and the browser list them straight away.
 
 Entities come only from links. `journal entities`, the name filter in answers and the per-person mood patterns in `journal insights` all reflect exactly what you linked. A link to a note that doesn't exist yet starts counting as soon as you create the note. Links to attachments (images, video, PDFs) are ignored, and embedded attachments are left out of the indexed text.
+
+`journal note "John Doe"` also lists the notes most often linked from the same entries as John, with how many entries they share, and so does his page in the browser under Often linked with. `journal entities --with "John Doe"` gives the whole list, and takes `--since`, `--until` and `--type` like the rest of `entities`.
 
 `journal lapsed` lists the notes you linked from at least 5 entries (`--min`) but not in the 6 months (`--quiet`) before your latest entry, with the year you linked each one most and how long it's been. The browser's Notes page shows the same list under Gone quiet. The months are counted back from your latest entry rather than today, so a few weeks off from writing doesn't make everyone look absent.
 

@@ -318,6 +318,7 @@ def test_notes_list_and_detail(browser, journal):
     mountain = browser.get(f"/api/notes/{note_id(journal, 'Bear Mountain')}")
     assert mountain["summary_source"] == "own_text"
     assert [b["title"] for b in mountain["backlinks"]] == ["John Doe"]
+    assert [(o["title"], o["n"]) for o in mountain["linked_with"]] == [("John Doe", 1)]
 
 
 def test_tags_and_tag_detail(browser):

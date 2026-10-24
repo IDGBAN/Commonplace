@@ -855,6 +855,36 @@ def lapsed_notes(
     return out
 
 
+def notes_linked_with(
+    conn: sqlite3.Connection,
+    note_id: int,
+    limit: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    kind: str | None = None,
+) -> list[sqlite3.Row]:
+    """Notes linked from the same entries as this one, and how many entries they share."""
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    if kind:
+        clauses.append("n.kind = ?")
+        params.append(kind.casefold())
+    where = "".join(f" AND {c}" for c in clauses)
+    return list(
+        conn.execute(
+            f"""SELECT n.id, n.title, n.kind, COUNT(*) AS n
+                FROM entry_entities a
+                JOIN entry_entities b ON b.entry_id = a.entry_id AND b.entity_id != a.entity_id
+                JOIN notes n ON n.id = b.entity_id
+                JOIN entries e ON e.id = a.entry_id
+                WHERE a.entity_id = ?{where}
+                GROUP BY n.id
+                ORDER BY n DESC, n.title COLLATE NOCASE
+                LIMIT ?""",
+            [note_id, *params, limit],
+        ).fetchall()
+    )
+
+
 def note_outlinks(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(

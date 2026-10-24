@@ -53,6 +53,8 @@ MOOD_BAR_WIDTH = 20
 # `journal lapsed` defaults
 LAPSED_MIN_LINKS = 5
 LAPSED_QUIET_MONTHS = 6
+# notes `journal note` lists as often linked with it; `entities --with` lists all
+LINKED_WITH_SHOWN = 8
 
 
 class ExportFormat(StrEnum):
@@ -875,6 +877,9 @@ def note(
                 "learned_names": serialize.learned_names(conn, [row["id"]]).get(row["id"], []),
                 "properties": parsed.properties,
                 "by_year": [dict(r) for r in store.mentions_by_year(conn, row["id"])],
+                "linked_with": [
+                    dict(r) for r in store.notes_linked_with(conn, row["id"], LINKED_WITH_SHOWN)
+                ],
                 "outlinks": [serialize.note_ref(r) for r in store.note_outlinks(conn, row["id"])],
                 "backlinks": [serialize.note_ref(r) for r in store.note_backlinks(conn, row["id"])],
                 "digest": serialize.note_digest_json(store.get_note_digest(conn, row["link_key"])),
@@ -913,6 +918,11 @@ def _print_note(
     else:
         console.print(
             f"  Linked from {mentions.count} entries, {mentions.first} .. {mentions.last}"
+        )
+    together = store.notes_linked_with(conn, row["id"], LINKED_WITH_SHOWN)
+    if together:
+        console.print(
+            "  often linked with: " + escape(", ".join(f"{r['title']} ({r['n']})" for r in together))
         )
     outlinks = store.note_outlinks(conn, row["id"])
     if outlinks:
@@ -1170,12 +1180,19 @@ def entities(
     ] = None,
     since: SinceOpt = None,
     until: UntilOpt = None,
+    with_: Annotated[
+        str | None,
+        typer.Option("--with", help="Only notes linked from the same entries as this one (title or alias)."),
+    ] = None,
     as_json: JsonOpt = False,
 ) -> None:
     """List the notes your entries link to most."""
     OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (_, conn):
+        if with_ is not None:
+            _print_linked_with(conn, _one_note(conn, with_), limit, date_from, date_to, type_)
+            return
         rows = store.top_entities(conn, date_from, date_to, limit=limit, entity_type=type_)
         kinds = ", ".join(r["kind"] for r in store.notes_by_kind(conn))
     if as_json:
@@ -1196,6 +1213,30 @@ def entities(
     table.add_column("Entries", justify="right")
     for r in rows:
         table.add_row(escape(r["name"]), escape(r["type"]), str(r["n"]))
+    console.print(table)
+
+
+def _print_linked_with(
+    conn: sqlite3.Connection,
+    note: sqlite3.Row,
+    limit: int,
+    date_from: date | None,
+    date_to: date | None,
+    kind: str | None,
+) -> None:
+    rows = store.notes_linked_with(conn, note["id"], limit, date_from, date_to, kind)
+    if OUT.as_json:
+        _emit({"with": serialize.note_ref(note), "notes": [dict(r) for r in rows]})
+        return
+    if not rows:
+        console.print(f"No other note is linked from the entries that link {escape(note['title'])}.")
+        return
+    table = Table(title=f"Linked from the same entries as {escape(note['title'])}")
+    table.add_column("Note", style="cyan")
+    table.add_column("Kind")
+    table.add_column("Shared entries", justify="right")
+    for r in rows:
+        table.add_row(escape(r["title"]), escape(r["kind"]), str(r["n"]))
     console.print(table)
 
 

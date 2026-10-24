@@ -885,6 +885,11 @@ async function noteView([id], params) {
         rawText(n.raw_text, n.focus, "This note has no text of its own.")),
       margin),
     overYears,
+    n.linked_with.length ? section("Often linked with", h("div", { class: "chips" }, n.linked_with.map((o) =>
+      h("a", { class: "chip", href: href.note(o.id), title: `${kindLabel(o.kind)}, in ${plural(o.n, "entry", "entries")} with ${n.title}` },
+        o.title, h("span", { class: "n" }, fmtNum(o.n))))), {
+      note: "number of shared entries",
+    }) : null,
     (n.outlinks.length || n.backlinks.length) ? section("Connected notes", h("div", { class: "two-col" },
       h("div", {}, h("h3", {}, "This note links to"), h("div", { class: "chips" }, n.outlinks.length ? n.outlinks.map((o) => noteChip(o)) : empty("Nothing."))),
       h("div", {}, h("h3", {}, "Notes that link here"), h("div", { class: "chips" }, n.backlinks.length ? n.backlinks.map((o) => noteChip(o)) : empty("Nothing."))))) : null,

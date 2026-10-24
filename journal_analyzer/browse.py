@@ -42,6 +42,7 @@ UNRESOLVED_LINKS_LIMIT = 60
 LAPSED_MIN_LINKS = 5
 LAPSED_QUIET_MONTHS = 6
 COOCCURRING_LIMIT = 12
+LINKED_WITH_LIMIT = 12
 PROFILE_FACTS_LIMIT = 300
 _MAX_ROWID = 2**63 - 1
 _NO_ENTRY = "There is no indexed entry with that id."
@@ -356,6 +357,7 @@ def note(req: Request, note_id: str) -> Json:
         "mood_scale": req.config.indexing.mood_scale_max,
         "digest": serialize.note_digest_json(store.get_note_digest(conn, row["link_key"])),
         "digest_min_mentions": req.config.rollups.note_min_mentions,
+        "linked_with": [dict(r) for r in store.notes_linked_with(conn, row["id"], LINKED_WITH_LIMIT)],
         "outlinks": [serialize.note_ref(r) for r in store.note_outlinks(conn, row["id"])],
         "backlinks": [serialize.note_ref(r) for r in store.note_backlinks(conn, row["id"])],
         "entries": linking,
