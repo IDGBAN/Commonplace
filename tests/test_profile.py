@@ -1,6 +1,8 @@
 import json
 from datetime import date
+from unittest.mock import MagicMock
 
+import ollama
 import pytest
 from conftest import add_entry, copy_fixtures, invoke_cli, make_config
 from typer.testing import CliRunner
@@ -18,6 +20,7 @@ from journal_analyzer import (
 )
 from journal_analyzer import prompts as writing_prompts
 from journal_analyzer.models import Extraction, OllamaUnavailableError, QueryPlan
+from journal_analyzer.ollama_client import OllamaClient
 from journal_analyzer.profile import ProfileDigest, ScannedFact, ScannedFacts
 
 
@@ -94,6 +97,7 @@ def test_update_folds_new_facts_into_the_profile(conn, config, fake_client):
     assert profile.update(config, conn, fake_client)
     [(model, messages)] = seen
     assert model == config.ollama.precise_model
+    assert f"at most {config.profile.max_words // 108} short sentences" in messages[0]["content"]
     assert "Profile so far:\n(none yet)" in messages[-1]["content"]
     assert "- 2024-01-01 [preferences] I drink tea." in messages[-1]["content"]
     found = profile.current(conn)
@@ -120,6 +124,96 @@ def test_many_facts_are_folded_in_order_a_chunk_at_a_time(conn, config, fake_cli
     profile.update(config, conn, fake_client)
     assert len(sent) == 3
     assert "Profile so far:\nafter 1" in sent[1] and "Fact 3." in sent[1]
+
+
+def test_a_profile_over_its_word_limit_still_fits_in_the_reply(conn, config, fake_client, monkeypatch):
+    # models often write past max_words, and the whole profile comes back in
+    # one JSON reply, so a cap sized for short replies cut it off mid-string
+    _entries(conn)
+    fake_client.structured["ScannedFacts"] = _facts_for(("Tea", "preferences", "I drink tea."))
+    profile.scan(config, conn, fake_client, profile.pending_entries(conn))
+    config.ollama.precise_model_think = False
+    long_profile = " ".join(["walked"] * 700)
+
+    def chat(**kwargs):
+        reply = ProfileDigest(names="People call me Al.", profile=long_profile).model_dump_json()
+        # a reply stops once it has used up num_predict, about 4 characters a token
+        return {"message": {"content": reply[: kwargs["options"]["num_predict"] * 4]}}
+
+    inner = MagicMock()
+    inner.chat.side_effect = chat
+    monkeypatch.setattr(ollama, "Client", lambda **kwargs: inner)
+    assert profile.update(config, conn, OllamaClient(config))
+    assert profile.current(conn).text == long_profile
+
+
+def _words(n: int, word: str = "walked") -> str:
+    return " ".join([word] * n)
+
+
+def _tea_fact(conn, config, fake_client):
+    _entries(conn)
+    fake_client.structured["ScannedFacts"] = _facts_for(("Tea", "preferences", "I drink tea."))
+    profile.scan(config, conn, fake_client, profile.pending_entries(conn))
+
+
+def test_a_profile_that_runs_long_is_shortened_after_the_fold(conn, config, fake_client):
+    _tea_fact(conn, config, fake_client)
+    config.profile.max_words = 100
+    sent = []
+    fake_client.structured["ProfileDigest"] = ProfileDigest(names="Al.", profile=_words(200))
+
+    def shorten(model, messages):
+        sent.append((model, messages))
+        return profile.ShortProfile(profile=_words(90, "kept"))
+
+    fake_client.structured["ShortProfile"] = shorten
+    assert profile.update(config, conn, fake_client)
+    [(model, messages)] = sent
+    assert model == config.ollama.precise_model
+    # models don't count words, but they do keep to a number of sentences
+    assert "at most 2 short sentences" in messages[0]["content"] and messages[-1]["content"] == _words(200)
+    found = profile.current(conn)
+    assert found.text == _words(90, "kept") and found.names == "Al."
+
+
+def test_a_long_stored_profile_is_shortened_before_new_facts_go_into_it(conn, config, fake_client):
+    _tea_fact(conn, config, fake_client)
+    config.profile.max_words = 100
+    db.set_meta(conn, "profile_text", _words(300))
+    folds = []
+    fake_client.structured["ShortProfile"] = profile.ShortProfile(profile=_words(90, "kept"))
+    fake_client.structured["ProfileDigest"] = lambda model, messages: folds.append(messages[-1]["content"]) or ProfileDigest(profile=_words(95, "kept"))
+    assert profile.update(config, conn, fake_client)
+    assert folds[0].startswith(f"Profile so far:\n{_words(90, 'kept')}\n")
+    assert [name for _, name in fake_client.structured_calls][-2:] == ["ShortProfile", "ProfileDigest"]
+
+
+def test_a_long_profile_is_shortened_with_nothing_new_but_only_tried_once(conn, config, fake_client):
+    config.profile.max_words = 100
+    db.set_meta(conn, "profile_text", _words(300))
+    db.set_meta(conn, "profile_note_hash", profile.text_hash(""))
+    # still over the limit, but shorter, so it's kept and not tried again
+    fake_client.structured["ShortProfile"] = profile.ShortProfile(profile=_words(200, "kept"))
+    assert profile.needs_update(conn, config)
+    assert profile.update(config, conn, fake_client)
+    assert profile.current(conn).text == _words(200, "kept")
+    assert not profile.needs_update(conn, config)
+    assert not profile.update(config, conn, fake_client)
+    assert [name for _, name in fake_client.structured_calls] == ["ShortProfile"]
+
+
+def test_a_shortening_that_comes_back_longer_is_ignored(conn, config, fake_client):
+    config.profile.max_words = 100
+    db.set_meta(conn, "profile_text", _words(300))
+    db.set_meta(conn, "profile_note_hash", profile.text_hash(""))
+    fake_client.structured["ShortProfile"] = profile.ShortProfile(profile=_words(400))
+    profile.update(config, conn, fake_client)
+    assert profile.current(conn).text == _words(300)
+    assert not profile.needs_update(conn, config)
+    # a different limit asks differently, so that's worth another try
+    config.profile.max_words = 60
+    assert profile.needs_update(conn, config)
 
 
 def test_a_fold_that_fails_partway_keeps_what_was_already_folded(conn, config, fake_client, monkeypatch):
@@ -171,6 +265,8 @@ def test_context_and_names_are_empty_without_a_profile_or_when_off(conn, config)
     db.set_meta(conn, "profile_text", "I drink tea.")
     db.set_meta(conn, "profile_names", "People call me Al.")
     assert "I drink tea." in profile.context(conn, config)
+    # the names line goes too, since nicknames often aren't in the profile text
+    assert "Names: People call me Al.\n" in profile.context(conn, config)
     assert profile.names(conn, config) == "\n\nNames the writer uses: People call me Al."
     config.profile.enabled = False
     assert profile.context(conn, config) == "" and profile.names(conn, config) == ""
@@ -195,7 +291,7 @@ def test_answers_get_the_profile_and_the_router_only_the_names(conn, config, fak
     fake_client.chat_response = chat
     query.answer("Where did I walk?", config, conn, fake_client, today=date(2024, 6, 1))
     assert "NAMES-LINE" in routers[0] and "PROFILE-TEXT" not in routers[0]
-    assert all("PROFILE-TEXT" in s for s in systems) and len(systems) == 2
+    assert all("PROFILE-TEXT" in s and "NAMES-LINE" in s for s in systems) and len(systems) == 2
     rewrite = []
     fake_client.chat_response = lambda model, messages: rewrite.append(messages[0]["content"]) or "q"
     query.contextualize_question("and then?", [("q", "a")], config, fake_client, profile.names(conn, config))

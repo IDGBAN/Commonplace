@@ -223,6 +223,19 @@ def test_a_structured_retry_is_sized_with_the_failed_reply_in_it(tmp_path, monke
     assert retry["num_ctx"] == 8192
 
 
+def test_a_bigger_reply_cap_gets_a_window_with_room_for_it(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.return_value = _reply('{"summary": "ok"}')
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat_structured("fake-fast", _long(9_000), Extraction)
+    options = inner.chat.call_args.kwargs["options"]
+    assert (options["num_predict"], options["num_ctx"]) == (ollama_client.STRUCTURED_MAX_TOKENS, 8192)
+    # a new prompt, since the same one would come back from the memo
+    client.chat_structured("fake-fast", _long(9_003), Extraction, reply_tokens=6000)
+    options = inner.chat.call_args.kwargs["options"]
+    assert (options["num_predict"], options["num_ctx"]) == (6000, 16384)
+
+
 def test_a_fixed_window_is_always_sent_and_grown_only_when_needed(tmp_path, monkeypatch):
     # one size for every call, so Ollama loads the model once
     inner = MagicMock()

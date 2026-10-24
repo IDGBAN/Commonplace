@@ -40,6 +40,18 @@ SCAN_ENTRY_CHARS = 4000
 FACT_CHARS = 200
 # facts per rewrite of the profile; a first build goes through them in order
 FOLD_FACTS_PER_CALL = 120
+# The whole profile comes back in one reply. A word with its headings is
+# about 1.5 tokens and models often write past max_words, so this leaves room
+# for twice the limit; the rest covers the names and the JSON around them.
+FOLD_TOKENS_PER_WORD = 3
+FOLD_EXTRA_REPLY_TOKENS = 300
+# Models don't keep to a word count but do keep to a number of sentences, so
+# max_words becomes sentences per section: the nine headings the fold asks
+# for, at about this many words a sentence.
+PROFILE_SECTIONS = 9
+WORDS_PER_SENTENCE = 12
+# a profile this far over max_words anyway gets one pass that only shortens it
+SHORTEN_OVER = 1.25
 ME_NOTE_CHARS = 6000
 
 Category = Literal[
@@ -51,6 +63,7 @@ _META_TEXT = "profile_text"
 _META_NAMES = "profile_names"
 _META_UPDATED = "profile_updated_at"
 _META_NOTE_HASH = "profile_note_hash"
+_META_SHORTENED = "profile_shortened_hash"
 
 _SCAN_PROMPT = """You read entries from one person's journal and pull out lasting \
 facts about that person: names or nicknames they go by or use for people \
@@ -72,9 +85,17 @@ disagree, the later one wins; mention a change only when it says something \
 note is right whenever it disagrees with the facts. Use short sections with \
 plain headings: Names, Personality, Likes and dislikes, Hobbies and \
 interests, Routines, Work and studies, People, Values and goals, Health, \
-leaving out any with nothing in them. Keep it under {max_words} words. \
+leaving out any with nothing in them. Give each section at most {sentences} \
+short sentences, merging what repeats, so the whole profile stays short. \
 Separately, give one or two sentences of just the names: what the writer is \
 called, and nicknames they use for people, so a reader can tell who's meant."""
+
+_SHORTEN_PROMPT = """You shorten a profile of the person who writes a journal, \
+written in their own first person (I, me, my). It has grown too long. Keep \
+its section headings and give each section at most {sentences} short \
+sentences. Keep every name and nickname and the facts that say the most about \
+the person; merge what repeats and drop what's minor. Don't add anything that \
+isn't already there."""
 
 
 class ScannedFact(BaseModel):
@@ -89,6 +110,10 @@ class ScannedFacts(BaseModel):
 
 class ProfileDigest(BaseModel):
     names: str = ""
+    profile: str = ""
+
+
+class ShortProfile(BaseModel):
     profile: str = ""
 
 
@@ -119,10 +144,12 @@ def context(conn: sqlite3.Connection, config: Config) -> str:
     found = current(conn) if config.profile.enabled else None
     if found is None:
         return ""
+    # nicknames often live only in the names line, and shortening can drop them
+    names = f"Names: {found.names}\n\n" if found.names else ""
     return (
         "\n\nAbout the person who writes this journal, from what they've written "
         "(background to read their words by; don't repeat it unless it's asked "
-        f"about):\n{found.text}"
+        f"about):\n{names}{found.text}"
     )
 
 
@@ -229,13 +256,68 @@ def scan(
 
 
 def needs_update(conn: sqlite3.Connection, config: Config) -> bool:
-    """New facts to fold in, or the note about yourself changed."""
+    """New facts to fold in, the note about yourself changed, or the profile
+    ran long."""
     if not config.profile.enabled:
         return False
     if store.unfolded_profile_facts(conn, limit=1):
         return True
+    found = current(conn)
+    if found is not None and _too_long(conn, config, found.text):
+        return True
     me = _me_note(config)
-    return db.get_meta(conn, _META_NOTE_HASH) != text_hash(me) and bool(me or current(conn))
+    return db.get_meta(conn, _META_NOTE_HASH) != text_hash(me) and bool(me or found)
+
+
+def _reply_tokens(config: Config) -> int:
+    return config.profile.max_words * FOLD_TOKENS_PER_WORD + FOLD_EXTRA_REPLY_TOKENS
+
+
+def _sentences(config: Config) -> int:
+    return max(2, config.profile.max_words // (PROFILE_SECTIONS * WORDS_PER_SENTENCE))
+
+
+def _shorten_prompt(config: Config) -> str:
+    return _SHORTEN_PROMPT.format(sentences=_sentences(config))
+
+
+def _tried(config: Config, text: str) -> str:
+    # with the limit and prompt in it, a change to either gets its own try
+    return text_hash(f"{config.profile.max_words}\n{_shorten_prompt(config)}\n\n{text}")
+
+
+def _too_long(conn: sqlite3.Connection, config: Config, text: str) -> bool:
+    """Over the limit, and not already given its one try at shortening."""
+    return (
+        len(text.split()) > config.profile.max_words * SHORTEN_OVER
+        and db.get_meta(conn, _META_SHORTENED) != _tried(config, text)
+    )
+
+
+def _shorten(config: Config, conn: sqlite3.Connection, client: OllamaClient, text: str) -> str:
+    if not _too_long(conn, config, text):
+        return text
+    reply = client.chat_structured(
+        model=config.ollama.precise_model,
+        messages=[
+            {"role": "system", "content": _shorten_prompt(config)},
+            {"role": "user", "content": text},
+        ],
+        schema=ShortProfile,
+        reply_tokens=_reply_tokens(config),
+    )
+    shorter = reply.profile.strip()
+    kept = shorter if shorter and len(shorter.split()) < len(text.split()) else text
+    # one try per text, so a model that won't shorten it isn't asked every run
+    db.set_meta(conn, _META_SHORTENED, _tried(config, kept))
+    return kept
+
+
+def _save(conn: sqlite3.Connection, text: str, names: str, note_hash: str) -> None:
+    db.set_meta(conn, _META_TEXT, text)
+    db.set_meta(conn, _META_NAMES, names)
+    db.set_meta(conn, _META_UPDATED, _now())
+    db.set_meta(conn, _META_NOTE_HASH, note_hash)
 
 
 def update(
@@ -253,13 +335,21 @@ def update(
         store.unfold_profile_facts(conn)
     note_changed = db.get_meta(conn, _META_NOTE_HASH) != note_hash
     facts = store.unfolded_profile_facts(conn)
-    if not facts and not (note_changed and (me or current(conn))):
-        return False
     profile = None if rebuild else current(conn)
     so_far = profile.text if profile else ""
     names_so_far = profile.names if profile else ""
+    if not facts and not (note_changed and (me or current(conn))):
+        if profile is None:
+            return False
+        shortened = _shorten(config, conn, client, so_far)
+        if shortened == so_far:
+            return False
+        _save(conn, shortened, names_so_far, note_hash)
+        return True
     chunks = [facts[i:i + FOLD_FACTS_PER_CALL] for i in range(0, len(facts), FOLD_FACTS_PER_CALL)] or [[]]
     for chunk in chunks:
+        # a base that ran long would leave the reply no room to grow
+        so_far = _shorten(config, conn, client, so_far)
         lines = [f"- {f['entry_date']} [{f['category']}] {f['fact']}" for f in chunk]
         parts = [
             f"Profile so far:\n{so_far or '(none yet)'}",
@@ -271,20 +361,21 @@ def update(
         digest = client.chat_structured(
             model=config.ollama.precise_model,
             messages=[
-                {"role": "system", "content": _FOLD_PROMPT.format(max_words=config.profile.max_words)},
+                {"role": "system", "content": _FOLD_PROMPT.format(sentences=_sentences(config))},
                 {"role": "user", "content": "\n\n".join(parts)},
             ],
             schema=ProfileDigest,
+            reply_tokens=_reply_tokens(config),
         )
         so_far = digest.profile.strip() or so_far
         names_so_far = digest.names.strip() or names_so_far
         # saved with each chunk, so a later chunk timing out doesn't lose
         # facts already marked as folded
-        db.set_meta(conn, _META_TEXT, so_far)
-        db.set_meta(conn, _META_NAMES, names_so_far)
-        db.set_meta(conn, _META_UPDATED, _now())
-        db.set_meta(conn, _META_NOTE_HASH, note_hash)
+        _save(conn, so_far, names_so_far, note_hash)
         store.mark_profile_facts_folded(conn, [f["id"] for f in chunk])
+    shortened = _shorten(config, conn, client, so_far)
+    if shortened != so_far:
+        _save(conn, shortened, names_so_far, note_hash)
     return True
 
 

@@ -142,10 +142,12 @@ def prompt_tokens(messages: list[dict[str, str]]) -> int:
     )
 
 
-def num_ctx_for(messages: list[dict[str, str]], fixed: int = 0) -> int:
+def num_ctx_for(
+    messages: list[dict[str, str]], fixed: int = 0, reply_tokens: int = REPLY_TOKENS
+) -> int:
     """The fixed window, or DEFAULT_NUM_CTX without one, doubled until the
     prompt and a reply fit."""
-    needed = prompt_tokens(messages) + REPLY_TOKENS
+    needed = prompt_tokens(messages) + reply_tokens
     window = fixed or DEFAULT_NUM_CTX
     while window < needed:
         window *= 2
@@ -153,10 +155,13 @@ def num_ctx_for(messages: list[dict[str, str]], fixed: int = 0) -> int:
 
 
 def _options(
-    messages: list[dict[str, str]], options: dict[str, Any] | None, fixed: int = 0
+    messages: list[dict[str, str]],
+    options: dict[str, Any] | None,
+    fixed: int = 0,
+    reply_tokens: int = REPLY_TOKENS,
 ) -> dict[str, Any]:
     opts = {"temperature": 0, **(options or {})}
-    opts.setdefault("num_ctx", num_ctx_for(messages, fixed))
+    opts.setdefault("num_ctx", num_ctx_for(messages, fixed, reply_tokens))
     return opts
 
 
@@ -354,9 +359,12 @@ class OllamaClient:
         schema: type[T],
         options: dict[str, Any] | None = None,
         memo_key: object = None,
+        reply_tokens: int | None = None,
     ) -> T:
         """`memo_key` stands in for the messages when the memo is checked, for
-        callers whose prompt carries something that shouldn't count."""
+        callers whose prompt carries something that shouldn't count.
+        `reply_tokens` replaces STRUCTURED_MAX_TOKENS for a schema whose
+        answer runs long."""
         think = self._think(model)
         json_schema = _require_every_field(schema)
         key = None
@@ -372,7 +380,10 @@ class OllamaClient:
                 if kept is not None:
                     with contextlib.suppress(ValidationError):
                         return schema.model_validate_json(kept)
-        result = self._chat_structured(model, messages, schema, options, think, json_schema)
+        result = self._chat_structured(
+            model, messages, schema, options, think, json_schema,
+            reply_tokens or STRUCTURED_MAX_TOKENS,
+        )
         if key is not None and self._memo is not None:
             self._memo.put_text(key, "structured", model, result.model_dump_json())
         return result
@@ -385,14 +396,17 @@ class OllamaClient:
         options: dict[str, Any] | None,
         think: bool | None,
         json_schema: dict[str, Any],
+        reply_tokens: int,
     ) -> T:
         convo = list(messages)
         last_error: Exception | None = None
         for _ in range(2):
             # per attempt, since the retry also carries the bad reply
-            opts = _options(convo, options, self._fixed_ctx(model))
+            opts = _options(
+                convo, options, self._fixed_ctx(model), max(REPLY_TOKENS, reply_tokens)
+            )
             if think is False:
-                opts.setdefault("num_predict", STRUCTURED_MAX_TOKENS)
+                opts.setdefault("num_predict", reply_tokens)
             response = self._call(
                 model,
                 partial(
