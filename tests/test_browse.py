@@ -229,6 +229,15 @@ def test_links_to_part_of_a_day_or_note_say_which_part(browser, journal):
     assert note["focus"]["lines"] == [2, 4]
 
 
+def test_notes_and_the_days_they_link_show_on_both_pages(browser, journal):
+    add_note(journal, "Lisbon Trip", kind="events", links=["2024-01-15"])
+    trip = browser.get(f"/api/notes/{note_id(journal, 'Lisbon Trip')}")
+    assert [d["date"] for d in trip["linked_days"]] == ["2024-01-15"]
+    assert trip["day_links_count"] is False
+    day = browser.get(f"/api/entries/{entry_id(journal, '2024-01-15')}")
+    assert [n["title"] for n in day["linked_from_notes"]] == ["Lisbon Trip"]
+
+
 def test_notes_page_says_why_links_find_nothing(browser, journal):
     add_entry(journal, date(2024, 1, 21), links=["Jon Doe", "2024-01-30"], path="/vault/21.md")
     data = browser.get("/api/notes")

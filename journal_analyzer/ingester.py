@@ -9,6 +9,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path, PurePath
 from threading import Lock
 from typing import Literal
@@ -162,6 +163,7 @@ def _index_entries(
             store.save_entry_vector(conn, entry_id, vector)
         store.mark_rollups_stale(conn, entry.entry_date)
         store.mark_note_digests_stale(conn, entry.links)
+    store.mark_note_digests_stale(conn, store.note_keys_linking_file_days(conn, key))
     return True
 
 
@@ -389,7 +391,7 @@ def run_backfill(
             if result == "indexed":
                 indexed.append(str(path))
             progress.advance(task)
-    nicknames.refresh(config, conn)
+    _refresh_links(config, conn)
     dropped = f", {counts['dropped']} dropped" if counts["dropped"] else ""
     private = f", {counts['private']} private" if counts["private"] else ""
     console.print(
@@ -511,6 +513,25 @@ def _refresh_readings(config: Config, conn: sqlite3.Connection) -> None:
             f"Applied the frontmatter and tag settings to {changed} "
             f"{'entry' if changed == 1 else 'entries'}."
         )
+
+
+def _refresh_links(config: Config, conn: sqlite3.Connection) -> None:
+    """What other files decide about links: learned names, and days notes link to."""
+    nicknames.refresh(config, conn)
+    _refresh_day_mentions(config, conn)
+
+
+def _refresh_day_mentions(config: Config, conn: sqlite3.Connection) -> None:
+    wanted = store.note_day_links(conn) if config.notes.day_links_count else set()
+    had = store.note_day_mentions(conn)
+    if wanted == had:
+        return
+    store.replace_note_day_mentions(conn, wanted)
+    changed = wanted ^ had
+    for row in store.entries_by_ids(conn, sorted({entry_id for entry_id, _ in changed})):
+        store.mark_rollups_stale(conn, date.fromisoformat(row["entry_date"]))
+    notes = store.notes_by_ids(conn, sorted({note_id for _, note_id in changed}))
+    store.mark_note_digests_stale(conn, [r["link_key"] for r in notes])
 
 
 def _refresh_link_details(config: Config, conn: sqlite3.Connection) -> None:
@@ -636,7 +657,7 @@ def run_watch(
     _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
     _refresh_link_details(config, conn)
-    nicknames.refresh(config, conn)
+    _refresh_links(config, conn)
     handler = _DebounceHandler(config)
     observer = Observer()
     observer.schedule(handler, str(config.vault.path), recursive=True)
@@ -695,7 +716,7 @@ def _apply_due(
                 return exc
     finally:
         if due:
-            nicknames.refresh(config, conn)
+            _refresh_links(config, conn)
     return None
 
 

@@ -240,6 +240,8 @@ The way you write links counts as well. If you write `[[John Doe|Johnny]]` in tw
 
 Because only links count, an entry that says "lunch with John" without `[[John Doe]]` is missing from John's numbers. `journal unlinked` lists the notes this happens to and how often, and `journal unlinked "John Doe"` shows each of those entries with the sentence that names him, so you can add the links in Obsidian. It matches titles and aliases as whole words, ignoring case, and skips a name inside another note's longer name. The browser lists them on each note's page too.
 
+Links go the other way too: an event or trip note can link the days it covers, like `[[2024-03-05]]` in `Links/Events/Lisbon.md`. `journal note Lisbon` lists those days, the note's page in the browser shows them with their summaries, each of those entries shows the note under Notes that link this day (and `journal show` as `linked from notes`), and the note's relationship digest reads them. They don't count as mentions unless you set `[notes] day_links_count = true`. With it on, each day a note links counts as mentioning it, the same as if the entry had linked the note, so it shows up in `journal entities`, `mood --about`, `insights` and the rest. Changing the setting takes effect on the next `journal index` with no model calls, and marks the digests it affects as out of date.
+
 A link that finds no note or day counts for nothing, and `journal links` lists them with the likeliest reason and what to do:
 
 - a Markdown file by that name exists but isn't read as a note: it's outside your note folders (add it to `paths`, or set `other_files`), in a hidden folder like `.trash`, or left out by `ignore_patterns`

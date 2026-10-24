@@ -109,6 +109,10 @@ paths = []
 # doesn't pick, outside hidden folders like .trash. Its kind is its top folder,
 # or "note" at the vault root. Only matters with a narrower daily_note_glob.
 other_files = false
+# A note that links a day, like an event note linking [[2024-03-05]], is
+# always shown on both pages. With this on it also counts as mentioned by
+# that day's entries, which changes the counts and moods for those notes.
+day_links_count = false
 summarize_over_chars = 280        # shorter notes are their own summary; 0 summarizes every note
 # Link text you use for one note, like Johnny in [[John Doe|Johnny]], counts as
 # a name for it once it shows up in this many entries. 0 turns it off.

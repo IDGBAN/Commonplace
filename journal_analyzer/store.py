@@ -959,7 +959,23 @@ def link_targets_for_file(conn: sqlite3.Connection, path: str) -> list[str]:
     )
     keys = [r["target"] for r in rows]
     note = conn.execute("SELECT link_key FROM notes WHERE file_path = ?", (path,)).fetchone()
-    return keys + ([note["link_key"]] if note else [])
+    return keys + ([note["link_key"]] if note else []) + note_keys_linking_file_days(conn, path)
+
+
+def note_keys_linking_file_days(conn: sqlite3.Connection, path: str) -> list[str]:
+    """The notes that link the days of this file's entries, whose digests read those days."""
+    by_file = (
+        " OR nl.target IN (SELECT key FROM entry_file_keys WHERE path = :path)"
+        if _has_table(conn, "entry_file_keys") else ""
+    )
+    return [
+        r["link_key"]
+        for r in conn.execute(
+            f"""SELECT DISTINCT n.link_key FROM notes n JOIN note_links nl ON nl.note_id = n.id
+                WHERE nl.target IN (SELECT entry_date FROM entries WHERE file_path = :path){by_file}""",
+            {"path": path},
+        )
+    ]
 
 
 def link_targets_for_entries(conn: sqlite3.Connection, entry_ids: list[int]) -> list[str]:
@@ -1946,6 +1962,57 @@ def entries_linking_to_day(conn: sqlite3.Connection, entry: sqlite3.Row) -> list
             params,
         ).fetchall()
     )
+
+
+def days_linked_from_note(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:
+    """Entries on the days a note links to, like an event note's [[2024-03-05]]."""
+    select = "SELECT d.* FROM note_links nl"
+    sql = f"{select} JOIN entries d ON d.entry_date = nl.target WHERE nl.note_id = :id"
+    if _has_table(conn, "entry_file_keys"):
+        sql += f""" UNION {select}
+                    JOIN entry_file_keys fk ON fk.key = nl.target
+                    JOIN entries d ON d.file_path = fk.path
+                    WHERE nl.note_id = :id"""
+    return list(conn.execute(sql + " ORDER BY entry_date, id", {"id": note_id}).fetchall())
+
+
+def notes_linking_day(conn: sqlite3.Connection, entry: sqlite3.Row) -> list[sqlite3.Row]:
+    """Notes that link this entry's day, by its date or its file's name."""
+    by_file = (
+        " OR nl.target IN (SELECT key FROM entry_file_keys WHERE path = :path)"
+        if _has_table(conn, "entry_file_keys") else ""
+    )
+    return list(
+        conn.execute(
+            f"""SELECT DISTINCT n.* FROM notes n JOIN note_links nl ON nl.note_id = n.id
+                WHERE nl.target = :day{by_file}
+                ORDER BY n.title COLLATE NOCASE""",
+            {"day": entry["entry_date"], "path": entry["file_path"]},
+        ).fetchall()
+    )
+
+
+def note_day_links(conn: sqlite3.Connection) -> set[tuple[int, int]]:
+    """(entry_id, note_id) for each day some note links to."""
+    sql = """SELECT d.id, nl.note_id FROM note_links nl
+             JOIN entries d ON d.entry_date = nl.target"""
+    if _has_table(conn, "entry_file_keys"):
+        sql += """ UNION SELECT d.id, nl.note_id FROM note_links nl
+                   JOIN entry_file_keys fk ON fk.key = nl.target
+                   JOIN entries d ON d.file_path = fk.path"""
+    return {(r[0], r[1]) for r in conn.execute(sql)}
+
+
+def note_day_mentions(conn: sqlite3.Connection) -> set[tuple[int, int]]:
+    return {(r[0], r[1]) for r in conn.execute("SELECT entry_id, note_id FROM note_day_mentions")}
+
+
+def replace_note_day_mentions(conn: sqlite3.Connection, pairs: set[tuple[int, int]]) -> None:
+    with conn:
+        conn.execute("DELETE FROM note_day_mentions")
+        conn.executemany(
+            "INSERT INTO note_day_mentions(entry_id, note_id) VALUES (?, ?)", sorted(pairs)
+        )
 
 
 def entries_for_day_link(conn: sqlite3.Connection, target: str) -> list[sqlite3.Row]:

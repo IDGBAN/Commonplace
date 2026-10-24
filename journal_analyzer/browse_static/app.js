@@ -682,6 +682,8 @@ async function entryView([id], params) {
     (e.links_to_days.length || e.linked_from_days.length) && gloss("Other days",
       e.links_to_days.length ? [h("div", { class: "quiet" }, "This entry links to"), dayChips(e.links_to_days, true)] : null,
       e.linked_from_days.length ? [h("div", { class: "quiet" }, "Linked from"), dayChips(e.linked_from_days, false)] : null),
+    e.linked_from_notes.length > 0 && gloss("Notes that link this day",
+      h("div", { class: "chips" }, e.linked_from_notes.map((n) => h("a", { class: "chip pencil", href: href.note(n.id), title: kindLabel(n.kind) }, n.title)))),
     gloss("Read by",
       h("div", {}, e.model_used || "unknown model"),
       h("div", { class: "quiet" }, stamp(e.extracted_at)),
@@ -893,6 +895,12 @@ async function noteView([id], params) {
     (n.outlinks.length || n.backlinks.length) ? section("Connected notes", h("div", { class: "two-col" },
       h("div", {}, h("h3", {}, "This note links to"), h("div", { class: "chips" }, n.outlinks.length ? n.outlinks.map((o) => noteChip(o)) : empty("Nothing."))),
       h("div", {}, h("h3", {}, "Notes that link here"), h("div", { class: "chips" }, n.backlinks.length ? n.backlinks.map((o) => noteChip(o)) : empty("Nothing."))))) : null,
+    n.linked_days.length ? section("Days this note links to", entryLines(n.linked_days, scale), {
+      note: plural(n.linked_days.length, "day"),
+      intro: n.day_links_count
+        ? "They count as days that mention this note, since day_links_count is on."
+        : ["Its relationship digest reads them. They don't count as mentions unless you turn on ", h("code", {}, "day_links_count"), " under [notes]."],
+    }) : null,
     section("Entries that link here", entryLines(n.entries, scale, { emptyText: "No indexed entry links to this note." }), {
       note: n.entries_capped ? `newest ${n.entries.length} shown` : n.entries.length ? h("a", { href: href.entries({ note: n.id }) }, "filter these") : null,
     }),

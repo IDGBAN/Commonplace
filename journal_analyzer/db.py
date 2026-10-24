@@ -147,6 +147,15 @@ CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target);
 CREATE VIEW IF NOT EXISTS entities AS
   SELECT id, title AS name, kind AS type FROM notes;
 
+-- With [notes] day_links_count, a note that links a day, like an event note
+-- linking [[2024-03-05]], counts as mentioned by that day's entries. Filled
+-- by the indexer, and empty when the setting is off.
+CREATE TABLE IF NOT EXISTS note_day_mentions (
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  note_id  INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  PRIMARY KEY (entry_id, note_id)
+);
+
 -- What a link points at: a note's file name, or failing that an alias only
 -- one note has, so [[John]] finds John Doe.md when John.md doesn't exist.
 -- Views hold no data, so they're rebuilt every time the schema is checked.
@@ -161,8 +170,10 @@ CREATE VIEW link_targets AS
   GROUP BY nn.key
   HAVING COUNT(DISTINCT nn.note_id) = 1;
 CREATE VIEW entry_entities AS
-  SELECT DISTINCT el.entry_id, lt.note_id AS entity_id
-  FROM entry_links el JOIN link_targets lt ON lt.target = el.target;
+  SELECT el.entry_id, lt.note_id AS entity_id
+  FROM entry_links el JOIN link_targets lt ON lt.target = el.target
+  UNION
+  SELECT entry_id, note_id FROM note_day_mentions;
 
 -- Link text used for one note often enough to be a name for it, rebuilt by
 -- nicknames.refresh. Questions and unlinked mentions match these names, but

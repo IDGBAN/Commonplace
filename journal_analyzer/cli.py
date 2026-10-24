@@ -820,6 +820,9 @@ def show(
                         for d in days
                     ))
                 )
+            linking = store.notes_linking_day(conn, r)
+            if linking:
+                console.print("  linked from notes: " + escape(", ".join(n["title"] for n in linking)))
             console.print(f"  {escape(r['summary'] or '(no summary)')}")
             longer = store.details_for_entries(conn, [r["id"]]).get(r["id"])
             if longer:
@@ -845,6 +848,7 @@ def _entry_json(cfg: Config, conn: sqlite3.Connection, row: sqlite3.Row, raw: bo
             for e in store.entities_for_entry(conn, row["id"])
         ],
         "links_to_days": serialize.days_linked_from(conn, row["id"]),
+        "linked_from_notes": [serialize.note_ref(n) for n in store.notes_linking_day(conn, row)],
         "metrics": store.metrics_for_entries(conn, [row["id"]]).get(row["id"], {}),
         "details": store.details_for_entries(conn, [row["id"]]).get(row["id"]),
     }
@@ -882,6 +886,7 @@ def note(
                 ],
                 "outlinks": [serialize.note_ref(r) for r in store.note_outlinks(conn, row["id"])],
                 "backlinks": [serialize.note_ref(r) for r in store.note_backlinks(conn, row["id"])],
+                "linked_days": serialize.entry_briefs(conn, store.days_linked_from_note(conn, row["id"])),
                 "digest": serialize.note_digest_json(store.get_note_digest(conn, row["link_key"])),
                 "entries": serialize.entry_briefs(conn, store.entries_mentioning(conn, row["id"], limit)),
             }
@@ -927,6 +932,9 @@ def _print_note(
     outlinks = store.note_outlinks(conn, row["id"])
     if outlinks:
         console.print("  links to: " + escape(", ".join(r["title"] for r in outlinks)))
+    days = store.days_linked_from_note(conn, row["id"])
+    if days:
+        console.print("  links to days: " + ", ".join(r["entry_date"] for r in days))
     backlinks = store.note_backlinks(conn, row["id"])
     if backlinks:
         console.print(

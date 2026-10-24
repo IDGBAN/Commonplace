@@ -35,6 +35,8 @@ DOMINANT_TAG_COUNT = 5
 NOTE_DIGEST_TEXT_CHARS = 1500
 # of each linked note that goes in as background
 LINKED_NOTE_CHARS = 600
+# the latest days a note links to itself that go into its relationship digest
+NOTE_LINKED_DAYS = 30
 
 _VOICE = (
     "Write it in the journal writer's own first-person voice (I, me, my), as "
@@ -229,6 +231,10 @@ def _write_year(
     return True
 
 
+def _mood(score: float | None) -> str:
+    return f"{score:g}" if score is not None else "-"
+
+
 def _spread(rows: list[sqlite3.Row], limit: int) -> list[sqlite3.Row]:
     """At most `limit` rows, evenly spaced, keeping the first and last."""
     if len(rows) <= limit:
@@ -254,6 +260,14 @@ def note_digest_input(
     )
     if outlinks:
         lines.append("Notes it links to:\n" + "\n".join(outlinks))
+    days = store.days_linked_from_note(conn, note["id"])
+    if days:
+        day_tags = store.tags_for_entries(conn, [r["id"] for r in days])
+        lines.append("Days the note itself links to:\n" + "\n".join(
+            f"- {r['entry_date']} (mood {_mood(r['mood_score'])}) "
+            f"[{', '.join(day_tags.get(r['id'], []))}]: {r['summary'] or '(no summary)'}"
+            for r in days[-NOTE_LINKED_DAYS:]
+        ))
     mentions = store.mention_stats(conn, [note["id"]]).get(note["id"])
     rows = store.entries_mentioning(conn, note["id"], limit=-1)[::-1]  # oldest first
     moods = [r["mood_score"] for r in rows if r["mood_score"] is not None]
