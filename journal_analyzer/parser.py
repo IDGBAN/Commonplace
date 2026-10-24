@@ -192,7 +192,11 @@ def _shown_text(target: str) -> str:
     if "|" in target:
         return target.split("|", 1)[1].strip()
     name, _, anchor = target.partition("#")
-    return name.strip() or anchor.lstrip("^").strip()
+    if not name.strip():
+        return anchor.lstrip("^").strip()
+    # like Obsidian's reading view: [[Note#Heading]] is "Note > Heading", a ^block shows nothing
+    headings = [p.strip() for p in anchor.split("#") if p.strip() and not p.strip().startswith("^")]
+    return " > ".join([name.strip(), *headings])
 
 
 def _names_attachment(target: str) -> bool:
@@ -238,13 +242,161 @@ def link_labels(text: str) -> dict[str, list[str]]:
     """For each link key, the display texts that differ from the target's name."""
     labels: dict[str, dict[str, None]] = {}
     for m in _WIKILINK_RE.finditer(text):
-        key = link_key(m.group(2))
+        target = m.group(2)
+        key = link_key(target)
         if key is None:
             continue
-        shown = _shown_text(m.group(2))
+        # a heading after the name isn't a different name for the note
+        shown = _shown_text(target if "|" in target else target.split("#", 1)[0])
         if shown and shown.casefold() != key:
             labels.setdefault(key, {}).setdefault(shown, None)
     return {key: list(names) for key, names in labels.items()}
+
+
+def link_anchor(target: str) -> str:
+    """The #heading or #^block a link points at inside its note, or "" for all of it."""
+    name = target.split("|", 1)[0]
+    _, hashed, anchor = name.partition("#")
+    return anchor.strip() if hashed else ""
+
+
+def link_anchors(text: str) -> dict[str, list[str]]:
+    """For each link key that points at a heading or block, the anchors it's linked with.
+
+    "" among them means the key is also linked as a whole.
+    """
+    found: dict[str, dict[str, None]] = {}
+    for m in _WIKILINK_RE.finditer(text):
+        key = link_key(m.group(2))
+        if key is not None:
+            found.setdefault(key, {}).setdefault(link_anchor(m.group(2)), None)
+    return {key: list(anchors) for key, anchors in found.items() if any(anchors)}
+
+
+def anchor_label(anchor: str) -> str:
+    """How an anchor reads to a person: the innermost heading, or "passage" for a block."""
+    if anchor.startswith("^"):
+        return "passage"
+    parts = [p.strip() for p in anchor.split("#") if p.strip()]
+    return parts[-1] if parts else anchor
+
+
+# up to three spaces of indent, then a closing run of #s is optional, as in CommonMark
+_HEADING_LINE_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+
+
+def _anchor_words(text: str) -> str:
+    # Obsidian leaves these characters out of heading links, and formatting doesn't count
+    return " ".join(re.sub(r"[#|^:%\[\]*_`~=\\]", " ", text).casefold().split())
+
+
+def _headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """(line, level, words) for each heading, skipping fenced code."""
+    found: list[tuple[int, int, str]] = []
+    fence: str | None = None
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            if fence is None:
+                fence = stripped[:3]
+            elif stripped.startswith(fence):
+                fence = None
+            continue
+        m = _HEADING_LINE_RE.match(line.rstrip("\r")) if fence is None else None
+        if m:
+            found.append((i, len(m.group(1)), _anchor_words(m.group(2))))
+    return found
+
+
+def _heading_span(
+    headings: list[tuple[int, int, str]], lo: int, hi: int, words: str
+) -> tuple[int, int] | None:
+    for n, (line, level, text) in enumerate(headings):
+        if not lo <= line < hi or text != words:
+            continue
+        end = next((h for h, lvl, _ in headings[n + 1:] if lvl <= level and h < hi), hi)
+        return line, end
+    return None
+
+
+def _block_span(lines: list[str], block_id: str) -> tuple[int, int] | None:
+    marker = re.compile(rf"(?:^|\s)\^{re.escape(block_id)}\s*$", re.IGNORECASE)
+    for i, line in enumerate(lines):
+        if not marker.search(line):
+            continue
+        last = i
+        if not marker.sub("", line).strip():
+            # an id on a line of its own names the block above it
+            last = i - 1
+            while last >= 0 and not lines[last].strip():
+                last -= 1
+            if last < 0:
+                return None
+        # back to the start of the paragraph, or of the list item it continues
+        first = last
+        while (
+            not _LIST_ITEM_RE.match(lines[first])
+            and first > 0
+            and lines[first - 1].strip()
+            and not _HEADING_LINE_RE.match(lines[first - 1])
+        ):
+            first -= 1
+        return first, i + 1
+    return None
+
+
+def section_span(text: str, anchor: str) -> tuple[int, int] | None:
+    """Lines [start, end) of `text` that an anchor points at, splitting on "\\n".
+
+    A heading's section starts at the heading and runs to the next heading of
+    the same or a higher level. [[Note#A#B]] is heading B inside A, or any B
+    when A has been renamed since.
+    """
+    anchor = anchor.strip()
+    lines = text.split("\n")
+    if anchor.startswith("^"):
+        block_id = anchor[1:].strip()
+        return _block_span(lines, block_id) if block_id else None
+    parts = [w for w in (_anchor_words(p) for p in anchor.split("#")) if w]
+    if not parts:
+        return None
+    headings = _headings(lines)
+    lo, hi = 0, len(lines)
+    span: tuple[int, int] | None = None
+    for words in parts:
+        span = _heading_span(headings, lo, hi, words)
+        if span is None:
+            break
+        lo, hi = span[0] + 1, span[1]
+    if span is None and len(parts) > 1:
+        span = _heading_span(headings, 0, len(lines), parts[-1])
+    if span is None:
+        return None
+    start, end = span
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return start, end
+
+
+def find_section(text: str, anchor: str) -> str | None:
+    """The text an anchor points at, without its heading or ^block id."""
+    span = section_span(text, anchor)
+    if span is None:
+        return None
+    lines = text.split("\n")[span[0]:span[1]]
+    if anchor.strip().startswith("^"):
+        block_id = re.escape(anchor.strip()[1:].strip())
+        lines = [re.sub(rf"(?:^|\s)\^{block_id}\s*$", "", line, flags=re.IGNORECASE) for line in lines]
+    else:
+        lines = lines[1:]
+    body = "\n".join(line.rstrip("\r") for line in lines).strip()
+    return body or None
+
+
+def file_link_key(path: Path | str) -> str:
+    """The key a link uses for this file, the way link_key reads [[its name]]."""
+    return link_key(PurePath(path).name) or ""
 
 
 def clean_text(text: str) -> str:
@@ -305,9 +457,13 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
     rel_path = relative_path(path, config.vault.path)
     file_links = _frontmatter_links(frontmatter)
     labels = link_labels(body)
+    anchors = link_anchors(body)
 
     def labels_for(keys: list[str]) -> dict[str, list[str]]:
         return {k: labels[k] for k in keys if k in labels}
+
+    def anchors_for(keys: list[str]) -> dict[str, list[str]]:
+        return {k: anchors[k] for k in keys if k in anchors}
 
     def whole_file() -> list[ParsedEntry]:
         if text_is_private(cleaned, config):
@@ -319,7 +475,10 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
             )
         links = _unique(file_links + [key for _, key in positions])
         return [
-            ParsedEntry(file_date, cleaned, source, links, rel_path, frontmatter, labels_for(links))
+            ParsedEntry(
+                file_date, cleaned, source, links, rel_path, frontmatter, labels_for(links),
+                anchors_for(links),
+            )
         ]
 
     split_re = config.vault.split_heading_regex
@@ -366,6 +525,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
                     rel_path,
                     frontmatter,
                     labels_for(section_links),
+                    anchors_for(section_links),
                 )
             )
     if not entries and not private_sections:

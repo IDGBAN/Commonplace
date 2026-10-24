@@ -9,6 +9,7 @@ import sqlite_vec
 from .config import Config
 from .models import DatabaseError, EmbeddingModelMismatchError
 from .ollama_client import same_model
+from .parser import file_link_key
 
 # Bump on any schema change. Old caches get rebuilt, not migrated.
 SCHEMA_VERSION = 2
@@ -111,6 +112,22 @@ CREATE TABLE IF NOT EXISTS entry_links (
   PRIMARY KEY (entry_id, target)
 );
 CREATE INDEX IF NOT EXISTS idx_entry_links_target ON entry_links(target);
+
+-- the heading or block a link points at, like Work in [[2024-01-14#Work]]
+CREATE TABLE IF NOT EXISTS entry_link_anchors (
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  target   TEXT NOT NULL,
+  anchor   TEXT NOT NULL,
+  PRIMARY KEY (entry_id, target, anchor)
+);
+
+-- An entry file's name as a link key. Links find a day by its date, or like
+-- Obsidian by its file, so [[2024-01-15 trip]] finds "2024-01-15 trip.md".
+CREATE TABLE IF NOT EXISTS entry_file_keys (
+  path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
+  key  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entry_file_keys_key ON entry_file_keys(key);
 
 CREATE TABLE IF NOT EXISTS note_links (
   note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -350,7 +367,23 @@ def init_schema(conn: sqlite3.Connection) -> None:
         raise _version_error(conn, version)
     conn.executescript(SCHEMA)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    _fill_entry_file_keys(conn)
     conn.commit()
+
+
+def _fill_entry_file_keys(conn: sqlite3.Connection) -> None:
+    # entries indexed before the table; the key comes from the path alone
+    paths = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT file_path FROM entries "
+            "WHERE file_path NOT IN (SELECT path FROM entry_file_keys)"
+        )
+    ]
+    conn.executemany(
+        "INSERT OR IGNORE INTO entry_file_keys(path, key) VALUES (?, ?)",
+        [(path, file_link_key(path)) for path in paths],
+    )
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:

@@ -40,6 +40,10 @@ _RESULT_STYLE: dict[FileResult, str] = {
     "indexed": "green", "private": "dim", "skipped": "dim", "error": "red",
 }
 _PRIVATE_META_KEY = "private_settings"
+_LINK_DETAILS_META_KEY = "link_details"
+# raised whenever save_entry starts keeping more about links, so entries
+# indexed before that get it from their files once
+LINK_DETAILS_VERSION = "1"
 
 WATCH_POLL_SECONDS = 1.0
 
@@ -370,6 +374,7 @@ def run_backfill(
     }
     _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
+    _refresh_link_details(config, conn)
     indexed: list[str] = []
     with Progress(console=console) as progress:
         task = progress.add_task("Indexing", total=len(files))
@@ -503,6 +508,40 @@ def _refresh_readings(config: Config, conn: sqlite3.Connection) -> None:
         )
 
 
+def _refresh_link_details(config: Config, conn: sqlite3.Connection) -> None:
+    # Stored text has its links written out, so what they pointed at comes from
+    # the files. Ones that changed since get re-indexed anyway.
+    if db.get_meta(conn, _LINK_DETAILS_META_KEY) == LINK_DETAILS_VERSION:
+        return
+    files = 0
+    for row in store.entry_files(conn):
+        path = Path(row["path"])
+        try:
+            data = parser.read_bytes(path)
+        except OSError:
+            continue
+        if parser.compute_hash(data) != row["content_hash"] or b"[[" not in data:
+            continue
+        try:
+            parsed = parser.parse_file(path, config)
+        except JournalError:
+            continue
+        stored = store.entries_for_file(conn, row["path"])
+        # The stored text can be written out differently from a fresh read, so
+        # entries match by position, as long as the file splits the same way.
+        if [r["entry_date"] for r in stored] != [e.entry_date.isoformat() for e in parsed]:
+            continue
+        for r, entry in zip(stored, parsed, strict=True):
+            store.save_link_details(conn, r["id"], entry)
+        files += 1
+    db.set_meta(conn, _LINK_DETAILS_META_KEY, LINK_DETAILS_VERSION)
+    if files:
+        console.print(
+            f"Read the links in {files} {'file' if files == 1 else 'files'} again, "
+            "without calling a model."
+        )
+
+
 def _ensure_vec(config: Config, conn: sqlite3.Connection, client: OllamaClient) -> None:
     db.ensure_vec_table(
         conn, embedder.probe_dimension(config, client), config.ollama.embed_model
@@ -598,6 +637,7 @@ def run_watch(
     _ensure_vec(config, conn, client)
     _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
+    _refresh_link_details(config, conn)
     handler = _DebounceHandler(config)
     observer = Observer()
     observer.schedule(handler, str(config.vault.path), recursive=True)

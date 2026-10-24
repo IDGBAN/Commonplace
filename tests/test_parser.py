@@ -208,7 +208,7 @@ def test_link_offsets_point_into_the_cleaned_text():
     cleaned, links = parser.clean_with_links(
         "  Met [[John Doe|John]] at [[Bear Mountain#Summit]]."
     )
-    assert cleaned == "Met John at Bear Mountain."
+    assert cleaned == "Met John at Bear Mountain > Summit."
     assert [(cleaned[pos:pos + 4], key) for pos, key in links] == [
         ("John", "john doe"),
         ("Bear", "bear mountain"),
@@ -285,7 +285,7 @@ def test_parse_note_reads_aliases_properties_and_links(tmp_path):
     assert note.aliases == ["John"]
     assert note.properties == {"Relationship": "Friend"}
     assert note.links == ["friend", "garden-project"]
-    assert note.raw_text == "Climbs with me. Runs the garden-project; see John Doe."
+    assert note.raw_text == "Climbs with me. Runs the garden-project; see John Doe > Notes."
     assert note.header() == (
         "John Doe (people)\nFile: Links/People/John Doe.md\n"
         "Also called: John\nRelationship: Friend"

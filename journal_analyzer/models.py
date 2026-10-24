@@ -20,6 +20,8 @@ class ParsedEntry:
     frontmatter: dict[str, FrontmatterValue] = field(default_factory=dict)
     # how a link was shown when it differs from its target, e.g. "john doe" -> ["John"]
     link_labels: dict[str, list[str]] = field(default_factory=dict)
+    # parser.link_anchors for its links, e.g. "2024-01-14" -> ["Work"]
+    link_anchors: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass

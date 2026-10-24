@@ -302,6 +302,16 @@ h3 { font-size: 1.05rem; }
   hyphens: auto;
 }
 .raw.empty { color: var(--ink-faint); font-style: italic; }
+/* the part a #heading or #^block link points at */
+.raw .focus {
+  background: var(--pencil-wash);
+  box-shadow: 0 0 0 0.3rem var(--pencil-wash);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.raw .focus:focus { outline: none; }
+.raw .focus:focus-visible { outline: 2px solid var(--pencil); outline-offset: 0.3rem; }
 
 .margin {
   position: sticky; top: 4.6rem;

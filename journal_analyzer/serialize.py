@@ -8,13 +8,56 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 
-from . import store
+from . import parser, store
 from .models import Answer
 
 Json = dict[str, Any]
+
+
+def section_ref(anchor: str) -> Json:
+    return {"anchor": anchor, "label": parser.anchor_label(anchor)}
+
+
+def _add_sections(sections: list[Json], anchors: list[str]) -> None:
+    for anchor in anchors:
+        if all(s["anchor"] != anchor for s in sections):
+            sections.append(section_ref(anchor))
+
+
+def note_parts(conn: sqlite3.Connection, entry_id: int) -> dict[int, list[Json]]:
+    """The headings and blocks an entry links to in each note, by note id."""
+    anchors = store.link_anchors_for_entries(conn, [entry_id]).get(entry_id, {})
+    parts: dict[int, list[Json]] = {}
+    for target, note in store.notes_for_targets(conn, list(anchors)).items():
+        _add_sections(parts.setdefault(note["id"], []), anchors[target])
+    return parts
+
+
+def _days(rows: list[sqlite3.Row], anchors: Callable[[sqlite3.Row], list[str]]) -> list[Json]:
+    days: dict[int, Json] = {}
+    for r in rows:
+        day = days.setdefault(r["id"], {"id": r["id"], "date": r["entry_date"], "sections": []})
+        _add_sections(day["sections"], anchors(r))
+    return list(days.values())
+
+
+def days_linked_from(conn: sqlite3.Connection, entry_id: int) -> list[Json]:
+    """The other days an entry links to, each with the parts of it the links point at."""
+    anchors = store.link_anchors_for_entries(conn, [entry_id]).get(entry_id, {})
+    return _days(
+        store.days_linked_from_entry(conn, entry_id), lambda r: anchors.get(r["target"], [])
+    )
+
+
+def days_linking_to(conn: sqlite3.Connection, entry: sqlite3.Row) -> list[Json]:
+    """The entries that link to this one's day, with the parts of it they point at."""
+    rows = store.entries_linking_to_day(conn, entry)
+    anchors = store.link_anchors_for_entries(conn, [r["id"] for r in rows])
+    return _days(rows, lambda r: anchors.get(r["id"], {}).get(r["target"], []))
 
 
 def entry_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json]:

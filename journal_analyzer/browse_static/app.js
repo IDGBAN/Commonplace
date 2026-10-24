@@ -113,9 +113,9 @@ const href = {
   overview: () => "#/",
   calendar: (year) => (year ? `#/calendar/${year}` : "#/calendar"),
   entries: (params) => `#/entries${query(params)}`,
-  entry: (id) => `#/entry/${id}`,
+  entry: (id, params) => `#/entry/${id}${query(params)}`,
   notes: (params) => `#/notes${query(params)}`,
-  note: (id) => `#/note/${id}`,
+  note: (id, params) => `#/note/${id}${query(params)}`,
   tags: () => "#/tags",
   tag: (name) => `#/tag/${encodeURIComponent(name)}`,
   digests: (type) => `#/digests/${type || "month"}`,
@@ -231,6 +231,39 @@ function entryLines(entries, scale, { emptyText } = {}) {
         swatch(e.mood, scale),
         h("span", { class: e.summary ? "line-summary" : "line-summary none" }, e.summary || "No summary stored"),
         e.tags && e.tags.length ? h("span", { class: "line-tags" }, e.tags.join(" · ")) : null))));
+}
+
+// The stored text, with the part a link's #heading or #^block points at marked.
+// `focus` is what the API sends back for ?at=.
+function rawText(text, focus, emptyText) {
+  if (!text) return h("div", { class: "raw empty" }, emptyText);
+  if (!focus || !focus.lines) return h("div", { class: "raw" }, text);
+  const lines = text.split("\n");
+  const [start, end] = focus.lines;
+  return h("div", { class: "raw" },
+    start > 0 ? `${lines.slice(0, start).join("\n")}\n` : "",
+    h("span", { class: "focus", id: "focus", tabindex: "-1" }, lines.slice(start, end).join("\n")),
+    end < lines.length ? `\n${lines.slice(end).join("\n")}` : "");
+}
+
+function focusNotice(focus, what) {
+  if (!focus || focus.lines) return null;
+  return h("div", { class: "notice info" }, h("span", { class: "notice-label" }, "Part not found"),
+    h("span", {}, `There's no “${focus.label}” part in this ${what} any more, so all of it is shown.`));
+}
+
+// once render() has scrolled to the top and focused the heading
+function showFocus(node) {
+  setTimeout(() => {
+    const marked = node.querySelector("#focus");
+    if (!marked || !marked.isConnected) return;
+    marked.scrollIntoView({ block: "center" });
+    marked.focus({ preventScroll: true });
+  }, 0);
+}
+
+function sectionChip(label, link, part, title) {
+  return h("a", { class: "chip pencil", href: link, title }, label, h("span", { class: "n" }, `› ${part}`));
 }
 
 function gloss(label, ...body) {
@@ -604,8 +637,9 @@ async function entriesView(_, params) {
     results);
 }
 
-async function entryView([id]) {
-  const e = await api(`entries/${id}`);
+async function entryView([id], params) {
+  const at = params.get("at");
+  const e = await api(`entries/${id}`, { at });
   const scale = e.mood_scale;
   document.title = `${e.date} · Commonplace`;
   currentNeighbours = { prev: e.prev && href.entry(e.prev.id), next: e.next && href.entry(e.next.id) };
@@ -636,13 +670,16 @@ async function entryView([id]) {
       h("dl", { class: "props numbers" }, Object.entries(e.metrics).map(([k, v]) => [h("dt", {}, k), h("dd", {}, fmtMood(v))])),
       h("div", { class: "quiet" }, "From the file's frontmatter")),
     gloss("Mentions",
-      e.notes.length ? h("div", { class: "chips" }, e.notes.map((n) => h("a", { class: "chip pencil", href: href.note(n.id), title: kindLabel(n.kind) }, n.title))) : h("span", { class: "quiet" }, "Links to no indexed note"),
+      e.notes.length ? h("div", { class: "chips" }, e.notes.map((n) => [
+        h("a", { class: "chip pencil", href: href.note(n.id), title: kindLabel(n.kind) }, n.title),
+        n.sections.map((s) => sectionChip(n.title, href.note(n.id, { at: s.anchor }), s.label, `The part of ${n.title} this entry links to`)),
+      ])) : h("span", { class: "quiet" }, "Links to no indexed note"),
       e.unresolved_links.length ? h("div", { class: "quiet" },
         h("div", { class: "gloss-label" }, "Links with no note (not counted)"),
         h("div", { class: "chips" }, e.unresolved_links.map((t) => h("span", { class: "chip ghost" }, t)))) : null),
     (e.links_to_days.length || e.linked_from_days.length) && gloss("Other days",
-      e.links_to_days.length ? [h("div", { class: "quiet" }, "This entry links to"), dayChips(e.links_to_days)] : null,
-      e.linked_from_days.length ? [h("div", { class: "quiet" }, "Linked from"), dayChips(e.linked_from_days)] : null),
+      e.links_to_days.length ? [h("div", { class: "quiet" }, "This entry links to"), dayChips(e.links_to_days, true)] : null,
+      e.linked_from_days.length ? [h("div", { class: "quiet" }, "Linked from"), dayChips(e.linked_from_days, false)] : null),
     gloss("Read by",
       h("div", {}, e.model_used || "unknown model"),
       h("div", { class: "quiet" }, stamp(e.extracted_at)),
@@ -659,7 +696,7 @@ async function entryView([id]) {
         d.stale && h("span", { class: "status pending" }, " out of date"),
         h("div", { class: d.summary ? "text clamp" : "text" }, d.summary || (d.exists ? "Empty digest" : "Not written yet. Run journal rollup."))))));
 
-  return h("div", {},
+  const node = h("div", {},
     pageHead({
       eyebrow: h("span", {}, h("a", { href: href.calendar(e.date.slice(0, 4)) }, e.date.slice(0, 4)), ` · ${fmtWeekday.format(toDate(e.date))}`),
       title: fmtDayMonthYear.format(toDate(e.date)),
@@ -673,21 +710,32 @@ async function entryView([id]) {
         h("a", { href: e.obsidian_url }, "Open in Obsidian"),
       ],
     }),
+    focusNotice(e.focus, "entry"),
     h("div", { class: "folio" },
       h("article", {},
-        h("p", { class: "reading-label" }, "Your entry, as the app stored it. Links and embeds appear as plain text, the way the models read them."),
-        h("div", { class: e.raw_text ? "raw" : "raw empty" }, e.raw_text || "The entry has no text.")),
+        h("p", { class: "reading-label" }, e.focus && e.focus.lines
+          ? `Your entry, as the app stored it. The “${e.focus.label}” part a link points at is marked.`
+          : "Your entry, as the app stored it. Links and embeds appear as plain text, the way the models read them."),
+        rawText(e.raw_text, e.focus, "The entry has no text.")),
       margin),
     section("Close in meaning", entryLines(e.similar, scale, {
       emptyText: e.embedded ? "No other entries have vectors yet." : "This entry has no vector yet, so there's nothing to compare.",
     }), { note: "nearest by stored vector" }),
     section("Digests covering this day", digestRows));
+  showFocus(node);
+  return node;
 }
 
 let currentNeighbours = null;
 
-function dayChips(days) {
-  return h("div", { class: "chips" }, days.map((d) => h("a", { class: "chip pencil", href: href.entry(d.id) }, mediumDate(d.date))));
+// `outgoing` days are ones this entry links to, so a part opens at that part;
+// the others link here, and their parts are of this day
+function dayChips(days, outgoing) {
+  return h("div", { class: "chips" }, days.map((d) => d.sections.length
+    ? d.sections.map((s) => outgoing
+      ? sectionChip(mediumDate(d.date), href.entry(d.id, { at: s.anchor }), s.label, `The part of ${longDate(d.date)} this entry links to`)
+      : sectionChip(mediumDate(d.date), href.entry(d.id), s.label, `Links to the “${s.label}” part of this day`))
+    : h("a", { class: "chip pencil", href: href.entry(d.id) }, mediumDate(d.date))));
 }
 
 async function notesView(_, params) {
@@ -760,8 +808,8 @@ async function notesView(_, params) {
     unresolved);
 }
 
-async function noteView([id]) {
-  const n = await api(`notes/${id}`);
+async function noteView([id], params) {
+  const n = await api(`notes/${id}`, { at: params.get("at") });
   const scale = n.mood_scale;
   document.title = `${n.title} · Commonplace`;
   const maxYear = Math.max(1, ...n.by_year.map((y) => y.n));
@@ -808,11 +856,14 @@ async function noteView([id]) {
       title: n.title,
       meta: [h("span", { class: "path" }, n.vault_path), h("span", {}, plural(n.words, "word")), h("a", { href: n.obsidian_url }, "Open in Obsidian")],
     }),
+    focusNotice(n.focus, "note"),
     h("div", { class: "folio" },
       h("article", {},
         props.length ? h("dl", { class: "props" }, props.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])) : null,
-        h("p", { class: "reading-label" }, "The note, as the app stored it"),
-        h("div", { class: n.raw_text ? "raw" : "raw empty" }, n.raw_text || "This note has no text of its own.")),
+        h("p", { class: "reading-label" }, n.focus && n.focus.lines
+          ? `The note, as the app stored it. The “${n.focus.label}” part a link points at is marked.`
+          : "The note, as the app stored it"),
+        rawText(n.raw_text, n.focus, "This note has no text of its own.")),
       margin),
     overYears,
     (n.outlinks.length || n.backlinks.length) ? section("Connected notes", h("div", { class: "two-col" },
@@ -831,6 +882,7 @@ async function noteView([id]) {
       intro: ["These entries name ", n.title, " but don't link it, so they're left out of the counts and moods above. Link them in Obsidian and they count from the next index."],
     }) : null);
   for (const bar of node.querySelectorAll(".hbar[data-w]")) bar.style.width = `${Number(bar.dataset.w) * 100}%`;
+  showFocus(node);
   return node;
 }
 

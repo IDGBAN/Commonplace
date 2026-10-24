@@ -118,6 +118,15 @@ def _vault_path(req: Request, path: str) -> str:
     return relative_path(path, req.config.vault.path)
 
 
+def _focus(req: Request, text: str) -> Json | None:
+    """The lines a link's #heading or #^block points at, for ?at= on entry and note pages."""
+    anchor = req.params.get("at", "").strip()
+    if not anchor:
+        return None
+    span = parser.section_span(text, anchor)
+    return {"anchor": anchor, "label": parser.anchor_label(anchor), "lines": list(span) if span else None}
+
+
 def _has_vector(conn: sqlite3.Connection, table: str, id_column: str, row_id: int) -> bool:
     try:
         return conn.execute(
@@ -239,6 +248,7 @@ def entry(req: Request, entry_id: str) -> Json:
     frontmatter = store.file_frontmatter(conn, row["file_path"])
     reading = store.entry_reading(conn, row["id"])
     own_mood = fields.frontmatter_mood(frontmatter, req.config)
+    parts = serialize.note_parts(conn, row["id"])
     return {
         "id": row["id"],
         "date": row["entry_date"],
@@ -264,18 +274,13 @@ def entry(req: Request, entry_id: str) -> Json:
         "tags": store.tags_for_entry(conn, row["id"]),
         "metrics": store.metrics_for_entries(conn, [row["id"]]).get(row["id"], {}),
         "notes": [
-            {"id": r["id"], "title": r["name"], "kind": r["type"]}
+            {"id": r["id"], "title": r["name"], "kind": r["type"], "sections": parts.get(r["id"], [])}
             for r in store.entities_for_entry(conn, row["id"])
         ],
         "unresolved_links": store.unresolved_links_for_entry(conn, row["id"]),
-        "links_to_days": [
-            {"id": r["id"], "date": r["entry_date"]}
-            for r in store.days_linked_from_entry(conn, row["id"])
-        ],
-        "linked_from_days": [
-            {"id": r["id"], "date": r["entry_date"]}
-            for r in store.entries_linking_to_day(conn, row)
-        ],
+        "links_to_days": serialize.days_linked_from(conn, row["id"]),
+        "linked_from_days": serialize.days_linking_to(conn, row),
+        "focus": _focus(req, row["raw_text"]),
         "embedded": _has_vector(conn, "entries_vec", "entry_id", row["id"]),
         "similar": serialize.entry_briefs(conn, similar),
         "digests": digests,
@@ -331,6 +336,7 @@ def note(req: Request, note_id: str) -> Json:
         "model_used": row["model_used"],
         "extracted_at": row["extracted_at"],
         "raw_text": parsed.raw_text,
+        "focus": _focus(req, parsed.raw_text),
         "words": row["word_count"],
         "path": row["file_path"],
         "vault_path": parsed.rel_path,

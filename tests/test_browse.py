@@ -14,6 +14,7 @@ from journal_analyzer.models import (
     DatabaseError,
     Extraction,
     OllamaUnavailableError,
+    ParsedEntry,
     QueryPlan,
 )
 
@@ -204,6 +205,28 @@ def test_links_to_other_days_point_at_those_entries(browser, journal):
     assert [d["date"] for d in earlier["linked_from_days"]] == ["2024-01-20"]
     unresolved = {link["target"] for link in browser.get("/api/notes")["unresolved_links"]}
     assert unresolved == {"nobody yet", "someone"}
+
+
+def test_links_to_part_of_a_day_or_note_say_which_part(browser, journal):
+    add_note(journal, "Garden", kind="topics", text="# Beds\nThree raised beds.\n# Pests\nSlugs.")
+    add_entry(journal, date(2024, 1, 14), text="# Work\nBoxes.\n# Evening\nRest.", path="/vault/14.md")
+    entry = ParsedEntry(date(2024, 1, 20), "x", "/vault/20.md", links=["2024-01-14", "garden"],
+                        link_anchors={"2024-01-14": ["Work"], "garden": ["Pests"]})
+    store.upsert_file(journal, entry.source_path, "h", "indexed")
+    later = store.save_entry(journal, entry, Extraction(summary="s"), "m")
+    data = browser.get(f"/api/entries/{later}")
+    assert data["links_to_days"][0]["sections"] == [{"anchor": "Work", "label": "Work"}]
+    garden = next(n for n in data["notes"] if n["title"] == "Garden")
+    assert garden["sections"] == [{"anchor": "Pests", "label": "Pests"}]
+
+    earlier = entry_id(journal, "2024-01-14")
+    day = browser.get(f"/api/entries/{earlier}?at=Work")
+    assert day["focus"] == {"anchor": "Work", "label": "Work", "lines": [0, 2]}
+    assert day["linked_from_days"][0]["sections"][0]["label"] == "Work"
+    assert browser.get(f"/api/entries/{earlier}?at=Holiday")["focus"]["lines"] is None
+    assert browser.get(f"/api/entries/{earlier}")["focus"] is None
+    note = browser.get(f"/api/notes/{note_id(journal, 'Garden')}?at=Pests")
+    assert note["focus"]["lines"] == [2, 4]
 
 
 def test_similar_entries_use_stored_vectors(browser, journal):

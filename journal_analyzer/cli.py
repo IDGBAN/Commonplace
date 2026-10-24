@@ -799,10 +799,23 @@ def show(
                     "  numbers: " + escape(", ".join(f"{k} {v:g}" for k, v in numbers.items()))
                 )
             ents = store.entities_for_entry(conn, r["id"])
+            parts = serialize.note_parts(conn, r["id"])
             if ents:
                 console.print(
                     "  mentions: "
-                    + escape(", ".join(f"{e['name']} ({e['type']})" for e in ents))
+                    + escape(", ".join(
+                        f"{e['name']} ({'; '.join([e['type'], *_labels(parts.get(e['id'], []))])})"
+                        for e in ents
+                    ))
+                )
+            days = serialize.days_linked_from(conn, r["id"])
+            if days:
+                console.print(
+                    "  other days: "
+                    + escape(", ".join(
+                        d["date"] + (f" ({', '.join(_labels(d['sections']))})" if d["sections"] else "")
+                        for d in days
+                    ))
                 )
             console.print(f"  {escape(r['summary'] or '(no summary)')}")
             longer = store.details_for_entries(conn, [r["id"]]).get(r["id"])
@@ -813,16 +826,22 @@ def show(
                 console.print(escape(r["raw_text"]))
 
 
+def _labels(sections: list[dict[str, str]]) -> list[str]:
+    return [s["label"] for s in sections]
+
+
 def _entry_json(cfg: Config, conn: sqlite3.Connection, row: sqlite3.Row, raw: bool) -> dict[str, object]:
     own = fields.frontmatter_mood(store.file_frontmatter(conn, row["file_path"]), cfg)
+    parts = serialize.note_parts(conn, row["id"])
     data: dict[str, object] = {
         **serialize.entry_briefs(conn, [row])[0],
         "path": row["file_path"],
         "mood_from_frontmatter": own is not None,
         "notes": [
-            {"id": e["id"], "title": e["name"], "kind": e["type"]}
+            {"id": e["id"], "title": e["name"], "kind": e["type"], "sections": parts.get(e["id"], [])}
             for e in store.entities_for_entry(conn, row["id"])
         ],
+        "links_to_days": serialize.days_linked_from(conn, row["id"]),
         "metrics": store.metrics_for_entries(conn, [row["id"]]).get(row["id"], {}),
         "details": store.details_for_entries(conn, [row["id"]]).get(row["id"]),
     }

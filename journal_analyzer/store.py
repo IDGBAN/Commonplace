@@ -12,7 +12,7 @@ from pathlib import Path
 import sqlite_vec
 
 from .models import Extraction, FrontmatterValue, ParsedEntry, ParsedNote
-from .parser import relative_path
+from .parser import file_link_key, relative_path
 
 # Lists go in as one JSON array rather than a placeholder each. An id list can
 # be the whole journal, and SQLite before 3.32 allows only 999 variables.
@@ -113,6 +113,7 @@ def delete_entries_for_file(conn: sqlite3.Connection, path: str) -> list[date]:
         for r in rows:
             conn.execute("DELETE FROM entries_vec WHERE entry_id = ?", (r["id"],))
         conn.execute("DELETE FROM entries WHERE file_path = ?", (path,))
+        conn.execute("DELETE FROM entry_file_keys WHERE path = ?", (path,))
     return dates
 
 
@@ -163,7 +164,68 @@ def save_entry(
             "INSERT OR IGNORE INTO entry_links(entry_id, target) VALUES (?, ?)",
             [(entry_id, target) for target in entry.links],
         )
+        _save_link_details(conn, entry_id, entry)
+        conn.execute(
+            "INSERT OR REPLACE INTO entry_file_keys(path, key) VALUES (?, ?)",
+            (entry.source_path, file_link_key(entry.source_path)),
+        )
     return entry_id
+
+
+def save_link_details(conn: sqlite3.Connection, entry_id: int, entry: ParsedEntry) -> None:
+    """Replaces what's kept about how an entry's links are written."""
+    with conn:
+        _save_link_details(conn, entry_id, entry)
+
+
+def _save_link_details(conn: sqlite3.Connection, entry_id: int, entry: ParsedEntry) -> None:
+    conn.execute("DELETE FROM entry_link_anchors WHERE entry_id = ?", (entry_id,))
+    conn.executemany(
+        "INSERT OR IGNORE INTO entry_link_anchors(entry_id, target, anchor) VALUES (?, ?, ?)",
+        [
+            (entry_id, target, anchor)
+            for target, anchors in entry.link_anchors.items()
+            for anchor in anchors
+            if anchor
+        ],
+    )
+
+
+def link_anchors_for_entries(
+    conn: sqlite3.Connection, entry_ids: list[int]
+) -> dict[int, dict[str, list[str]]]:
+    """The headings and blocks each entry's links point at, by entry and link key."""
+    if not entry_ids:
+        return {}
+    try:
+        rows = conn.execute(
+            f"""SELECT entry_id, target, anchor FROM entry_link_anchors
+                WHERE entry_id IN ({_JSON_VALUES}) ORDER BY entry_id, target, rowid""",
+            (_json_list(entry_ids),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # a read-only connection to a cache from before the table
+    out: dict[int, dict[str, list[str]]] = defaultdict(dict)
+    for r in rows:
+        out[r["entry_id"]].setdefault(r["target"], []).append(r["anchor"])
+    return dict(out)
+
+
+def entry_files(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT f.path, f.content_hash FROM files f
+               WHERE f.status = 'indexed'
+                 AND EXISTS (SELECT 1 FROM entries e WHERE e.file_path = f.path)
+               ORDER BY f.path"""
+        ).fetchall()
+    )
+
+
+def entries_for_file(conn: sqlite3.Connection, path: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute("SELECT * FROM entries WHERE file_path = ? ORDER BY id", (path,)).fetchall()
+    )
 
 
 def save_entry_reading(conn: sqlite3.Connection, entry_id: int, reading: Extraction) -> None:
@@ -1730,8 +1792,19 @@ def adjacent_entries(
     return before, after
 
 
-_LINKS_NOTHING = """NOT EXISTS (SELECT 1 FROM link_targets lt WHERE lt.target = el.target)
-                 AND NOT EXISTS (SELECT 1 FROM entries d WHERE d.entry_date = el.target)"""
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone() is not None
+
+
+def _links_nothing(conn: sqlite3.Connection) -> str:
+    clause = """NOT EXISTS (SELECT 1 FROM link_targets lt WHERE lt.target = el.target)
+                AND NOT EXISTS (SELECT 1 FROM entries d WHERE d.entry_date = el.target)"""
+    # a read-only connection to a cache from before entry_file_keys has dates only
+    if _has_table(conn, "entry_file_keys"):
+        clause += " AND NOT EXISTS (SELECT 1 FROM entry_file_keys fk WHERE fk.key = el.target)"
+    return clause
 
 
 def unresolved_links_for_entry(conn: sqlite3.Connection, entry_id: int) -> list[str]:
@@ -1743,7 +1816,7 @@ def unresolved_links_for_entry(conn: sqlite3.Connection, entry_id: int) -> list[
         r["target"]
         for r in conn.execute(
             f"""SELECT el.target FROM entry_links el
-                WHERE el.entry_id = ? AND {_LINKS_NOTHING}
+                WHERE el.entry_id = ? AND {_links_nothing(conn)}
                 ORDER BY el.target""",
             (entry_id,),
         )
@@ -1751,26 +1824,47 @@ def unresolved_links_for_entry(conn: sqlite3.Connection, entry_id: int) -> list[
 
 
 def days_linked_from_entry(conn: sqlite3.Connection, entry_id: int) -> list[sqlite3.Row]:
-    """Entries on the days this entry links to, like [[2024-01-15]]."""
+    """Entries on the days this entry links to, like [[2024-01-15]], with the link
+    target that found each. A day linked two ways comes up once for each."""
+    select = "SELECT d.id, d.entry_date, el.target FROM entry_links el"
+    sql = f"{select} JOIN entries d ON d.entry_date = el.target WHERE el.entry_id = :id"
+    if _has_table(conn, "entry_file_keys"):
+        sql += f""" UNION {select}
+                    JOIN entry_file_keys fk ON fk.key = el.target
+                    JOIN entries d ON d.file_path = fk.path
+                    WHERE el.entry_id = :id"""
+    rows = conn.execute(sql + " ORDER BY 2, 1, 3", {"id": entry_id}).fetchall()
+    return [r for r in rows if r["id"] != entry_id]
+
+
+def entries_linking_to_day(conn: sqlite3.Connection, entry: sqlite3.Row) -> list[sqlite3.Row]:
+    """Entries that link to this one's day, by its date or its file's name, with the target."""
+    by_file = (
+        " OR el.target IN (SELECT key FROM entry_file_keys WHERE path = ?)"
+        if _has_table(conn, "entry_file_keys") else ""
+    )
+    params = [entry["entry_date"], *([entry["file_path"]] if by_file else []), entry["id"]]
     return list(
         conn.execute(
-            """SELECT DISTINCT d.id, d.entry_date FROM entry_links el
-               JOIN entries d ON d.entry_date = el.target
-               WHERE el.entry_id = ? AND d.id != el.entry_id
-               ORDER BY d.entry_date, d.id""",
-            (entry_id,),
+            f"""SELECT DISTINCT e.id, e.entry_date, el.target FROM entry_links el
+                JOIN entries e ON e.id = el.entry_id
+                WHERE (el.target = ?{by_file}) AND e.id != ?
+                ORDER BY e.entry_date, e.id, el.target""",
+            params,
         ).fetchall()
     )
 
 
-def entries_linking_to_day(conn: sqlite3.Connection, entry: sqlite3.Row) -> list[sqlite3.Row]:
+def entries_for_day_link(conn: sqlite3.Connection, target: str) -> list[sqlite3.Row]:
+    """The entries a link like [[2024-01-15]] or [[2024-01-15 trip]] points at."""
+    by_file = (
+        " OR file_path IN (SELECT path FROM entry_file_keys WHERE key = ?)"
+        if _has_table(conn, "entry_file_keys") else ""
+    )
     return list(
         conn.execute(
-            """SELECT DISTINCT e.id, e.entry_date FROM entry_links el
-               JOIN entries e ON e.id = el.entry_id
-               WHERE el.target = ? AND e.id != ?
-               ORDER BY e.entry_date, e.id""",
-            (entry["entry_date"], entry["id"]),
+            f"SELECT * FROM entries WHERE entry_date = ?{by_file} ORDER BY entry_date, id",
+            (target, target) if by_file else (target,),
         ).fetchall()
     )
 
@@ -1781,7 +1875,7 @@ def unresolved_links(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
             f"""SELECT el.target, COUNT(*) AS n, MAX(e.entry_date) AS last
                FROM entry_links el
                JOIN entries e ON e.id = el.entry_id
-               WHERE {_LINKS_NOTHING}
+               WHERE {_links_nothing(conn)}
                GROUP BY el.target
                ORDER BY n DESC, el.target
                LIMIT ?""",
