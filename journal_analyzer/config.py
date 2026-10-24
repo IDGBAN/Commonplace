@@ -74,6 +74,8 @@ class OllamaConfig(BaseModel):
     fast_num_ctx: int = Field(default=8192, ge=0)
     precise_num_ctx: int = Field(default=0, ge=0)
     embed_model: str = "qwen3-embedding:0.6b"
+    # a model that reads images, to describe the photos entries link; empty turns it off
+    vision_model: str = ""
     # capped at the model's own limit
     embed_num_ctx: int = Field(default=8192, ge=512)
     request_timeout_seconds: int = Field(default=120, ge=1)
@@ -112,6 +114,8 @@ class IndexingConfig(BaseModel):
     sections: bool = True
     # parts shorter than this join the one before
     section_min_chars: int = Field(default=200, ge=0)
+    # photos described for each entry, with [ollama] vision_model set
+    photos_per_entry: int = Field(default=4, ge=1)
 
     @model_validator(mode="after")
     def _detail_tiers(self) -> IndexingConfig:

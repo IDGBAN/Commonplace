@@ -9,7 +9,7 @@ from urllib.parse import quote
 import pytest
 from conftest import add_entry, add_note
 
-from journal_analyzer import browse, db, nicknames, parser, query, store
+from journal_analyzer import browse, db, nicknames, parser, photos, query, store
 from journal_analyzer.models import (
     DatabaseError,
     Extraction,
@@ -265,6 +265,14 @@ def test_entries_cut_into_parts_show_them_and_search_names_the_part(browser, jou
     ]
     found = browser.get(f"/api/search?q={quote('quarterly review')}")
     assert found["entries"][0]["id"] == day and found["entries"][0]["section"] == "Work"
+
+
+def test_entry_pages_show_what_the_vision_model_saw(browser, journal):
+    day = entry_id(journal, "2024-01-15")
+    store.save_entry_photos(journal, day, [photos.Photo("top.jpg", "Links/!Files/top.jpg", "A summit cairn.")])
+    data = browser.get(f"/api/entries/{day}")
+    assert data["photos"] == [{"name": "top.jpg", "path": "Links/!Files/top.jpg", "description": "A summit cairn."}]
+    assert browser.get(f"/api/entries/{entry_id(journal, '2024-01-16')}")["photos"] == []
 
 
 def test_notes_page_says_why_links_find_nothing(browser, journal):

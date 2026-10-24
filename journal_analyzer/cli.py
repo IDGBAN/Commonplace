@@ -408,6 +408,11 @@ def _print_plan(plan: ingester.BackfillPlan, vault: Path, cache: bool) -> None:
         f"({_count(extractions, 'extraction')}, {_count(summaries, 'note summary', 'note summaries')}, "
         f"{_count(embeddings, 'embedding')})"
     )
+    if plan.photo_calls():
+        console.print(
+            f"Photos          : {_count(plan.photo_calls(), 'description')} by the vision model, "
+            "fewer for photos it has described before"
+        )
 
     problems = [f for f in plan.to_index if f.problem]
     if problems:
@@ -871,6 +876,8 @@ def show(
             linking = store.notes_linking_day(conn, r)
             if linking:
                 console.print("  linked from notes: " + escape(", ".join(n["title"] for n in linking)))
+            for photo in store.photos_for_entries(conn, [r["id"]]).get(r["id"], []):
+                console.print(f"  photo {escape(photo['name'])}: {escape(photo['description'])}")
             console.print(f"  {escape(r['summary'] or '(no summary)')}")
             longer = store.details_for_entries(conn, [r["id"]]).get(r["id"])
             if longer:
@@ -897,6 +904,10 @@ def _entry_json(cfg: Config, conn: sqlite3.Connection, row: sqlite3.Row, raw: bo
         ],
         "links_to_days": serialize.days_linked_from(conn, row["id"]),
         "linked_from_notes": [serialize.note_ref(n) for n in store.notes_linking_day(conn, row)],
+        "photos": [
+            {"name": p["name"], "path": p["path"], "description": p["description"]}
+            for p in store.photos_for_entries(conn, [row["id"]]).get(row["id"], [])
+        ],
         "metrics": store.metrics_for_entries(conn, [row["id"]]).get(row["id"], {}),
         "details": store.details_for_entries(conn, [row["id"]]).get(row["id"]),
     }
@@ -2058,6 +2069,7 @@ def _report_ollama(cfg: Config) -> bool:
         ("fast_model", cfg.ollama.fast_model),
         ("precise_model", cfg.ollama.precise_model),
         ("embed_model", cfg.ollama.embed_model),
+        *((("vision_model", cfg.ollama.vision_model),) if cfg.ollama.vision_model else ()),
     )
     # a list so all() doesn't stop at the first missing model
     return all([_report_model(role, name, available) for role, name in roles])

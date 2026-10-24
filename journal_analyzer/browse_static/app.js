@@ -738,7 +738,11 @@ async function entryView([id], params) {
         h("p", { class: "reading-label" }, e.focus && e.focus.lines
           ? `Your entry, as the app stored it. The “${e.focus.label}” part a link points at is marked.`
           : "Your entry, as the app stored it. Links and embeds appear as plain text, the way the models read them."),
-        rawText(e.raw_text, e.focus, "The entry has no text.")),
+        rawText(e.raw_text, e.focus, "The entry has no text."),
+        e.photos.length ? h("div", { class: "photos" },
+          h("p", { class: "reading-label" }, "Its photos, as the vision model described them"),
+          h("dl", { class: "props" }, e.photos.map((p) => [
+            h("dt", { class: "path", title: p.path }, p.name), h("dd", {}, p.description)]))) : null),
       margin),
     section("Close in meaning", entryLines(e.similar, scale, {
       emptyText: e.embedded ? "No other entries have vectors yet." : "This entry has no vector yet, so there's nothing to compare.",

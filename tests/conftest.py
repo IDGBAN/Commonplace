@@ -56,6 +56,9 @@ class FakeOllamaClient:
         self.embed_calls: list[str] = []
         self.embed_options: list[dict | None] = []
         self.context_lengths: dict[str, int] = {}
+        # a string, or a callable taking (model, image bytes)
+        self.vision_response = "Two people on a sandy beach at sunset."
+        self.vision_calls: list[tuple[str, bytes]] = []
 
     def chat(self, model, messages, options=None):
         self.chat_calls.append((model, messages))
@@ -84,6 +87,12 @@ class FakeOllamaClient:
         self.embed_options.append(options)
         digest = hashlib.sha256(text.encode()).digest()
         return [b / 255.0 for b in digest[:EMBED_DIM]]
+
+    def describe_image(self, model, prompt, image):
+        self.vision_calls.append((model, image))
+        if callable(self.vision_response):
+            return self.vision_response(model, image)
+        return self.vision_response
 
     def list_models(self):
         return ["fake-fast", "fake-precise", "fake-embed"]

@@ -8,11 +8,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import sqlite_vec
 
 from .models import Extraction, FrontmatterValue, ParsedEntry, ParsedNote
 from .parser import Section, file_link_key, relative_path
+
+if TYPE_CHECKING:
+    from .photos import Photo
 
 # Lists go in as one JSON array rather than a placeholder each. An id list can
 # be the whole journal, and SQLite before 3.32 allows only 999 variables.
@@ -638,6 +642,52 @@ def sections_fts_search(
     except sqlite3.OperationalError:
         return []
     return _sections_in_order(conn, [r["id"] for r in rows])
+
+
+def save_entry_photos(conn: sqlite3.Connection, entry_id: int, photos: Sequence[Photo]) -> None:
+    with conn:
+        conn.execute("DELETE FROM entry_photos WHERE entry_id = ?", (entry_id,))
+        conn.executemany(
+            "INSERT INTO entry_photos(entry_id, name, path, description) VALUES (?, ?, ?, ?)",
+            [(entry_id, p.name, p.path, p.description) for p in photos],
+        )
+
+
+def photos_for_entries(conn: sqlite3.Connection, entry_ids: list[int]) -> dict[int, list[sqlite3.Row]]:
+    if not entry_ids:
+        return {}
+    try:
+        rows = conn.execute(
+            f"""SELECT * FROM entry_photos WHERE entry_id IN ({_JSON_VALUES})
+                ORDER BY entry_id, id""",
+            (_json_list(entry_ids),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # a read-only connection to a cache from before the table
+    out: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for r in rows:
+        out[r["entry_id"]].append(r)
+    return dict(out)
+
+
+def photos_fts_search(
+    conn: sqlite3.Connection, terms: list[str], allowed_ids: list[int] | None, k: int
+) -> list[int]:
+    """Entries whose photos' descriptions match, best first."""
+    match = _match_expression(terms)
+    if match is None:
+        return []
+    sql = """SELECT p.entry_id FROM photos_fts f JOIN entry_photos p ON p.id = f.rowid
+             WHERE photos_fts MATCH ?"""
+    params: list[object] = [match]
+    if allowed_ids is not None:
+        sql += f" AND p.entry_id IN ({_JSON_VALUES})"
+        params.append(_json_list(allowed_ids))
+    try:
+        rows = conn.execute(f"{sql} ORDER BY rank LIMIT ?", [*params, k]).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return list(dict.fromkeys(r["entry_id"] for r in rows))
 
 
 def _sections_in_order(conn: sqlite3.Connection, ids: list[int]) -> list[sqlite3.Row]:

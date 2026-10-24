@@ -8,7 +8,7 @@ from datetime import date, datetime
 from itertools import pairwise
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from .config import Config
 from .models import DateParseError, FrontmatterValue, ParsedEntry, ParsedNote
@@ -31,6 +31,9 @@ _ATTACHMENT_EXTENSIONS = frozenset(
     "png jpg jpeg gif webp svg bmp avif heic tif tiff "
     "mp4 mov webm mkv avi m4v mp3 wav m4a ogg flac opus pdf canvas".split()
 )
+# what a vision model can read; svg and the rest are left alone
+_IMAGE_EXTENSIONS = frozenset("png jpg jpeg gif webp bmp avif heic tif tiff".split())
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(<?([^)>\s]+)>?(?:\s+\"[^\"]*\")?\)")
 # Obsidian's own keys, not facts about the note
 _NON_PROPERTY_KEYS = frozenset(
     {"aliases", "alias", "tags", "tag", "cssclasses", "cssclass", "publish", "position",
@@ -208,14 +211,34 @@ def _names_attachment(target: str) -> bool:
     return "." in name and name.rpartition(".")[2].casefold() in _ATTACHMENT_EXTENSIONS
 
 
+def image_name(target: str) -> str | None:
+    """The file an [[image.jpg]] link or ![](image.jpg) points at, or None for anything else."""
+    name = target.split("|", 1)[0].split("#", 1)[0].strip()
+    ext = name.rpartition(".")[2].casefold() if "." in name else ""
+    if ext not in _IMAGE_EXTENSIONS or "://" in name:
+        return None
+    return unquote(name).replace("\\", "/")
+
+
+def has_images(text: str) -> bool:
+    return bool(_clean(text)[2])
+
+
 def clean_with_links(text: str) -> tuple[str, list[tuple[int, str]]]:
     """Cleaned text plus (offset, link key) pairs.
 
     Offsets are into the cleaned text, so split sections can pick out their own links.
     """
+    cleaned, links, _ = _clean(text)
+    return cleaned, links
+
+
+def _clean(text: str) -> tuple[str, list[tuple[int, str]], list[tuple[int, str]]]:
+    """clean_with_links, plus (offset, file) for each image it links or embeds."""
     text = _TASK_RE.sub(r"\1 ", text)
     pieces: list[str] = []
     links: list[tuple[int, str]] = []
+    images: list[tuple[int, str]] = []
     length = 0
     last = 0
     for m in _WIKILINK_RE.finditer(text):
@@ -226,6 +249,8 @@ def clean_with_links(text: str) -> tuple[str, list[tuple[int, str]]]:
         key = link_key(target)
         if key is not None:
             links.append((length, key))
+        elif (image := image_name(target)) is not None:
+            images.append((length, image))
         # in ![[img.png|300]] the part after | is a size, not text
         drop = (
             key is None
@@ -239,7 +264,20 @@ def clean_with_links(text: str) -> tuple[str, list[tuple[int, str]]]:
     pieces.append(text[last:])
     joined = "".join(pieces)
     lead = len(joined) - len(joined.lstrip())
-    return joined.strip(), [(max(pos - lead, 0), key) for pos, key in links]
+    # ![alt](photo.jpg) stays in the text as written, so it's found there
+    images.extend(
+        (m.start() + lead, image)
+        for m in _MD_IMAGE_RE.finditer(joined.strip())
+        if (image := image_name(m.group(1))) is not None
+    )
+    images.sort()
+    cleaned = joined.strip()
+    return (
+        cleaned,
+        [(max(pos - lead, 0), key) for pos, key in links],
+        # an image dropped from the very end sits at the end of the cleaned text
+        [(min(max(pos - lead, 0), len(cleaned)), name) for pos, name in images],
+    )
 
 
 def link_labels(text: str) -> dict[str, list[str]]:
@@ -505,7 +543,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
     if file_is_private(frontmatter, config):
         return []
     file_date = _file_date(path, frontmatter, body, config)
-    cleaned, positions = clean_with_links(body)
+    cleaned, positions, images = _clean(body)
     source = str(path)
     rel_path = relative_path(path, config.vault.path)
     file_links = _frontmatter_links(frontmatter)
@@ -530,7 +568,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
         return [
             ParsedEntry(
                 file_date, cleaned, source, links, rel_path, frontmatter, labels_for(links),
-                anchors_for(links),
+                anchors_for(links), _unique([name for _, name in images]),
             )
         ]
 
@@ -579,6 +617,10 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
                     frontmatter,
                     labels_for(section_links),
                     anchors_for(section_links),
+                    _unique([
+                        name for pos, name in images
+                        if start <= pos < end or (pos == end == len(cleaned))
+                    ]),
                 )
             )
     if not entries and not private_sections:

@@ -37,6 +37,10 @@ fast_num_ctx = 8192
 precise_num_ctx = 0
 embed_model = "qwen3-embedding:0.6b"
 embed_num_ctx = 8192
+# A model that reads images (gemma3, llava, qwen2.5vl...) to describe the photos
+# entries link or embed, so their days can be found by what's in them. Empty
+# turns it off. Each photo is described once; the memo keeps it.
+vision_model = ""
 request_timeout_seconds = 120
 
 [db]
@@ -60,6 +64,7 @@ detail_long_words = 1000
 # one before. Changing either needs no re-index, only vectors for the parts.
 sections = true
 section_min_chars = 200
+photos_per_entry = 4              # photos described for each entry, with [ollama] vision_model set
 
 [reranking]
 # Reorders search hits before answering, which gives better results.

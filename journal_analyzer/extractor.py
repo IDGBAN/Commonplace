@@ -157,13 +157,15 @@ def extract(
     client: OllamaClient,
     known_tags: Sequence[str] = (),
     linked: Sequence[str] = (),
+    photos: str = "",
 ) -> Extraction:
     """`linked` is context.entry_links: what the entry's links point at. As much
-    of it as fits in the fast model's window goes along as background."""
+    of it as fits in the fast model's window goes along as background.
+    `photos` is photos.block, what a vision model saw in the entry's photos."""
     text = entry.raw_text.strip()
     literal_tags = extract_literal_tags(text)
 
-    if not text:
+    if not text and not photos:
         return Extraction(mood_score=None, summary="(empty entry)", tags=literal_tags)
 
     base_system = _SYSTEM_PROMPT.format(
@@ -183,7 +185,9 @@ def extract(
     heading = f"Journal entry dated {entry.entry_date.isoformat()}"
     if entry.rel_path:
         heading += f"\nFile: {entry.rel_path}"
-    user = f"{heading}\n\n{text}"
+    user = f"{heading}\n\n{text}" if text else heading
+    if photos:
+        user += f"\n\n{photos}"
     if linked:
         room = _room_for_links(
             config, [{"role": "system", "content": system}, {"role": "user", "content": user}]

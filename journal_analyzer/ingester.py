@@ -21,7 +21,18 @@ from rich.progress import Progress
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import context, db, embedder, extractor, fields, nicknames, parser, profile, store
+from . import (
+    context,
+    db,
+    embedder,
+    extractor,
+    fields,
+    nicknames,
+    parser,
+    photos,
+    profile,
+    store,
+)
 from .config import Config
 from .models import (
     ConfigError,
@@ -49,6 +60,7 @@ LINK_DETAILS_VERSION = "2"
 _NOTE_PROPERTIES_META_KEY = "note_properties"
 NOTE_PROPERTIES_VERSION = "1"
 _SECTIONS_META_KEY = "section_settings"
+_PHOTO_META_KEY = "photo_settings"
 
 WATCH_POLL_SECONDS = 1.0
 
@@ -134,18 +146,21 @@ def _index_entries(
     chars = config.indexing.linked_note_chars
     # Do the model calls before deleting anything, so if one fails the old
     # entries are still there.
+    described = [photos.describe(entry, config, client) for entry in entries]
     readings = [
         extractor.extract(
-            entry, config, client, known_tags, context.entry_links(conn, entry, vault, chars)
+            entry, config, client, known_tags, context.entry_links(conn, entry, vault, chars),
+            photos.block(seen),
         )
-        for entry in entries
+        for entry, seen in zip(entries, described, strict=True)
     ]
     vectors = [
         # an entry too long to embed whole leads with its fuller summary
         embedder.entry_vector(
-            entry.raw_text, config, client, summary=_details(reading) or reading.summary
+            "\n\n".join(t for t in (entry.raw_text, photos.block(seen)) if t), config, client,
+            summary=_details(reading) or reading.summary,
         )
-        for entry, reading in zip(entries, readings, strict=True)
+        for entry, reading, seen in zip(entries, readings, described, strict=True)
     ]
     sections = [_sections(entry.raw_text, config) for entry in entries]
     section_vectors = [embedder.section_vectors(parts, config, client) for parts in sections]
@@ -154,8 +169,8 @@ def _index_entries(
     store.upsert_file(conn, key, content_hash, "pending")
     if entries:
         store.save_file_frontmatter(conn, key, entries[0].frontmatter)
-    for entry, reading, vector, parts, part_vectors in zip(
-        entries, readings, vectors, sections, section_vectors, strict=True
+    for entry, reading, vector, parts, part_vectors, seen in zip(
+        entries, readings, vectors, sections, section_vectors, described, strict=True
     ):
         entry_id = store.save_entry(
             conn,
@@ -171,6 +186,8 @@ def _index_entries(
             store.save_entry_vector(conn, entry_id, vector)
         if parts:
             store.replace_entry_sections(conn, entry_id, parts, part_vectors)
+        if seen:
+            store.save_entry_photos(conn, entry_id, seen)
         store.mark_rollups_stale(conn, entry.entry_date)
         store.mark_note_digests_stale(conn, entry.links)
     store.mark_note_digests_stale(conn, store.note_keys_linking_file_days(conn, key))
@@ -323,6 +340,7 @@ class PlannedFile:
     extractions: int = 0
     summaries: int = 0
     embeddings: int = 0
+    photos: int = 0  # for the vision model
 
 
 @dataclass
@@ -342,6 +360,9 @@ class BackfillPlan:
             sum(f.summaries for f in todo),
             sum(f.embeddings for f in todo),
         )
+
+    def photo_calls(self) -> int:
+        return sum(f.photos for f in self.to_index)
 
 
 def _plan_status(
@@ -378,6 +399,7 @@ def _plan_file(
             # empty entries skip both the model and the embedding
             planned.extractions = planned.embeddings = sum(1 for t in texts if t)
             planned.embeddings += sum(len(_sections(e.raw_text, config)) for e in planned.entries)
+            planned.photos = sum(len(photos.to_describe(e, config)) for e in planned.entries)
         else:
             note = parser.parse_note(path, kind, config)
             planned.private = note.private
@@ -423,6 +445,7 @@ def run_backfill(
         "dropped": _prune_vanished(config, conn, files),
     }
     _apply_private_settings(config, conn)
+    _apply_photo_settings(config, conn)
     _refresh_readings(config, conn)
     _refresh_link_details(config, conn)
     _refresh_note_properties(config, conn)
@@ -549,6 +572,30 @@ def _apply_private_settings(config: Config, conn: sqlite3.Connection) -> None:
         console.print(
             f"Private and comment settings changed: {hidden} files taken out of the "
             f"cache, {queued} to index again."
+        )
+
+
+def _apply_photo_settings(config: Config, conn: sqlite3.Connection) -> None:
+    # A new vision model, or turning it on or off, changes what's read for
+    # entries with photos, so just those files are indexed again.
+    settings = json.dumps({"model": config.ollama.vision_model, "per_entry": config.indexing.photos_per_entry})
+    previous = db.get_meta(conn, _PHOTO_META_KEY)
+    db.set_meta(conn, _PHOTO_META_KEY, settings)
+    if previous == settings or (previous is None and not config.ollama.vision_model):
+        return
+    queued = 0
+    for row in store.entry_files(conn):
+        try:
+            data = parser.read_bytes(Path(row["path"]))
+        except OSError:
+            continue
+        text = data.decode("utf-8", errors="replace")
+        if parser.compute_hash(data) == row["content_hash"] and parser.has_images(text):
+            store.upsert_file(conn, row["path"], row["content_hash"], "pending")
+            queued += 1
+    if queued:
+        console.print(
+            f"Photo settings changed: {queued} {'file' if queued == 1 else 'files'} with photos to index again."
         )
 
 
@@ -719,6 +766,7 @@ def run_watch(
     client = client or OllamaClient(config)
     _ensure_vec(config, conn, client)
     _apply_private_settings(config, conn)
+    _apply_photo_settings(config, conn)
     _refresh_readings(config, conn)
     _refresh_link_details(config, conn)
     _refresh_note_properties(config, conn)

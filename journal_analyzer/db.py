@@ -297,6 +297,29 @@ CREATE TRIGGER IF NOT EXISTS sections_fts_ad AFTER DELETE ON entry_sections BEGI
   INSERT INTO sections_fts(sections_fts, rowid, text) VALUES ('delete', old.id, old.text);
 END;
 
+-- what a vision model saw in the photos an entry links, with [ollama] vision_model
+CREATE TABLE IF NOT EXISTS entry_photos (
+  id          INTEGER PRIMARY KEY,
+  entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  description TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entry_photos_entry ON entry_photos(entry_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS photos_fts USING fts5(
+  description,
+  content='entry_photos',
+  content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS photos_fts_ai AFTER INSERT ON entry_photos BEGIN
+  INSERT INTO photos_fts(rowid, description) VALUES (new.id, new.description);
+END;
+CREATE TRIGGER IF NOT EXISTS photos_fts_ad AFTER DELETE ON entry_photos BEGIN
+  INSERT INTO photos_fts(photos_fts, rowid, description) VALUES ('delete', old.id, old.description);
+END;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
   title,
   aliases,

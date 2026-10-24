@@ -331,6 +331,10 @@ def entry(req: Request, entry_id: str) -> Json:
              "embedded": p["id"] in embedded_parts}
             for p in parts_found
         ],
+        "photos": [
+            {"name": p["name"], "path": p["path"], "description": p["description"]}
+            for p in store.photos_for_entries(conn, [row["id"]]).get(row["id"], [])
+        ],
         "embedded": _has_vector(conn, "entries_vec", "entry_id", row["id"]),
         "similar": serialize.entry_briefs(conn, similar),
         "digests": digests,

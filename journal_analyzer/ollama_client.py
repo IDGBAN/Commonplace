@@ -441,6 +441,35 @@ class OllamaClient:
             f"after a retry: {last_error}"
         )
 
+    def describe_image(self, model: str, prompt: str, image: bytes) -> str:
+        """What a vision model says about one image. Kept in the memo by the image's bytes."""
+        messages = [{"role": "user", "content": prompt}]
+        opts = _options(messages, None, self._fixed_ctx(model))
+        think = self._think(model)
+        key = None
+        if self._memo is not None:
+            key = self._memo_key(
+                "vision", model, prompt=prompt, image=hashlib.sha256(image).hexdigest(),
+                options=_memo_options(opts), think=think,
+            )
+            kept = self._memo.get_text(key)
+            if kept is not None:
+                return kept
+        response = self._call(
+            model,
+            partial(
+                self._client.chat,
+                model=model,
+                messages=[{**messages[0], "images": [image]}],
+                options=opts,
+                think=think,
+            ),
+        )
+        text = strip_thinking(response["message"]["content"])
+        if key is not None and self._memo is not None:
+            self._memo.put_text(key, "vision", model, text)
+        return text
+
     def embed(
         self, model: str, text: str, options: dict[str, Any] | None = None
     ) -> list[float]:

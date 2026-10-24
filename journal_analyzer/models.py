@@ -22,6 +22,8 @@ class ParsedEntry:
     link_labels: dict[str, list[str]] = field(default_factory=dict)
     # parser.link_anchors for its links, e.g. "2024-01-14" -> ["Work"]
     link_anchors: dict[str, list[str]] = field(default_factory=dict)
+    # the image files it links or embeds, as written, e.g. "beach.jpg"
+    images: list[str] = field(default_factory=list)
 
 
 @dataclass

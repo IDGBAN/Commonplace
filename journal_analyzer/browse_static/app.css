@@ -311,6 +311,9 @@ h3 { font-size: 1.05rem; }
   -webkit-box-decoration-break: clone;
 }
 .raw .focus:focus { outline: none; }
+.photos { margin-top: 1.6rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+.photos dt { font: 0.82rem var(--mono); overflow-wrap: anywhere; }
+.photos dd { font: 0.98rem/1.5 var(--read); color: var(--ink-soft); }
 .raw .focus:focus-visible { outline: 2px solid var(--pencil); outline-offset: 0.3rem; }
 
 .margin {

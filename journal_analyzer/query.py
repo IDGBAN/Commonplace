@@ -498,6 +498,8 @@ def _retrieve(
         ranked_lists.extend(
             _part_rankings(conn, query_vector, plan.keywords + plan.entities, allowed, fetch_k, best)
         )
+    # what a vision model saw in the photos, which the entry's own text may not say
+    ranked_lists.append(store.photos_fts_search(conn, plan.keywords + plan.entities, allowed, fetch_k))
     if boost_note_ids:
         # a third ranking, so linked entries get a lift without crowding out the rest
         allowed_set = set(allowed)
@@ -642,7 +644,10 @@ def keyword_search(
     allowed = (
         store.filtered_entry_ids(conn, date_from, date_to) if date_from or date_to else None
     )
-    ranked_lists = [store.fts_search(conn, keywords, allowed, limit)]
+    ranked_lists = [
+        store.fts_search(conn, keywords, allowed, limit),
+        store.photos_fts_search(conn, keywords, allowed, limit),
+    ]
     best: dict[int, sqlite3.Row] = {}
     ranked_lists.extend(_part_rankings(conn, None, keywords, allowed, limit, best))
     if named:
@@ -936,7 +941,13 @@ def _precise_reanalysis(
     budget = MAX_RAW_CONTEXT_CHARS - note_chars
     used: list[tuple[sqlite3.Row, str]] = []
     total = 0
-    recorded = store.metrics_for_entries(conn, [r["id"] for r in candidates]) if conn else {}
+    ids = [r["id"] for r in candidates]
+    recorded = store.metrics_for_entries(conn, ids) if conn else {}
+    seen = store.photos_for_entries(conn, ids) if conn else {}
+    photo_text = {
+        entry_id: "\n" + "\n".join(f"Photo {p['name']}: {p['description']}" for p in found)
+        for entry_id, found in seen.items()
+    }
     for row in candidates:  # best first
         heading = (
             f"### Entry {row['entry_date']}\n"
@@ -944,7 +955,7 @@ def _precise_reanalysis(
         )
         if row["id"] in recorded:
             heading += f"Recorded: {_metric_text(recorded[row['id']])}\n"
-        cost = len(heading) + len(row["raw_text"])
+        cost = len(heading) + len(row["raw_text"]) + len(photo_text.get(row["id"], ""))
         if used and total + cost > budget:
             continue
         used.append((row, heading))
@@ -952,7 +963,7 @@ def _precise_reanalysis(
     truncated = len(used) < len(candidates) or len(used_notes) < len(notes)
     entry_blocks = [
         # the first entry always gets in, so it alone can be over budget
-        (heading + row["raw_text"])[:budget]
+        (heading + row["raw_text"] + photo_text.get(row["id"], ""))[:budget]
         for row, heading in sorted(used, key=lambda pair: pair[0]["entry_date"])
     ]
     omitted = (
