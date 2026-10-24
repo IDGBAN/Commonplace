@@ -480,6 +480,8 @@ table.data tr:hover td { background: var(--paper-raised); }
 table.data .num { text-align: right; white-space: nowrap; }
 table.data .path { font: 0.82rem var(--mono); overflow-wrap: anywhere; }
 table.data .err { color: var(--alert); font-size: 0.86rem; }
+table.data .fix { color: var(--ink-faint); font-size: 0.86rem; margin-top: 0.15rem; }
+table.links td:first-child { white-space: nowrap; }
 .bar-cell { width: 30%; min-width: 6rem; }
 .hbar { display: block; height: 0.5rem; border-radius: 2px; background: var(--ink-faint); opacity: 0.55; }
 

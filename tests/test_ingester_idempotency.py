@@ -122,12 +122,12 @@ def test_ignore_patterns_skip_bare_name_anywhere(tmp_path):
         ignore_patterns=[".stversions", ".obsidian", "*.tmp.md"],
     )
     vault = cfg.vault.path
-    assert ingester._is_ignored(vault / ".obsidian" / "workspace.md", cfg)
-    assert ingester._is_ignored(
+    assert ingester.is_ignored(vault / ".obsidian" / "workspace.md", cfg)
+    assert ingester.is_ignored(
         vault / "sub" / ".stversions" / "2024-01-01.md", cfg
     )
-    assert ingester._is_ignored(vault / "2024-01-01.tmp.md", cfg)
-    assert not ingester._is_ignored(vault / "2024-01-01.md", cfg)
+    assert ingester.is_ignored(vault / "2024-01-01.tmp.md", cfg)
+    assert not ingester.is_ignored(vault / "2024-01-01.md", cfg)
     # matches_glob and the backfill walk both honor it
     assert not ingester._matches_glob(vault / ".obsidian" / "workspace.md", cfg)
 

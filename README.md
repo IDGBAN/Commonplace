@@ -131,6 +131,8 @@ journal tags --similar                   # tags that look like the same thing, a
 journal entities --type people           # most-linked notes, optionally of one kind
 journal unlinked                         # notes your entries name without linking
 journal unlinked "John Doe"              # the entries that name John without a link
+journal links                            # links that find no note or day, and why
+journal links "Jon Doe"                  # what's wrong with one, and the entries that write it
 journal lapsed --type people             # people you linked often but not in the last 6 months
 journal mood --since 2023-01-01          # average mood per month, with a bar chart
 journal mood --about "John Doe"          # only the days you linked John
@@ -146,7 +148,7 @@ journal export --format markdown --out ~/journal-export.md
 
 ### JSON for scripts
 
-`ask`, `search`, `show`, `note`, `stats`, `tags`, `entities`, `mood`, `metric`, `streaks`, `on-this-day`, `similar`, `lapsed`, `unlinked` and `digest` take `--json` and print one JSON object instead of tables, for a launcher, an editor plugin or `jq`. Entries, notes and digests have the same shape as in the `journal browse` API. Errors come out as `{"error": "..."}` with exit code 1, and anything that isn't the result (like the progress of `digest --refresh`) goes to stderr. `ask --json` waits for the whole answer instead of streaming it.
+`ask`, `search`, `show`, `note`, `stats`, `tags`, `entities`, `mood`, `metric`, `streaks`, `on-this-day`, `similar`, `lapsed`, `unlinked`, `links` and `digest` take `--json` and print one JSON object instead of tables, for a launcher, an editor plugin or `jq`. Entries, notes and digests have the same shape as in the `journal browse` API. Errors come out as `{"error": "..."}` with exit code 1, and anything that isn't the result (like the progress of `digest --refresh`) goes to stderr. `ask --json` waits for the whole answer instead of streaming it.
 
 ```sh
 journal mood --about "John Doe" --json | jq '.months[] | select(.avg_mood < 5)'
@@ -234,6 +236,17 @@ Entities come only from links. `journal entities`, the name filter in answers an
 The way you write links counts as well. If you write `[[John Doe|Johnny]]` in two or more entries (`[notes] learned_alias_min`), "Johnny" becomes another name for John Doe wherever names are matched: a question that says Johnny finds him, `journal note Johnny` and `--about Johnny` work, and `journal unlinked` catches entries that say Johnny without a link. Link text that you use for two different notes, words like "her" or "him", and anything in `learned_alias_ignore` never count. `"Mom's"` counts as Mom. `journal note` lists the names it learned, and so does the note's page in the browser. Links themselves still resolve only by file name and aliases, the way Obsidian does it, so a learned name never adds a mention on its own. Names are learned again at the end of every `journal index`, and by `journal watch` as files change.
 
 Because only links count, an entry that says "lunch with John" without `[[John Doe]]` is missing from John's numbers. `journal unlinked` lists the notes this happens to and how often, and `journal unlinked "John Doe"` shows each of those entries with the sentence that names him, so you can add the links in Obsidian. It matches titles and aliases as whole words, ignoring case, and skips a name inside another note's longer name. The browser lists them on each note's page too.
+
+A link that finds no note or day counts for nothing, and `journal links` lists them with the likeliest reason and what to do:
+
+- a Markdown file by that name exists but isn't read as a note: it's outside your note folders (add it to `paths`, or set `other_files`), in a hidden folder like `.trash`, or left out by `ignore_patterns`
+- the note couldn't be indexed, or it's marked private
+- it's an alias two notes share, so it can't tell which one you mean
+- it's a date with no entry, or not a real date
+- it's close to the name of a note that exists, like `[[Jon Doe]]` for John Doe
+- or there's simply no note by that name yet
+
+`journal links "Jon Doe"` shows one of them with the entries that write it, linked to their files. The browser's Notes page lists the same links with their reasons, except that it never looks at the files in your vault, so a file outside your note folders shows up there as having no note.
 
 If you add a folder to `paths` and run `journal index` again, the files in it switch from entries to notes even if they haven't changed.
 

@@ -24,7 +24,7 @@ from importlib import resources
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import db, fields, parser, profile, query, serialize, store, unlinked
+from . import db, fields, links, parser, profile, query, serialize, store, unlinked
 from .config import Config
 from .models import JournalError
 from .ollama_client import OllamaClient
@@ -295,6 +295,7 @@ def entry(req: Request, entry_id: str) -> Json:
 
 def notes(req: Request) -> Json:
     conn = req.conn
+    broken = links.diagnose(req.config, conn)
     _, latest = store.date_bounds(conn, None, None)
     quiet = (
         store.lapsed_notes(
@@ -310,9 +311,9 @@ def notes(req: Request) -> Json:
             for r in quiet
         ],
         "gone_quiet_rule": {"min": LAPSED_MIN_LINKS, "months": LAPSED_QUIET_MONTHS},
-        "unresolved_links": [
-            dict(r) for r in store.unresolved_links(conn, UNRESOLVED_LINKS_LIMIT)
-        ],
+        # without the vault walk, a file outside the note folders reads as missing
+        "unresolved_links": [asdict(b) for b in broken[:UNRESOLVED_LINKS_LIMIT]],
+        "unresolved_total": len(broken),
     }
 
 

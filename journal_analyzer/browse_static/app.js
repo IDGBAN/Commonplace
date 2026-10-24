@@ -781,10 +781,22 @@ async function notesView(_, params) {
   render();
 
   const unresolved = data.unresolved_links.length
-    ? section("Links with no note", h("div", { class: "chips" }, data.unresolved_links.map((l) =>
-      h("span", { class: "chip ghost", title: `Last linked ${mediumDate(l.last)}` }, l.target, h("span", { class: "n" }, fmtNum(l.n))))), {
-      intro: "Your entries link to these, but there's no note file for them in your note folders, so they don't count as mentions yet. Create the note and they will.",
-      note: "most linked first",
+    ? section("Links that find nothing", h("div", { class: "table-wrap" }, h("table", { class: "data links" },
+      h("thead", {}, h("tr", {},
+        h("th", {}, "Link"), h("th", { class: "num" }, "Entries"), h("th", { class: "num" }, "Notes"),
+        h("th", { class: "num" }, "Last linked"), h("th", {}, "Why, and what to do"))),
+      h("tbody", {}, data.unresolved_links.map((l) => h("tr", {},
+        h("td", {}, h("span", { class: "chip ghost" }, l.target)),
+        h("td", { class: "num" }, fmtNum(l.entries)),
+        h("td", { class: "num" }, fmtNum(l.notes)),
+        h("td", { class: "num" }, l.last ? mediumDate(l.last) : "–"),
+        h("td", {}, l.why, h("div", { class: "fix" },
+          l.like_id != null ? ["Did you mean ", h("a", { href: href.note(l.like_id) }, l.like), "?"] : l.fix))))))), {
+      intro: ["These are linked from your entries or notes, but nothing in the cache answers to them, so they don't count as mentions. ",
+        h("code", {}, "journal links"), " also looks at the files in your vault, so it can tell when a file is only outside your note folders."],
+      note: data.unresolved_total > data.unresolved_links.length
+        ? `most linked ${data.unresolved_links.length} of ${fmtNum(data.unresolved_total)}`
+        : "most linked first",
     })
     : null;
 

@@ -192,7 +192,7 @@ def _index_note(
     return True
 
 
-def _is_ignored(path: Path, config: Config) -> bool:
+def is_ignored(path: Path, config: Config) -> bool:
     patterns = config.vault.ignore_patterns
     if not patterns:
         return False
@@ -231,7 +231,7 @@ def _candidate_files(config: Config) -> set[Path]:
 
 
 def _vault_files(config: Config) -> list[Path]:
-    return sorted(p for p in _candidate_files(config) if not _is_ignored(p, config))
+    return sorted(p for p in _candidate_files(config) if not is_ignored(p, config))
 
 
 def _require_vault(config: Config) -> None:
@@ -350,7 +350,7 @@ def plan_backfill(
     """What run_backfill would do, without calling a model or writing anything."""
     _require_vault(config)
     candidates = _candidate_files(config)
-    files = sorted(p for p in candidates if not _is_ignored(p, config))
+    files = sorted(p for p in candidates if not is_ignored(p, config))
     return BackfillPlan(
         files=[_plan_file(p, config, conn, force) for p in files],
         ignored=len(candidates) - len(files),
@@ -560,7 +560,7 @@ def _matches_glob(path: Path, config: Config) -> bool:
     matched = parser.matches_entry_glob(path, config)
     if not matched and PurePath(path).suffix.lower() == ".md":
         matched = parser.note_kind(path, config) is not None
-    return matched and not _is_ignored(path, config)
+    return matched and not is_ignored(path, config)
 
 
 class _DebounceHandler(FileSystemEventHandler):
@@ -591,7 +591,7 @@ class _DebounceHandler(FileSystemEventHandler):
     def _record_gone(self, src: str | bytes) -> None:
         path = Path(os.fsdecode(src))
         vault = self.config.vault.path
-        if path != vault and path.is_relative_to(vault) and not _is_ignored(path, self.config):
+        if path != vault and path.is_relative_to(vault) and not is_ignored(path, self.config):
             self._queue(path, "delete")
 
     def on_created(self, event: FileSystemEvent) -> None:

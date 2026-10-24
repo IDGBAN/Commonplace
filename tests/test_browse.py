@@ -229,6 +229,17 @@ def test_links_to_part_of_a_day_or_note_say_which_part(browser, journal):
     assert note["focus"]["lines"] == [2, 4]
 
 
+def test_notes_page_says_why_links_find_nothing(browser, journal):
+    add_entry(journal, date(2024, 1, 21), links=["Jon Doe", "2024-01-30"], path="/vault/21.md")
+    data = browser.get("/api/notes")
+    by = {link["target"]: link for link in data["unresolved_links"]}
+    assert (by["jon doe"]["reason"], by["jon doe"]["like"]) == ("typo", "John Doe")
+    assert by["jon doe"]["like_id"] == note_id(journal, "John Doe")
+    assert by["2024-01-30"]["reason"] == "no_entry"
+    assert by["nobody yet"]["reason"] == "missing"
+    assert data["unresolved_total"] == 3
+
+
 def test_note_pages_list_the_names_learned_from_link_text(browser, config, journal):
     for day in (21, 22):
         entry = ParsedEntry(date(2024, 1, day), "x", f"/vault/{day}.md", links=["john doe"],

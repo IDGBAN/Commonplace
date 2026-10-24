@@ -1861,12 +1861,12 @@ def _has_table(conn: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
-def _links_nothing(conn: sqlite3.Connection) -> str:
-    clause = """NOT EXISTS (SELECT 1 FROM link_targets lt WHERE lt.target = el.target)
-                AND NOT EXISTS (SELECT 1 FROM entries d WHERE d.entry_date = el.target)"""
+def _links_nothing(conn: sqlite3.Connection, target: str = "el.target") -> str:
+    clause = f"""NOT EXISTS (SELECT 1 FROM link_targets lt WHERE lt.target = {target})
+                 AND NOT EXISTS (SELECT 1 FROM entries d WHERE d.entry_date = {target})"""
     # a read-only connection to a cache from before entry_file_keys has dates only
     if _has_table(conn, "entry_file_keys"):
-        clause += " AND NOT EXISTS (SELECT 1 FROM entry_file_keys fk WHERE fk.key = el.target)"
+        clause += f" AND NOT EXISTS (SELECT 1 FROM entry_file_keys fk WHERE fk.key = {target})"
     return clause
 
 
@@ -1943,6 +1943,79 @@ def unresolved_links(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
                ORDER BY n DESC, el.target
                LIMIT ?""",
             (limit,),
+        ).fetchall()
+    )
+
+
+def unresolved_note_links(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Link targets in notes that find nothing, and how many notes write each."""
+    return list(
+        conn.execute(
+            f"""SELECT nl.target, COUNT(DISTINCT nl.note_id) AS n
+                FROM note_links nl
+                WHERE {_links_nothing(conn, "nl.target")}
+                GROUP BY nl.target
+                ORDER BY n DESC, nl.target"""
+        ).fetchall()
+    )
+
+
+def shared_aliases(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Aliases more than one note has, and no note is named, with those notes' titles.
+
+    A link to one finds no note at all.
+    """
+    rows = conn.execute(
+        """SELECT nn.key, n.title FROM note_names nn JOIN notes n ON n.id = nn.note_id
+           WHERE nn.key IN (
+             SELECT key FROM note_names GROUP BY key HAVING COUNT(DISTINCT note_id) > 1)
+           AND nn.key NOT IN (SELECT link_key FROM notes)
+           ORDER BY nn.key, n.title COLLATE NOCASE"""
+    ).fetchall()
+    out: dict[str, list[str]] = defaultdict(list)
+    for r in rows:
+        out[r["key"]].append(r["title"])
+    return dict(out)
+
+
+def note_names_by_key(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    """Each title and alias key, with the note it names."""
+    return {
+        r["key"]: r
+        for r in conn.execute(
+            """SELECT nn.key, nn.name, n.id, n.title, n.kind
+               FROM note_names nn JOIN notes n ON n.id = nn.note_id ORDER BY n.id"""
+        )
+    }
+
+
+def files_with_status(conn: sqlite3.Connection, statuses: Sequence[str]) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            f"""SELECT path, status, error_message FROM files
+                WHERE status IN ({_JSON_VALUES}) ORDER BY path""",
+            (_json_list(list(statuses)),),
+        ).fetchall()
+    )
+
+
+def entries_linking(conn: sqlite3.Connection, target: str) -> list[sqlite3.Row]:
+    """Entries with a link to this key, newest first."""
+    return list(
+        conn.execute(
+            """SELECT e.* FROM entries e JOIN entry_links el ON el.entry_id = e.id
+               WHERE el.target = ? ORDER BY e.entry_date DESC, e.id DESC""",
+            (target,),
+        ).fetchall()
+    )
+
+
+def notes_linking(conn: sqlite3.Connection, target: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """SELECT n.* FROM notes n JOIN note_links nl ON nl.note_id = n.id
+               WHERE nl.target = ? ORDER BY n.title COLLATE NOCASE""",
+            (target,),
         ).fetchall()
     )
 

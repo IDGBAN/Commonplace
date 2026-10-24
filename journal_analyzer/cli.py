@@ -29,6 +29,7 @@ from . import (
     fields,
     ingester,
     insights,
+    links,
     memo,
     parser,
     profile,
@@ -1080,6 +1081,83 @@ def unlinked_cmd(
         if len(found_entries) > limit:
             console.print(f"[dim]{len(found_entries) - limit} more; raise --limit to see them.[/dim]")
         console.print(f"[dim]Link them as [[{escape(note['title'])}]] in Obsidian and they count from the next index.[/dim]")
+
+
+@app.command(name="links")
+def links_cmd(
+    target: Annotated[
+        str | None,
+        typer.Argument(help="A link as you write it, e.g. 'Jon Doe'. Leave out to list them all."),
+    ] = None,
+    config: ConfigOpt = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="How many rows.")] = 20,
+    as_json: JsonOpt = False,
+) -> None:
+    """Links that find no note or day, why, and what to do about each."""
+    OUT.as_json = as_json
+    with _guard(), _open(config) as (cfg, conn):
+        files = links.vault_markdown(cfg) if cfg.vault.path.is_dir() else None
+        found = links.diagnose(cfg, conn, files)
+        if target is None:
+            if as_json:
+                _emit({"links": [asdict(b) for b in found[:limit]], "total": len(found)})
+                return
+            _print_broken_links(found, limit)
+            return
+        key = parser.link_key(target) or target.strip().casefold()
+        broken = next((b for b in found if b.target == key), None)
+        entries = store.entries_linking(conn, key)
+        notes = store.notes_linking(conn, key)
+        if broken is None and not entries and not notes:
+            _fail(f"No entry or note links [[{target}]].", red=False)
+        if as_json:
+            _emit({
+                "link": asdict(broken) if broken else None,
+                "target": key,
+                "entries": serialize.entry_briefs(conn, entries[:limit]),
+                "notes": [serialize.note_ref(n) for n in notes],
+                "total": len(entries),
+            })
+            return
+        if broken is None:
+            console.print(f"[[{escape(target)}]] finds a note or a day, so it counts.")
+        else:
+            console.print(f"[bold cyan][[{escape(target)}]][/bold cyan] counts for nothing. {escape(broken.why)}")
+            console.print(f"  {escape(broken.fix)}")
+        if entries:
+            paths = {r["id"]: r["file_path"] for r in entries}
+            table = Table(title=f"Entries that link [[{escape(target)}]], newest first")
+            table.add_column("Date", no_wrap=True)
+            table.add_column("Summary")
+            for r in entries[:limit]:
+                table.add_row(_source_link(r["entry_date"], paths[r["id"]]), escape(r["summary"] or "-"))
+            console.print(table)
+            if len(entries) > limit:
+                console.print(f"[dim]{len(entries) - limit} more; raise --limit to see them.[/dim]")
+        if notes:
+            console.print("Notes that link it: " + escape(", ".join(n["title"] for n in notes)))
+
+
+def _print_broken_links(found: list[links.BrokenLink], limit: int) -> None:
+    if not found:
+        console.print("Every link finds a note or a day.")
+        return
+    table = Table(title="Links that find nothing")
+    table.add_column("Link", style="cyan")
+    table.add_column("Entries", justify="right")
+    table.add_column("Notes", justify="right")
+    table.add_column("Last", no_wrap=True)
+    table.add_column("Why, and what to do")
+    for b in found[:limit]:
+        table.add_row(
+            escape(f"[[{b.target}]]"), str(b.entries), str(b.notes), b.last or "-",
+            f"{escape(b.why)}\n[dim]{escape(b.fix)}[/dim]",
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{_count(len(found), 'link')} in all. 'journal links NAME' lists the entries "
+        "that write one.[/dim]"
+    )
 
 
 @app.command()
