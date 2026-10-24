@@ -200,6 +200,8 @@ class ProfileConfig(BaseModel):
 
 class NotesConfig(BaseModel):
     paths: list[str] = Field(default_factory=list)
+    # every Markdown file daily_note_glob doesn't pick is a note too
+    other_files: bool = False
     # 0 summarizes every non-empty note
     summarize_over_chars: int = Field(default=280, ge=0)
     # link text used for one note in this many entries becomes a name for it; 0 turns it off

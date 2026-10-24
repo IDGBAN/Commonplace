@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import re
 from datetime import date, datetime
@@ -533,11 +534,33 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
     return entries
 
 
+def matches_entry_glob(path: Path | str, config: Config) -> bool:
+    """Whether daily_note_glob picks this file, the way the indexer walks the vault.
+
+    PurePath.match treats "**" like "*" and misses nested files, so this uses
+    fnmatch, where "*" crosses slashes. The copy without "**/" catches files at
+    the top level.
+    """
+    try:
+        rel = PurePath(path).relative_to(config.vault.path)
+    except ValueError:
+        return False
+    rel_str = "/".join(rel.parts)
+    glob = config.vault.daily_note_glob
+    return any(fnmatch.fnmatch(rel_str, pattern) for pattern in {glob, glob.replace("**/", "")})
+
+
+def _kind_of(folder: str) -> str:
+    return re.sub(r"^\W+|\W+$", "", folder).casefold() or "note"
+
+
 def note_kind(path: Path | str, config: Config) -> str | None:
     """None for journal entries.
 
     Otherwise the folder right under the notes path, lowercased with punctuation
     trimmed, so Links/!Files/x.md is "files". Files with no such folder are "note".
+    With [notes] other_files, a Markdown file daily_note_glob doesn't pick is a
+    note too, its kind the folder it's in under the vault root.
     """
     try:
         rel = PurePath(path).relative_to(config.vault.path)
@@ -551,7 +574,15 @@ def note_kind(path: Path | str, config: Config) -> str | None:
         inner = rel.parts[len(prefix):]
         if len(inner) <= 1:
             return "note"
-        return re.sub(r"^\W+|\W+$", "", inner[0]).casefold() or "note"
+        return _kind_of(inner[0])
+    if (
+        config.notes.other_files
+        and rel.suffix.casefold() == ".md"
+        # Obsidian leaves out hidden folders like .trash, so they aren't notes
+        and not any(part.startswith(".") for part in rel.parts)
+        and not matches_entry_glob(path, config)
+    ):
+        return _kind_of(rel.parts[0]) if len(rel.parts) > 1 else "note"
     return None
 
 

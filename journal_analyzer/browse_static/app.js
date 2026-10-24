@@ -432,7 +432,9 @@ async function overviewView() {
   const s = o.setup;
   const setup = h("dl", { class: "setup" },
     h("dt", {}, "Journal folder"), h("dd", { class: "path" }, s.vault),
-    h("dt", {}, "Note folders"), h("dd", {}, s.notes_paths.length ? s.notes_paths.join(", ") : "none set"),
+    h("dt", {}, "Note folders"), h("dd", {},
+      s.notes_paths.length ? s.notes_paths.join(", ") : s.other_files ? null : "none set",
+      s.other_files ? `${s.notes_paths.length ? ", and " : ""}every other Markdown file` : null),
     h("dt", {}, "Note kinds"), h("dd", {}, o.note_kinds.length
       ? h("span", { class: "chips" }, o.note_kinds.map((k) => h("a", { class: "chip", href: href.notes({ kind: k.kind }) }, kindLabel(k.kind), h("span", { class: "n" }, fmtNum(k.n)))))
       : "none"),

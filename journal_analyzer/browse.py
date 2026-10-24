@@ -170,6 +170,7 @@ def overview(req: Request) -> Json:
         "setup": {
             "vault": str(cfg.vault.path),
             "notes_paths": cfg.notes.paths,
+            "other_files": cfg.notes.other_files,
             "db_path": str(cfg.db.path),
             "db_bytes": db_bytes,
             "schema_version": db.SCHEMA_VERSION,

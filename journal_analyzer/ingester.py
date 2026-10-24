@@ -223,6 +223,10 @@ def _candidate_files(config: Config) -> set[Path]:
             found.add(target)
         elif target.is_dir():
             found.update(p for p in target.rglob("*.md") if p.is_file())
+    if config.notes.other_files:
+        found.update(
+            p for p in root.rglob("*.md") if p.is_file() and parser.note_kind(p, config) is not None
+        )
     return found
 
 
@@ -550,18 +554,11 @@ def _ensure_vec(config: Config, conn: sqlite3.Connection, client: OllamaClient) 
 
 
 def _matches_glob(path: Path, config: Config) -> bool:
-    # Has to agree with what run_backfill picks up. PurePath.match treats "**"
-    # like "*" and misses nested files, so this uses fnmatch, where "*" crosses
-    # slashes. The copy without "**/" catches files at the top level.
-    try:
-        rel = PurePath(path).relative_to(config.vault.path)
-    except ValueError:
+    # has to agree with what run_backfill picks up
+    if not PurePath(path).is_relative_to(config.vault.path):
         return False
-    rel_str = "/".join(rel.parts)
-    glob = config.vault.daily_note_glob
-    candidates = {glob, glob.replace("**/", "")}
-    matched = any(fnmatch.fnmatch(rel_str, pattern) for pattern in candidates)
-    if not matched and rel.suffix.lower() == ".md":
+    matched = parser.matches_entry_glob(path, config)
+    if not matched and PurePath(path).suffix.lower() == ".md":
         matched = parser.note_kind(path, config) is not None
     return matched and not _is_ignored(path, config)
 
