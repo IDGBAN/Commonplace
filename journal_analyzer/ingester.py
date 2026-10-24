@@ -234,7 +234,7 @@ def _candidate_files(config: Config) -> set[Path]:
     return found
 
 
-def _vault_files(config: Config) -> list[Path]:
+def vault_files(config: Config) -> list[Path]:
     return sorted(p for p in _candidate_files(config) if not is_ignored(p, config))
 
 
@@ -372,7 +372,7 @@ def run_backfill(
     client = client or OllamaClient(config)
     _ensure_vec(config, conn, client)
     # notes first so entry links resolve even if the run gets cut short
-    files = sorted(_vault_files(config), key=lambda p: parser.note_kind(p, config) is None)
+    files = sorted(vault_files(config), key=lambda p: parser.note_kind(p, config) is None)
     counts = {
         "indexed": 0,
         "private": 0,

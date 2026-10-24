@@ -160,7 +160,7 @@ def _body(text: str, config: Config) -> tuple[dict[str, FrontmatterValue], str]:
     return frontmatter, strip_comments(body) if config.vault.strip_comments else body
 
 
-def _try_parse_date(text: str, date_format: str) -> date | None:
+def date_from_text(text: str, date_format: str) -> date | None:
     text = text.strip()
     try:
         return datetime.strptime(text, date_format).date()
@@ -432,14 +432,14 @@ def _file_date(
 ) -> date | None:
     vault = config.vault
     if vault.date_source == "filename":
-        return _try_parse_date(path.stem, vault.date_format)
+        return date_from_text(path.stem, vault.date_format)
     if vault.date_source == "frontmatter":
         values = _as_list(frontmatter.get(vault.frontmatter_date_key))
-        return _try_parse_date(values[0], vault.date_format) if values else None
+        return date_from_text(values[0], vault.date_format) if values else None
     for line in body.splitlines():
         if line.lstrip().startswith("#") and not line.lstrip().startswith("#["):
             heading_text = line.lstrip().lstrip("#").strip()
-            d = _try_parse_date(heading_text, vault.date_format)
+            d = date_from_text(heading_text, vault.date_format)
             if d:
                 return d
     return None
@@ -507,7 +507,7 @@ def parse_file(path: Path | str, config: Config) -> list[ParsedEntry]:
         if text_is_private(section, config):
             private_sections += 1
             continue
-        section_date = _try_parse_date(
+        section_date = date_from_text(
             heading_line.lstrip("#").strip(), config.vault.date_format
         ) or file_date
         if section_date is None:

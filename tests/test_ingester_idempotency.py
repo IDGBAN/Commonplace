@@ -176,7 +176,7 @@ def test_watch_and_backfill_agree_on_which_files_count(tmp_path):
     (vault / ".obsidian" / "2024-01-04.md").write_text("junk", encoding="utf-8")
     (vault / "notes.txt").write_text("not markdown", encoding="utf-8")
 
-    walked = set(ingester._vault_files(cfg))
+    walked = set(ingester.vault_files(cfg))
     watched = {
         p for p in vault.rglob("*") if p.is_file() and ingester._matches_glob(p, cfg)
     }
@@ -267,7 +267,7 @@ def test_notes_outside_the_daily_glob_are_still_found(tmp_path):
     cfg = make_config(tmp_path, notes_paths=["Links"], daily_note_glob="Journal/**/*.md")
     vault = cfg.vault.path
     copy_note_fixtures(vault)
-    assert "John Doe.md" in {p.name for p in ingester._vault_files(cfg)}
+    assert "John Doe.md" in {p.name for p in ingester.vault_files(cfg)}
     assert ingester._matches_glob(vault / "Links" / "People" / "John Doe.md", cfg)
     assert not ingester._matches_glob(vault / "Links" / "People" / "photo.jpg", cfg)
 

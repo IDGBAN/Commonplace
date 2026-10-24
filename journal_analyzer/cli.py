@@ -32,6 +32,7 @@ from . import (
     insights,
     links,
     memo,
+    obsidian,
     parser,
     profile,
     prompts,
@@ -2023,8 +2024,22 @@ def doctor(config: ConfigOpt = None) -> None:
         cfg = load_config(config)
         # don't stop at the first failure
         checks = [_report_vault(cfg), _report_ollama(cfg), _report_sqlite_vec()]
+        if cfg.vault.path.is_dir():
+            _report_obsidian(cfg)
         if not all(checks):
             raise typer.Exit(1)
+
+
+def _report_obsidian(cfg: Config) -> None:
+    advice = obsidian.check(cfg)
+    if advice is None:
+        console.print("[dim]No .obsidian folder in the vault, so no Obsidian settings to check.[/dim]")
+        return
+    for item in advice:
+        label = "[green]OK[/green]" if item.ok else "[yellow]WARN[/yellow]"
+        console.print(f"{label} {escape(item.message)}")
+        if item.toml:
+            console.print(f"     in config.toml: {escape(item.toml)}")
 
 
 def _report_ollama(cfg: Config) -> bool:

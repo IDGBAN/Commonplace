@@ -68,7 +68,7 @@ Check the setup, index everything once, then start asking.
 
 ```sh
 # setup
-journal doctor            # check the vault folder, Ollama, and that the models are pulled
+journal doctor            # check the vault, Ollama, the models, and config.toml against Obsidian's settings
 journal init              # create the DB schema and detect the embedding size
 
 # indexing (safe to stop and re-run)
@@ -104,6 +104,15 @@ journal compare 2024 2025 # two periods side by side; one period compares it wit
 journal profile           # what your journal says about you
 journal profile --update  # read entries it hasn't yet and fold in what's new
 ```
+
+`journal doctor` also reads Obsidian's own settings in `.obsidian/` and warns when `config.toml` disagrees with them, each time with the line to put in `config.toml`:
+
+- the daily notes core plugin's folder and date format, written as a daily note for today would be, against `daily_note_glob` and, with `date_source = "filename"`, against `date_format`
+- the templates folder (the core plugin's, or Templater's), whose files would fail to parse as entries
+- the files you excluded in Obsidian's settings, when they'd still be indexed
+- files in hidden folders like `.trash`, which Obsidian leaves out of the vault and which a `**/*.md` glob still picks up
+
+It never writes to `.obsidian` or anywhere in the vault, and with no `.obsidian` folder it skips these checks.
 
 Before a long first run, or after changing `date_source`, `date_format` or `split_heading_regex`, run `journal index --dry-run`. It walks the vault the same way `journal index` does and parses every file it would index, without Ollama and without touching the cache. It lists files that would fail and why, files that split into several entries, entries dated in the future, files that would be dropped, and roughly how many model calls the real run would make. Add `--force` to check every file, not just new and changed ones.
 
