@@ -599,12 +599,14 @@ def parse_note(path: Path | str, kind: str, config: Config) -> ParsedNote:
             aliases.setdefault(alias.casefold(), alias)
 
     properties: dict[str, str] = {}
+    values: dict[str, list[str]] = {}
     for key, value in frontmatter.items():
         if key.casefold() in _NON_PROPERTY_KEYS:
             continue
-        shown = ", ".join(v for v in (clean_text(item) for item in _as_list(value)) if v)
-        if shown:
-            properties[key] = shown
+        items = [v for v in (clean_text(item) for item in _as_list(value)) if v]
+        if items:
+            properties[key] = ", ".join(items)
+            values[key] = items
 
     own_key = title.casefold()
     links = [
@@ -619,6 +621,7 @@ def parse_note(path: Path | str, kind: str, config: Config) -> ParsedNote:
         source_path=str(path),
         aliases=list(aliases.values()),
         properties=properties,
+        property_values=values,
         links=links,
         rel_path=relative_path(path, config.vault.path),
         private=file_is_private(frontmatter, config) or text_is_private(cleaned, config),

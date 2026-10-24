@@ -77,6 +77,13 @@ AboutOpt = Annotated[
     typer.Option("--about", help="Only entries that link this note (its title or an alias)."),
 ]
 TagOpt = Annotated[str | None, typer.Option("--tag", help="Only entries with this tag.")]
+GroupOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--group",
+        help="Only entries that link a note with this property value, e.g. relationship=family.",
+    ),
+]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON instead of tables.")]
 NoMemoOpt = Annotated[
     bool,
@@ -177,8 +184,31 @@ def _one_note(conn: sqlite3.Connection, name: str, red: bool = True) -> sqlite3.
     return matches[0]
 
 
+def _property_names(conn: sqlite3.Connection) -> str:
+    return ", ".join(r["name"] for r in store.property_keys(conn)) or "none yet"
+
+
+def _group(conn: sqlite3.Connection, value: str) -> tuple[tuple[str, str], tuple[int, ...]]:
+    """`relationship=family` as the group and its notes, or a clear failure."""
+    key, sep, wanted = value.partition("=")
+    if not sep:
+        key, sep, wanted = value.partition(":")
+    key, wanted = key.strip(), wanted.strip()
+    if not sep or not key or not wanted:
+        _fail(f"--group takes a property and a value, like relationship=family, not '{value}'.")
+    groups = store.property_groups(conn, key)
+    if not groups:
+        _fail(f"No note has a '{key}' property. Properties: {_property_names(conn)}.")
+    ids = tuple(store.group_note_ids(conn, key, wanted))
+    if not ids:
+        values = ", ".join(r["value"] for r in groups)
+        _fail(f"No note's {key} is '{wanted}'. Its values: {values}.")
+    shown = next((r["value"] for r in groups if r["value"].casefold() == wanted.casefold()), wanted)
+    return (key, shown), ids
+
+
 def _entry_filter(
-    conn: sqlite3.Connection, about: str | None, tag: str | None
+    conn: sqlite3.Connection, about: str | None, tag: str | None, group: str | None = None
 ) -> store.EntryFilter | None:
     note_ids: tuple[int, ...] = ()
     if about is not None:
@@ -186,7 +216,10 @@ def _entry_filter(
     name = tag.strip().lstrip("#").strip().lower() if tag is not None else None
     if name is not None and not store.tag_exists(conn, name):
         _fail(f"No entry is tagged '{name}'. 'journal tags' lists them.")
-    return store.EntryFilter(name, note_ids) if name or note_ids else None
+    found, group_ids = _group(conn, group) if group is not None else (None, ())
+    if not (name or note_ids or found):
+        return None
+    return store.EntryFilter(name, note_ids, found, group_ids)
 
 
 def _filter_json(conn: sqlite3.Connection, only: store.EntryFilter | None) -> dict[str, object]:
@@ -194,6 +227,10 @@ def _filter_json(conn: sqlite3.Connection, only: store.EntryFilter | None) -> di
         "about": [serialize.note_ref(r) for r in store.notes_by_ids(conn, list(only.note_ids))]
         if only else [],
         "tag": only.tag if only else None,
+        "group": {
+            "key": only.group[0], "value": only.group[1],
+            "notes": [serialize.note_ref(r) for r in store.notes_by_ids(conn, list(only.group_ids))],
+        } if only and only.group else None,
     }
 
 
@@ -203,6 +240,8 @@ def _filter_label(conn: sqlite3.Connection, only: store.EntryFilter | None) -> s
     parts = []
     if only.note_ids:
         parts.append("linking " + ", ".join(r["title"] for r in store.notes_by_ids(conn, list(only.note_ids))))
+    if only.group:
+        parts.append(f"linking a note whose {only.group[0]} is {only.group[1]}")
     if only.tag:
         parts.append(f"tagged {only.tag}")
     return " (entries " + " and ".join(parts) + ")"
@@ -470,17 +509,18 @@ def ask(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    group: GroupOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
     """Ask a question about your journal.
 
-    --since, --until, --about and --tag replace whatever the question's wording
-    suggests, so use them when you know the dates or the person.
+    --since, --until, --about, --tag and --group replace whatever the question's
+    wording suggests, so use them when you know the dates or the person.
     """
     OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        only = _entry_filter(conn, about, tag)
+        only = _entry_filter(conn, about, tag, group)
         with _working("Thinking...") as status:
             stream = None if as_json else _Streamed(status)
             result = query.answer(
@@ -740,13 +780,14 @@ def search(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    group: GroupOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
     """Search entries and notes by keyword and meaning."""
     OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        only = _entry_filter(conn, about, tag)
+        only = _entry_filter(conn, about, tag, group)
         with _working("Searching..."):
             results = query.search(
                 text, cfg, conn, OllamaClient(cfg),
@@ -1192,14 +1233,21 @@ def entities(
         str | None,
         typer.Option("--with", help="Only notes linked from the same entries as this one (title or alias)."),
     ] = None,
+    by: Annotated[
+        str | None,
+        typer.Option("--by", help="Group the notes by one of their properties, e.g. relationship."),
+    ] = None,
     as_json: JsonOpt = False,
 ) -> None:
     """List the notes your entries link to most."""
     OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
-    with _guard(), _open(config) as (_, conn):
+    with _guard(), _open(config) as (cfg, conn):
         if with_ is not None:
             _print_linked_with(conn, _one_note(conn, with_), limit, date_from, date_to, type_)
+            return
+        if by is not None:
+            _print_groups(cfg, conn, by, limit, date_from, date_to)
             return
         rows = store.top_entities(conn, date_from, date_to, limit=limit, entity_type=type_)
         kinds = ", ".join(r["kind"] for r in store.notes_by_kind(conn))
@@ -1222,6 +1270,38 @@ def entities(
     for r in rows:
         table.add_row(escape(r["name"]), escape(r["type"]), str(r["n"]))
     console.print(table)
+
+
+def _print_groups(
+    cfg: Config,
+    conn: sqlite3.Connection,
+    key: str,
+    limit: int,
+    date_from: date | None,
+    date_to: date | None,
+) -> None:
+    rows = store.property_groups(conn, key, date_from, date_to)
+    if not rows:
+        _fail(f"No note has a '{key}' property. Properties: {_property_names(conn)}.")
+    if OUT.as_json:
+        _emit({"by": key, "groups": [dict(r) for r in rows[:limit]], "total": len(rows)})
+        return
+    scale = cfg.indexing.mood_scale_max
+    table = Table(title=f"Notes by {escape(key)}")
+    table.add_column(escape(key.capitalize()), style="cyan")
+    table.add_column("Notes", justify="right")
+    table.add_column("Entries", justify="right")
+    table.add_column(f"Mood (1..{scale})", justify="right")
+    table.add_column("Last linked", no_wrap=True)
+    for r in rows[:limit]:
+        table.add_row(
+            escape(r["value"]), str(r["notes"]), str(r["entries"]), _mood_str(r["avg_mood"]),
+            r["last"] or "-",
+        )
+    console.print(table)
+    console.print(
+        f"[dim]--group {escape(key)}=VALUE filters mood, search, ask and the rest to one of these.[/dim]"
+    )
 
 
 def _print_linked_with(
@@ -1255,13 +1335,14 @@ def mood(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    group: GroupOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
     """Average mood per month."""
     OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        only = _entry_filter(conn, about, tag)
+        only = _entry_filter(conn, about, tag, group)
         rows = store.monthly_mood(conn, date_from, date_to, only)
         label = _filter_label(conn, only)
         if as_json:
@@ -1298,6 +1379,7 @@ def metric(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    group: GroupOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
     """Numbers you record in entry frontmatter, like sleep: 7, by month."""
@@ -1335,7 +1417,7 @@ def metric(
                 f"No entry records '{name}'. Known: {', '.join(names) or 'none yet'}.",
                 {"known": names},
             )
-        only = _entry_filter(conn, about, tag)
+        only = _entry_filter(conn, about, tag, group)
         rows = store.monthly_metric(conn, name, date_from, date_to, only)
         label = _filter_label(conn, only)
         if as_json:
@@ -1653,6 +1735,7 @@ def export_cmd(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    group: GroupOpt = None,
     include_raw: Annotated[
         bool, typer.Option("--include-raw", help="Include full entry text.")
     ] = False,
@@ -1660,7 +1743,7 @@ def export_cmd(
     """Export entries as JSON or Markdown."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        only = _entry_filter(conn, about, tag)
+        only = _entry_filter(conn, about, tag, group)
         entries = export.collect_entries(
             conn, date_from, date_to, include_raw=include_raw, only=only
         )
@@ -1752,11 +1835,12 @@ def chat(
     until: UntilOpt = None,
     about: AboutOpt = None,
     tag: TagOpt = None,
+    group: GroupOpt = None,
 ) -> None:
     """Ask questions with follow-ups. The filters apply to every question."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
-        only = _entry_filter(conn, about, tag)
+        only = _entry_filter(conn, about, tag, group)
         _chat_loop(cfg, conn, OllamaClient(cfg), date_from, date_to, only)
 
 

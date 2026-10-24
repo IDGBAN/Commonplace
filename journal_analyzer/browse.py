@@ -43,6 +43,7 @@ LAPSED_MIN_LINKS = 5
 LAPSED_QUIET_MONTHS = 6
 COOCCURRING_LIMIT = 12
 LINKED_WITH_LIMIT = 12
+GROUP_VALUES_LIMIT = 30
 PROFILE_FACTS_LIMIT = 300
 _MAX_ROWID = 2**63 - 1
 _NO_ENTRY = "There is no indexed entry with that id."
@@ -205,11 +206,26 @@ def catalog(req: Request) -> Json:
     }
 
 
+def _group_param(req: Request) -> tuple[tuple[str, str], list[int]] | None:
+    """?group=relationship=family as the group and its notes."""
+    raw = req.params.get("group", "").strip()
+    if not raw:
+        return None
+    key, sep, value = raw.partition("=")
+    if not sep or not key.strip() or not value.strip():
+        raise ApiError(HTTPStatus.BAD_REQUEST, "'group' must be a property and a value, like relationship=family.")
+    ids = store.group_note_ids(req.conn, key, value)
+    if not ids:
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No note's {key.strip()} is '{value.strip()}'.")
+    return (key.strip(), value.strip()), ids
+
+
 def entries(req: Request) -> Json:
     note_id = req.number("note", -1, -1, sys.maxsize)
     limit = req.number("limit", 50, 1, MAX_PAGE_SIZE)
     offset = req.number("offset", 0, 0, sys.maxsize)
     date_from, date_to = req.day("from"), req.day("to")
+    group = _group_param(req)
     rows, total = store.browse_entries(
         req.conn,
         date_from=date_from,
@@ -217,6 +233,8 @@ def entries(req: Request) -> Json:
         tag=req.params.get("tag") or None,
         note_id=note_id if note_id >= 0 else None,
         text=req.params.get("q") or None,
+        group=group[0] if group else None,
+        group_ids=group[1] if group else (),
         newest_first=req.params.get("order", "newest") != "oldest",
         limit=limit,
         offset=offset,
@@ -227,8 +245,25 @@ def entries(req: Request) -> Json:
         "offset": offset,
         "limit": limit,
         "note": serialize.note_ref(note[0]) if note else None,
+        "group": {"key": group[0][0], "value": group[0][1], "notes": len(group[1])} if group else None,
         "items": serialize.entry_briefs(req.conn, rows),
     }
+
+
+def _groups(req: Request) -> list[Json]:
+    """Properties that put two or more notes together, with their values."""
+    wanted = set(req.config.notes.group_keys)
+    out = []
+    for key in store.property_keys(req.conn):
+        if wanted and key["key"] not in wanted:
+            continue
+        values = [
+            {"value": r["value"], "notes": r["notes"], "entries": r["entries"]}
+            for r in store.property_groups(req.conn, key["key"])
+        ]
+        if any(v["notes"] >= 2 for v in values):
+            out.append({"key": key["key"], "name": key["name"], "values": values[:GROUP_VALUES_LIMIT]})
+    return out
 
 
 def entry(req: Request, entry_id: str) -> Json:
@@ -308,6 +343,7 @@ def notes(req: Request) -> Json:
     return {
         "kinds": [dict(r) for r in store.notes_by_kind(conn)],
         "notes": serialize.note_briefs(conn, store.all_notes(conn)),
+        "groups": _groups(req),
         "gone_quiet": [
             {"id": r.note_id, "title": r.title, "kind": r.kind, "n": r.count, "last": r.last}
             for r in quiet
@@ -340,6 +376,7 @@ def note(req: Request, note_id: str) -> Json:
         "learned_names": serialize.learned_names(conn, [row["id"]]).get(row["id"], []),
         "learned_min": req.config.notes.learned_alias_min,
         "properties": parsed.properties,
+        "property_groups": [dict(r) for r in store.property_values_for(conn, row["id"])],
         "summary": row["summary"],
         "summary_source": summary_source,
         "model_used": row["model_used"],

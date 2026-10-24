@@ -167,6 +167,8 @@ def add_note(
         aliases=list(aliases),
         properties=dict(properties or {}),
         links=[target.casefold() for target in links],
+        # "Friend, School" stands for the list [Friend, School]
+        property_values={k: [v.strip() for v in value.split(",")] for k, value in (properties or {}).items()},
     )
     return store.save_note(conn, note, summary, None)
 

@@ -209,6 +209,8 @@ class NotesConfig(BaseModel):
     # link text used for one note in this many entries becomes a name for it; 0 turns it off
     learned_alias_min: int = Field(default=2, ge=0)
     learned_alias_ignore: list[str] = Field(default_factory=list)
+    # properties whose values group notes for `journal insights`; empty means all of them
+    group_keys: list[str] = Field(default_factory=list)
 
     @field_validator("paths")
     @classmethod

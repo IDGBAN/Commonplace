@@ -16,9 +16,10 @@ MAX_TAG_FINDINGS = 6
 MAX_ENTITY_FINDINGS = 5
 MAX_COOCCURRENCE_FINDINGS = 3
 MAX_METRIC_FINDINGS = 4
+MAX_GROUP_FINDINGS = 4
 
 FindingKind = Literal[
-    "tag_mood", "entity_mood", "weekday", "season", "cooccurrence", "metric_mood"
+    "tag_mood", "entity_mood", "group_mood", "weekday", "season", "cooccurrence", "metric_mood"
 ]
 
 _WEEKDAYS = [
@@ -32,7 +33,8 @@ _MONTHS = [
 _NARRATE_SYSTEM = (
     "You are a reflective journaling analyst. Below are statistical patterns "
     "computed from the reader's own journal: correlations between their mood "
-    "and their tags, people, the day of week, the season, numbers they track "
+    "and their tags, people, groups of people or places (like family or "
+    "friends), the day of week, the season, numbers they track "
     "in their notes (like hours of sleep), and themes that recur together. Write a warm, concrete 3-6 sentence reflection, spoken "
     'to them directly as "you", that ties the strongest signals together '
     'into observations they might not have noticed. Never call them "the '
@@ -190,6 +192,20 @@ def compute_insights(
             avg, threshold, "Days mentioning", top_n=MAX_ENTITY_FINDINGS,
         )
     )
+    groups = []
+    for r in store.group_mood_stats(conn, date_from, date_to, min_count, config.notes.group_keys):
+        dev = r["avg_mood"] - avg
+        if abs(dev) < threshold:
+            continue
+        direction = "higher" if dev > 0 else "lower"
+        groups.append(Finding(
+            "group_mood",
+            f"Days linking a note whose {r['name']} is {r['value']}: average mood "
+            f"{r['avg_mood']:g} ({direction} than the {avg:g} baseline) across {r['n']} entries",
+            abs(dev),
+        ))
+    groups.sort(key=lambda f: -f.magnitude)
+    result.findings.extend(groups[:MAX_GROUP_FINDINGS])
     rhythms = [
         _rhythm_finding(
             "weekday",

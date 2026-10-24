@@ -45,6 +45,8 @@ _LINK_DETAILS_META_KEY = "link_details"
 # raised whenever save_entry starts keeping more about links, so entries
 # indexed before that get it from their files once
 LINK_DETAILS_VERSION = "2"
+_NOTE_PROPERTIES_META_KEY = "note_properties"
+NOTE_PROPERTIES_VERSION = "1"
 
 WATCH_POLL_SECONDS = 1.0
 
@@ -381,6 +383,7 @@ def run_backfill(
     _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
     _refresh_link_details(config, conn)
+    _refresh_note_properties(config, conn)
     indexed: list[str] = []
     with Progress(console=console) as progress:
         task = progress.add_task("Indexing", total=len(files))
@@ -534,6 +537,24 @@ def _refresh_day_mentions(config: Config, conn: sqlite3.Connection) -> None:
     store.mark_note_digests_stale(conn, [r["link_key"] for r in notes])
 
 
+def _refresh_note_properties(config: Config, conn: sqlite3.Connection) -> None:
+    # Notes indexed before each property value was kept separately. Ones that
+    # changed since get re-indexed anyway.
+    if db.get_meta(conn, _NOTE_PROPERTIES_META_KEY) == NOTE_PROPERTIES_VERSION:
+        return
+    for row in store.all_notes(conn):
+        record = store.get_file_record(conn, row["file_path"])
+        path = Path(row["file_path"])
+        try:
+            data = parser.read_bytes(path)
+        except OSError:
+            continue
+        if record is None or parser.compute_hash(data) != record["content_hash"]:
+            continue
+        store.save_note_property_values(conn, row["id"], parser.parse_note(path, row["kind"], config))
+    db.set_meta(conn, _NOTE_PROPERTIES_META_KEY, NOTE_PROPERTIES_VERSION)
+
+
 def _refresh_link_details(config: Config, conn: sqlite3.Connection) -> None:
     # Stored text has its links written out, so what they pointed at comes from
     # the files. Ones that changed since get re-indexed anyway.
@@ -657,6 +678,7 @@ def run_watch(
     _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
     _refresh_link_details(config, conn)
+    _refresh_note_properties(config, conn)
     _refresh_links(config, conn)
     handler = _DebounceHandler(config)
     observer = Observer()

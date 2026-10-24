@@ -137,6 +137,18 @@ CREATE TABLE IF NOT EXISTS entry_file_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_entry_file_keys_key ON entry_file_keys(key);
 
+-- Each value of a note's properties, so Relationship: [Friend, School]
+-- puts the note in two groups. key and value_key are casefolded.
+CREATE TABLE IF NOT EXISTS note_property_values (
+  note_id   INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  key       TEXT NOT NULL,
+  name      TEXT NOT NULL,
+  value     TEXT NOT NULL,
+  value_key TEXT NOT NULL,
+  PRIMARY KEY (note_id, key, value_key)
+);
+CREATE INDEX IF NOT EXISTS idx_note_property_values_group ON note_property_values(key, value_key);
+
 CREATE TABLE IF NOT EXISTS note_links (
   note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
   target  TEXT NOT NULL,

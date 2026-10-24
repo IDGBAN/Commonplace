@@ -130,6 +130,8 @@ journal tags --limit 30                  # most used tags
 journal tags --similar                   # tags that look like the same thing, as a merge table
 journal entities --type people           # most-linked notes, optionally of one kind
 journal entities --with "John Doe"       # notes linked from the same entries as John
+journal entities --by relationship       # notes grouped by a property, with their mood
+journal mood --group relationship=family # mood on the days that link family
 journal unlinked                         # notes your entries name without linking
 journal unlinked "John Doe"              # the entries that name John without a link
 journal links                            # links that find no note or day, and why
@@ -145,7 +147,7 @@ journal similar 2024-01-15               # closest entries by stored embedding
 journal export --format markdown --out ~/journal-export.md
 ```
 
-`search`, `tags`, `entities`, `mood`, `metric`, `insights` and `export` take `--since` and `--until` as ISO dates. `search`, `mood`, `metric` and `export`, as well as `ask` and `chat`, also take `--about NOTE` (only entries that link that note, by title or alias) and `--tag TAG`. On `ask` and `chat`, `--since` and `--until` replace whatever dates the question's wording suggests, which helps when the small routing model reads a date wrong; with `chat` the filters apply to every question in the conversation. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
+`search`, `tags`, `entities`, `mood`, `metric`, `insights` and `export` take `--since` and `--until` as ISO dates. `search`, `mood`, `metric` and `export`, as well as `ask` and `chat`, also take `--about NOTE` (only entries that link that note, by title or alias), `--tag TAG` and `--group PROPERTY=VALUE` (only entries that link a note with that property value). On `ask` and `chat`, `--since` and `--until` replace whatever dates the question's wording suggests, which helps when the small routing model reads a date wrong; with `chat` the filters apply to every question in the conversation. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
 
 ### JSON for scripts
 
@@ -231,6 +233,8 @@ For each note, the cache keeps:
 A link to a heading or block counts as a link to the whole note or day. The part it points at is kept too: it's what the model reads for that link, `journal show` lists it after the day or note (`other days: 2024-03-04 (Work)`), and in the browser it opens the day or note with that part marked. Entries indexed before this get the parts' text in their reading after `journal index --force`, which only calls the model for entries with such links. The next `journal index` or `journal watch` reads which parts your links point at from the files without calling a model, so `journal show` and the browser list them straight away.
 
 Entities come only from links. `journal entities`, the name filter in answers and the per-person mood patterns in `journal insights` all reflect exactly what you linked. A link to a note that doesn't exist yet starts counting as soon as you create the note. Links to attachments (images, video, PDFs) are ignored, and embedded attachments are left out of the indexed text.
+
+Properties group notes. A note with `Relationship: [Friend, School]` is in the Friend group and the School group of `relationship`, and a plain `Relationship: Friend` puts it in one. `journal entities --by relationship` lists each value with how many notes have it, how many entries link one of them, and their average mood. `--group relationship=family` on `ask`, `chat`, `search`, `mood`, `metric` and `export` keeps only the entries that link a note in that group, so `journal mood --group relationship=family` is your mood on the days you wrote about family. `journal insights` reports groups of two or more notes whose days run above or below your usual mood, using the properties in `[notes] group_keys`, or all of them when that's empty. In the browser, a note's property values link to those entries, and the Notes page lists the groups. Property names and values ignore case. Notes indexed before groups existed get their values from their files on the next `journal index`, without a model call.
 
 `journal note "John Doe"` also lists the notes most often linked from the same entries as John, with how many entries they share, and so does his page in the browser under Often linked with. `journal entities --with "John Doe"` gives the whole list, and takes `--since`, `--until` and `--type` like the rest of `entities`.
 

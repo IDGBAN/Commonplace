@@ -262,6 +262,8 @@ function showFocus(node) {
   }, 0);
 }
 
+const groupLink = (key, value) => href.entries({ group: `${key}=${value}` });
+
 function sectionChip(label, link, part, title) {
   return h("a", { class: "chip pencil", href: link, title }, label, h("span", { class: "n" }, `› ${part}`));
 }
@@ -568,7 +570,7 @@ async function entriesView(_, params) {
   document.title = "Entries · Commonplace";
   const state = {
     q: params.get("q") || "", tag: params.get("tag") || "", note: params.get("note") || "",
-    from: params.get("from") || "", to: params.get("to") || "",
+    group: params.get("group") || "", from: params.get("from") || "", to: params.get("to") || "",
     order: params.get("order") || "newest", page: Number(params.get("page")) || 1,
   };
   const pageSize = 50;
@@ -585,6 +587,7 @@ async function entriesView(_, params) {
     h("option", { value: "newest", selected: state.order === "newest" }, "Newest first"),
     h("option", { value: "oldest", selected: state.order === "oldest" }, "Oldest first"));
   const noteSlot = h("div", { class: "field" });
+  const groupSlot = h("div", { class: "field" });
   const clear = h("button", { class: "button", type: "button" }, "Clear filters");
 
   let token = 0;
@@ -592,7 +595,7 @@ async function entriesView(_, params) {
     const mine = ++token;
     replaceParams("/entries", { ...state, order: state.order === "newest" ? "" : state.order, page: state.page > 1 ? state.page : "" });
     const data = await api("entries", {
-      q: state.q, tag: state.tag, note: state.note, from: state.from, to: state.to,
+      q: state.q, tag: state.tag, note: state.note, group: state.group, from: state.from, to: state.to,
       order: state.order, limit: pageSize, offset: (state.page - 1) * pageSize,
     }).catch((err) => ({ error: err }));
     if (mine !== token) return;
@@ -604,8 +607,13 @@ async function entriesView(_, params) {
       ? [h("span", {}, "Linking to"), h("span", { class: "chip pencil" }, data.note.title,
         h("button", { type: "button", "aria-label": `Stop filtering by ${data.note.title}`, onclick: () => { state.note = ""; state.page = 1; load(); } }, "×"))]
       : []);
+    fill(groupSlot, data.group
+      ? [h("span", {}, "In the group"), h("span", { class: "chip pencil" }, `${data.group.key}: ${data.group.value}`,
+        h("span", { class: "n" }, plural(data.group.notes, "note")),
+        h("button", { type: "button", "aria-label": `Stop filtering by ${data.group.key} ${data.group.value}`, onclick: () => { state.group = ""; state.page = 1; load(); } }, "×"))]
+      : []);
     const pages = Math.max(1, Math.ceil(data.total / pageSize));
-    const filtered = state.q || state.tag || state.note || state.from || state.to;
+    const filtered = state.q || state.tag || state.note || state.group || state.from || state.to;
     const go = (p) => () => { state.page = p; load(); window.scrollTo(0, 0); };
     fill(results,
       h("p", { class: "result-count" }, filtered
@@ -625,7 +633,7 @@ async function entriesView(_, params) {
   to.addEventListener("change", update("to", to));
   order.addEventListener("change", update("order", order));
   clear.addEventListener("click", () => {
-    Object.assign(state, { q: "", tag: "", note: "", from: "", to: "", page: 1 });
+    Object.assign(state, { q: "", tag: "", note: "", group: "", from: "", to: "", page: 1 });
     text.value = ""; tagSelect.value = ""; from.value = ""; to.value = "";
     load();
   });
@@ -635,7 +643,7 @@ async function entriesView(_, params) {
     h("header", { class: "page-head" }, h("p", { class: "eyebrow" }, "Every dated entry in the cache"), heading),
     h("div", { class: "filters", role: "search" },
       field("Contains", text, true), field("Tag", tagSelect), field("From", from), field("To", to),
-      field("Order", order), noteSlot, clear),
+      field("Order", order), noteSlot, groupSlot, clear),
     results);
 }
 
@@ -812,6 +820,19 @@ async function notesView(_, params) {
     })
     : null;
 
+  const groups = data.groups.length
+    ? section("Groups", data.groups.map((g) => h("div", { class: "group-row" },
+      h("h3", {}, g.name),
+      h("div", { class: "chips" }, g.values.map((v) => h("a", {
+        class: "chip", href: groupLink(g.key, v.value),
+        title: `${plural(v.notes, "note")}, linked from ${plural(v.entries, "entry", "entries")}`,
+      }, v.value, h("span", { class: "n" }, fmtNum(v.notes))))))), {
+      intro: ["Notes that share a property value, like Relationship: Family. Pick one to see the entries that link any of its notes. In the terminal, ",
+        h("code", {}, "journal entities --by"), " and ", h("code", {}, "--group"), " do the same."],
+      note: "number of notes",
+    })
+    : null;
+
   return h("div", {},
     pageHead({
       eyebrow: "Reference notes",
@@ -820,6 +841,7 @@ async function notesView(_, params) {
     }),
     h("div", { class: "filters", role: "search" }, field("Filter", filter, true), h("div", { class: "field" }, h("span", {}, "Kind"), kinds)),
     body,
+    groups,
     quiet,
     unresolved);
 }
@@ -860,6 +882,17 @@ async function noteView([id], params) {
       h("div", { class: "quiet" }, n.embedded ? "Has a meaning vector" : "No meaning vector yet")));
 
   const props = Object.entries(n.properties);
+  const valuesByKey = new Map();
+  for (const p of n.property_groups) {
+    if (!valuesByKey.has(p.name)) valuesByKey.set(p.name, []);
+    valuesByKey.get(p.name).push(p);
+  }
+  const propValue = (k, v) => valuesByKey.has(k)
+    ? h("span", { class: "chips" }, valuesByKey.get(k).map((p) => h("a", {
+      class: "chip", href: groupLink(p.key, p.value),
+      title: p.notes > 1 ? `${plural(p.notes, "note")} share this; see the entries that link them` : "See the entries that link notes with this value",
+    }, p.value, p.notes > 1 ? h("span", { class: "n" }, fmtNum(p.notes)) : null)))
+    : v;
   const qualifies = n.digest_min_mentions > 0 && n.mentions && n.mentions.count >= n.digest_min_mentions;
   const overYears = n.digest
     ? section("Over the years", [
@@ -880,7 +913,7 @@ async function noteView([id], params) {
     focusNotice(n.focus, "note"),
     h("div", { class: "folio" },
       h("article", {},
-        props.length ? h("dl", { class: "props" }, props.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])) : null,
+        props.length ? h("dl", { class: "props" }, props.map(([k, v]) => [h("dt", {}, k), h("dd", {}, propValue(k, v))])) : null,
         h("p", { class: "reading-label" }, n.focus && n.focus.lines
           ? `The note, as the app stored it. The “${n.focus.label}” part a link points at is marked.`
           : "The note, as the app stored it"),

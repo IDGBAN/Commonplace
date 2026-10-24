@@ -492,6 +492,9 @@ table.links td:first-child { white-space: nowrap; }
 /* Notes */
 
 .kind-group { margin-top: 2.2rem; }
+.group-row { margin-bottom: 1rem; }
+.group-row h3 { margin: 0 0 0.4rem; font-size: 0.9rem; font-weight: 600; color: var(--ink-soft); }
+.props dd .chips { margin-top: 0.1rem; }
 .note-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 0.75rem; }
 .note-card {
   display: block; padding: 0.8rem 0.95rem;

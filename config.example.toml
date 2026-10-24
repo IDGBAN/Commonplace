@@ -118,3 +118,6 @@ summarize_over_chars = 280        # shorter notes are their own summary; 0 summa
 # a name for it once it shows up in this many entries. 0 turns it off.
 learned_alias_min = 2
 learned_alias_ignore = []         # link text that should never count as a name, e.g. ["home"]
+# Properties whose values group notes for `journal insights`, e.g.
+# ["relationship"]. Empty means every property two notes have in common.
+group_keys = []

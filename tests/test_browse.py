@@ -238,6 +238,23 @@ def test_notes_and_the_days_they_link_show_on_both_pages(browser, journal):
     assert [n["title"] for n in day["linked_from_notes"]] == ["Lisbon Trip"]
 
 
+def test_property_values_group_notes_and_filter_entries(browser, journal):
+    add_note(journal, "Jane Doe", properties={"Relationship": "Friend, Family"})
+    add_entry(journal, date(2024, 1, 22), links=["Jane Doe"], path="/vault/22.md")
+    [group] = browser.get("/api/notes")["groups"]
+    assert group["name"] == "Relationship"
+    assert [(v["value"], v["notes"]) for v in group["values"]] == [("Friend", 2), ("Family", 1)]
+
+    data = browser.get("/api/entries?group=relationship%3Dfriend")
+    assert data["group"] == {"key": "relationship", "value": "friend", "notes": 2}
+    assert [e["date"] for e in data["items"]] == ["2024-01-22", "2024-01-15"]
+    assert "property and a value" in browser.get("/api/entries?group=friend", status=400)["error"]
+    assert browser.get("/api/entries?group=relationship%3Denemy", status=404)
+
+    jane = browser.get(f"/api/notes/{note_id(journal, 'Jane Doe')}")
+    assert [(p["value"], p["notes"]) for p in jane["property_groups"]] == [("Friend", 2), ("Family", 1)]
+
+
 def test_notes_page_says_why_links_find_nothing(browser, journal):
     add_entry(journal, date(2024, 1, 21), links=["Jon Doe", "2024-01-30"], path="/vault/21.md")
     data = browser.get("/api/notes")

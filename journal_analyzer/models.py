@@ -36,6 +36,8 @@ class ParsedNote:
     links: list[str] = field(default_factory=list)
     rel_path: str = ""
     private: bool = False  # marked private, so nothing from it is stored
+    # the same properties as lists, e.g. Relationship -> ["Friend", "School"]
+    property_values: dict[str, list[str]] = field(default_factory=dict)
 
     def header(self) -> str:
         lines = [f"{self.title} ({self.kind})"]

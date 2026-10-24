@@ -599,7 +599,150 @@ def save_note(
             "INSERT OR IGNORE INTO note_links(note_id, target) VALUES (?, ?)",
             [(note_id, target) for target in note.links],
         )
+        _save_property_values(conn, note_id, note)
     return note_id
+
+
+def save_note_property_values(conn: sqlite3.Connection, note_id: int, note: ParsedNote) -> None:
+    with conn:
+        _save_property_values(conn, note_id, note)
+
+
+def _save_property_values(conn: sqlite3.Connection, note_id: int, note: ParsedNote) -> None:
+    conn.execute("DELETE FROM note_property_values WHERE note_id = ?", (note_id,))
+    conn.executemany(
+        """INSERT OR IGNORE INTO note_property_values(note_id, key, name, value, value_key)
+           VALUES (?, ?, ?, ?, ?)""",
+        [
+            (note_id, name.strip().casefold(), name.strip(), value, " ".join(value.casefold().split()))
+            for name, values in note.property_values.items()
+            for value in values
+        ],
+    )
+
+
+def property_keys(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Each property notes have, with how many notes and different values."""
+    try:
+        return list(
+            conn.execute(
+                """SELECT key, MIN(name) AS name, COUNT(DISTINCT note_id) AS notes,
+                          COUNT(DISTINCT value_key) AS "values"
+                   FROM note_property_values GROUP BY key ORDER BY notes DESC, key"""
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []  # a read-only connection to a cache from before the table
+
+
+def property_values_for(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:
+    """A note's property values, each with how many notes share it."""
+    try:
+        return list(
+            conn.execute(
+                """SELECT v.key, v.name, v.value,
+                          (SELECT COUNT(DISTINCT o.note_id) FROM note_property_values o
+                           WHERE o.key = v.key AND o.value_key = v.value_key) AS notes
+                   FROM note_property_values v WHERE v.note_id = ?
+                   ORDER BY v.rowid""",
+                (note_id,),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def group_note_ids(conn: sqlite3.Connection, key: str, value: str) -> list[int]:
+    """The notes whose property `key` has `value`, both compared ignoring case."""
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT note_id FROM note_property_values
+               WHERE key = ? AND value_key = ? ORDER BY note_id""",
+            (key.strip().casefold(), " ".join(value.casefold().split())),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [r["note_id"] for r in rows]
+
+
+def property_groups(
+    conn: sqlite3.Connection,
+    key: str,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[sqlite3.Row]:
+    """The values of one property, each with its notes and the entries that link them.
+
+    An entry that links two notes in a group counts once for it.
+    """
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    on = "".join(f" AND {c}" for c in clauses)
+    key = key.strip().casefold()
+    try:
+        return list(
+            conn.execute(
+                f"""WITH members AS (
+                      SELECT DISTINCT v.value_key, ee.entry_id
+                      FROM note_property_values v
+                      JOIN entry_entities ee ON ee.entity_id = v.note_id
+                      WHERE v.key = ?)
+                    SELECT g.value, g.notes, COUNT(e.id) AS entries,
+                           ROUND(AVG(e.mood_score), 2) AS avg_mood,
+                           MIN(e.entry_date) AS first, MAX(e.entry_date) AS last
+                    FROM (SELECT value_key, MIN(value) AS value, COUNT(DISTINCT note_id) AS notes
+                          FROM note_property_values WHERE key = ? GROUP BY value_key) g
+                    LEFT JOIN members m ON m.value_key = g.value_key
+                    LEFT JOIN entries e ON e.id = m.entry_id{on}
+                    GROUP BY g.value_key
+                    ORDER BY entries DESC, g.notes DESC, g.value COLLATE NOCASE""",
+                [key, key, *params],
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def group_mood_stats(
+    conn: sqlite3.Connection,
+    date_from: date | None,
+    date_to: date | None,
+    min_count: int,
+    keys: Sequence[str] = (),
+) -> list[sqlite3.Row]:
+    """Mood on the days that link any note of a group, for groups of two notes or more.
+
+    `keys` limits it to those properties; empty means all of them.
+    """
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    wanted = [k.strip().casefold() for k in keys if k.strip()]
+    if wanted:
+        clauses.append(f"v.key IN ({_JSON_VALUES})")
+        params.append(_json_list(wanted))
+    where = "".join(f" AND {c}" for c in clauses)
+    return list(
+        conn.execute(
+            f"""WITH grouped AS (
+                  SELECT key, value_key FROM note_property_values
+                  GROUP BY key, value_key HAVING COUNT(DISTINCT note_id) >= 2),
+                members AS (
+                  SELECT DISTINCT v.key, v.value_key, ee.entry_id
+                  FROM note_property_values v
+                  JOIN grouped g ON g.key = v.key AND g.value_key = v.value_key
+                  JOIN entry_entities ee ON ee.entity_id = v.note_id
+                  JOIN entries e ON e.id = ee.entry_id
+                  WHERE e.mood_score IS NOT NULL{where})
+                SELECT m.key,
+                       (SELECT MIN(name) FROM note_property_values n WHERE n.key = m.key) AS name,
+                       (SELECT MIN(value) FROM note_property_values n
+                        WHERE n.key = m.key AND n.value_key = m.value_key) AS value,
+                       COUNT(*) AS n, ROUND(AVG(e.mood_score), 2) AS avg_mood
+                FROM members m JOIN entries e ON e.id = m.entry_id
+                GROUP BY m.key, m.value_key
+                HAVING COUNT(*) >= ?
+                ORDER BY avg_mood""",
+            [*params, min_count],
+        ).fetchall()
+    )
 
 
 def note_from_row(row: sqlite3.Row, vault: Path | None = None) -> ParsedNote:
@@ -1212,13 +1355,16 @@ def get_rollups_in_range(
 
 @dataclass(frozen=True)
 class EntryFilter:
-    """Only entries with this tag, and linking at least one of these notes."""
+    """Only entries with this tag, linking at least one of these notes, and
+    linking at least one note of this group (a property and its value)."""
 
     tag: str | None = None
     note_ids: tuple[int, ...] = ()
+    group: tuple[str, str] | None = None
+    group_ids: tuple[int, ...] = ()
 
     def __bool__(self) -> bool:
-        return bool(self.tag or self.note_ids)
+        return bool(self.tag or self.note_ids or self.group)
 
 
 def _filter_clauses(
@@ -1240,6 +1386,13 @@ def _filter_clauses(
             f"WHERE entity_id IN ({_JSON_VALUES}))"
         )
         params.append(_json_list(list(only.note_ids)))
+    if only and only.group:
+        # a group with no notes left matches nothing, rather than everything
+        clauses.append(
+            f"{alias}id IN (SELECT entry_id FROM entry_entities "
+            f"WHERE entity_id IN ({_JSON_VALUES}))"
+        )
+        params.append(_json_list(list(only.group_ids)))
     return clauses, params
 
 
@@ -1272,7 +1425,9 @@ def filtered_entry_ids(
     named in `only` are what the person asked for, so they always apply, and
     the router's names are left out.
     """
-    note_ids = [] if only and only.note_ids else note_ids_matching(conn, entity_names or [])
+    note_ids = (
+        [] if only and (only.note_ids or only.group) else note_ids_matching(conn, entity_names or [])
+    )
     clauses, params = _filter_clauses(date_from, date_to, only, alias="e.")
     if note_ids:
         clauses.append(
@@ -2123,8 +2278,12 @@ def _browse_where(
     tag: str | None,
     note_id: int | None,
     text: str | None,
+    group: tuple[str, str] | None = None,
+    group_ids: Sequence[int] = (),
 ) -> tuple[str, list[object]]:
-    only = EntryFilter(tag or None, (note_id,) if note_id is not None else ())
+    only = EntryFilter(
+        tag or None, (note_id,) if note_id is not None else (), group, tuple(group_ids)
+    )
     clauses, params = _filter_clauses(date_from, date_to, only, alias="e.")
     if text and text.strip():
         pattern = _like_contains(text.strip())
@@ -2143,12 +2302,14 @@ def browse_entries(
     tag: str | None = None,
     note_id: int | None = None,
     text: str | None = None,
+    group: tuple[str, str] | None = None,
+    group_ids: Sequence[int] = (),
     newest_first: bool = True,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[sqlite3.Row], int]:
     """One page of entries and the total that match."""
-    where, params = _browse_where(date_from, date_to, tag, note_id, text)
+    where, params = _browse_where(date_from, date_to, tag, note_id, text, group, group_ids)
     total = conn.execute(f"SELECT COUNT(*) AS n FROM entries e {where}", params).fetchone()["n"]
     direction = "DESC" if newest_first else "ASC"
     rows = conn.execute(

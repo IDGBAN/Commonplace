@@ -323,6 +323,9 @@ def _filter_facts(conn: sqlite3.Connection, only: store.EntryFilter | None) -> l
     if only and only.note_ids:
         titles = " or ".join(f"[[{r['title']}]]" for r in store.notes_by_ids(conn, list(only.note_ids)))
         facts.append(f"Only entries that link {titles} are counted.")
+    if only and only.group:
+        key, value = only.group
+        facts.append(f"Only entries that link a note whose {key} is {value} are counted.")
     if only and only.tag:
         facts.append(f"Only entries tagged '{only.tag}' are counted.")
     return facts
