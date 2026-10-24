@@ -744,7 +744,7 @@ async function notesView(_, params) {
   const state = { kind: params.get("kind") || "", q: params.get("q") || "" };
   const body = h("div", {});
   const kinds = h("div", { class: "chips" });
-  const filter = h("input", { type: "search", value: state.q, placeholder: "Title or alias" });
+  const filter = h("input", { type: "search", value: state.q, placeholder: "Title or any name for it" });
 
   function render() {
     replaceParams("/notes", state);
@@ -757,7 +757,7 @@ async function notesView(_, params) {
     const q = state.q.trim().toLowerCase();
     const shown = data.notes.filter((n) =>
       (!state.kind || n.kind === state.kind) &&
-      (!q || n.title.toLowerCase().includes(q) || n.aliases.some((a) => a.toLowerCase().includes(q))));
+      (!q || [n.title, ...n.aliases, ...n.learned].some((a) => a.toLowerCase().includes(q))));
     const groups = new Map(data.kinds.map((k) => [k.kind, []]));
     for (const n of shown) {
       if (!groups.has(n.kind)) groups.set(n.kind, []);
@@ -834,7 +834,12 @@ async function noteView([id], params) {
       h("span", {}, fmtNum(y.n)),
     ]))),
     n.avg_mood != null && gloss("Mood on those days", moodChip(n.avg_mood, scale), " ", delta(n.avg_mood, n.baseline_mood)),
-    gloss("Also called", n.aliases.length ? n.aliases.join(", ") : h("span", { class: "quiet" }, "No aliases")),
+    gloss("Also called", n.aliases.length ? n.aliases.join(", ") : h("span", { class: "quiet" }, "No aliases"),
+      n.learned_names.length ? [
+        h("div", { class: "gloss-label" }, "How you write it in links"),
+        h("div", {}, n.learned_names.map((l) => `${l.name} (${plural(l.entries, "entry", "entries")})`).join(", ")),
+        h("div", { class: "quiet" }, "Questions, filters and “named without a link” match these too."),
+      ] : null),
     gloss("Indexed", h("div", { class: "quiet" }, stamp(n.extracted_at)),
       h("div", { class: "quiet" }, n.embedded ? "Has a meaning vector" : "No meaning vector yet")));
 
@@ -1546,7 +1551,7 @@ async function jumpSearch() {
   const rank = (name) => (name.toLowerCase().startsWith(q) ? 0 : 1);
   const notes = cat.notes
     .map((n) => {
-      const names = [n.title, ...n.aliases];
+      const names = [n.title, ...n.aliases, ...n.learned];
       const hit = names.find((x) => x.toLowerCase().includes(q));
       return hit ? { n, score: Math.min(...names.filter((x) => x.toLowerCase().includes(q)).map(rank)), hit } : null;
     })

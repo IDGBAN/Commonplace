@@ -19,7 +19,7 @@ from rich.progress import Progress
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import context, db, embedder, extractor, fields, parser, profile, store
+from . import context, db, embedder, extractor, fields, nicknames, parser, profile, store
 from .config import Config
 from .models import (
     ConfigError,
@@ -43,7 +43,7 @@ _PRIVATE_META_KEY = "private_settings"
 _LINK_DETAILS_META_KEY = "link_details"
 # raised whenever save_entry starts keeping more about links, so entries
 # indexed before that get it from their files once
-LINK_DETAILS_VERSION = "1"
+LINK_DETAILS_VERSION = "2"
 
 WATCH_POLL_SECONDS = 1.0
 
@@ -385,6 +385,7 @@ def run_backfill(
             if result == "indexed":
                 indexed.append(str(path))
             progress.advance(task)
+    nicknames.refresh(config, conn)
     dropped = f", {counts['dropped']} dropped" if counts["dropped"] else ""
     private = f", {counts['private']} private" if counts["private"] else ""
     console.print(
@@ -638,6 +639,7 @@ def run_watch(
     _apply_private_settings(config, conn)
     _refresh_readings(config, conn)
     _refresh_link_details(config, conn)
+    nicknames.refresh(config, conn)
     handler = _DebounceHandler(config)
     observer = Observer()
     observer.schedule(handler, str(config.vault.path), recursive=True)
@@ -684,15 +686,19 @@ def _apply_due(
 ) -> OllamaUnavailableError | None:
     """`indexed` collects the files that were indexed, when given."""
     due = handler.take_due(config.indexing.watch_debounce_seconds)
-    for i, (path, kind) in enumerate(due):
-        try:
-            if _apply_event(path, kind, config, conn, client) == "indexed" and indexed is not None:
-                indexed.append(path)
-        except OllamaUnavailableError as exc:
-            # requeue the rest so restarting Ollama doesn't end the watch
-            for queued_path, queued_kind in due[i:]:
-                handler.requeue(queued_path, queued_kind)
-            return exc
+    try:
+        for i, (path, kind) in enumerate(due):
+            try:
+                if _apply_event(path, kind, config, conn, client) == "indexed" and indexed is not None:
+                    indexed.append(path)
+            except OllamaUnavailableError as exc:
+                # requeue the rest so restarting Ollama doesn't end the watch
+                for queued_path, queued_kind in due[i:]:
+                    handler.requeue(queued_path, queued_kind)
+                return exc
+    finally:
+        if due:
+            nicknames.refresh(config, conn)
     return None
 
 

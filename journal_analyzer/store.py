@@ -189,6 +189,63 @@ def _save_link_details(conn: sqlite3.Connection, entry_id: int, entry: ParsedEnt
             if anchor
         ],
     )
+    conn.execute("DELETE FROM entry_link_labels WHERE entry_id = ?", (entry_id,))
+    conn.executemany(
+        "INSERT OR IGNORE INTO entry_link_labels(entry_id, target, label) VALUES (?, ?, ?)",
+        [
+            (entry_id, target, label)
+            for target, labels in entry.link_labels.items()
+            for label in labels
+        ],
+    )
+
+
+def link_label_uses(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """(note_id, label, entry_id) for each link shown with its own text that finds a note."""
+    return list(
+        conn.execute(
+            """SELECT lt.note_id, ell.label, ell.entry_id
+               FROM entry_link_labels ell JOIN link_targets lt ON lt.target = ell.target
+               ORDER BY lt.note_id, ell.entry_id"""
+        ).fetchall()
+    )
+
+
+def note_name_keys(conn: sqlite3.Connection) -> set[str]:
+    """Every title and alias, as keys."""
+    return {r["key"] for r in conn.execute("SELECT key FROM note_names")}
+
+
+def replace_learned_names(
+    conn: sqlite3.Connection, names: Sequence[tuple[int, str, str, int]]
+) -> None:
+    """(note_id, name, key, entries) rows, replacing the ones there were."""
+    with conn:
+        conn.execute("DELETE FROM note_learned_names")
+        conn.executemany(
+            "INSERT OR REPLACE INTO note_learned_names(note_id, name, key, entries) VALUES (?, ?, ?, ?)",
+            names,
+        )
+
+
+def learned_names_for(conn: sqlite3.Connection, note_ids: list[int]) -> dict[int, list[sqlite3.Row]]:
+    """The names learned from link text for these notes, most used first."""
+    if not note_ids:
+        return {}
+    try:
+        rows = conn.execute(
+            f"""SELECT note_id, name, entries FROM note_learned_names
+                WHERE note_id IN ({_JSON_VALUES})
+                  AND key NOT IN (SELECT key FROM note_names)
+                ORDER BY note_id, entries DESC, name""",
+            (_json_list(note_ids),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # a read-only connection to a cache from before the table
+    out: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for r in rows:
+        out[r["note_id"]].append(r)
+    return dict(out)
 
 
 def link_anchors_for_entries(
@@ -571,8 +628,14 @@ def notes_by_ids(conn: sqlite3.Connection, ids: list[int]) -> list[sqlite3.Row]:
     return [by_id[i] for i in ids if i in by_id]
 
 
+def _names_table(conn: sqlite3.Connection) -> str:
+    # known_names adds the names learned from link text; a read-only connection
+    # to a cache from before it only has titles and aliases
+    return "known_names" if _has_table(conn, "note_learned_names") else "note_names"
+
+
 def note_ids_matching(conn: sqlite3.Connection, names: list[str]) -> list[int]:
-    """Substring match on titles and aliases."""
+    """Substring match on titles, aliases and names learned from link text."""
     terms = [n.strip().casefold() for n in names if n.strip()]
     if not terms:
         return []
@@ -580,14 +643,14 @@ def note_ids_matching(conn: sqlite3.Connection, names: list[str]) -> list[int]:
     return [
         r["note_id"]
         for r in conn.execute(
-            f"SELECT DISTINCT note_id FROM note_names WHERE {clause} ORDER BY note_id",
+            f"SELECT DISTINCT note_id FROM {_names_table(conn)} WHERE {clause} ORDER BY note_id",
             [_like_contains(t) for t in terms],
         )
     ]
 
 
 def find_notes(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
-    """Exact title, else exact alias, else substring matches."""
+    """Exact title, else exact alias or learned name, else substring matches."""
     key = name.strip().casefold()
     if not key:
         return []
@@ -596,7 +659,7 @@ def find_notes(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
         ids = [
             r["note_id"]
             for r in conn.execute(
-                "SELECT DISTINCT note_id FROM note_names WHERE key = ?", (key,)
+                f"SELECT DISTINCT note_id FROM {_names_table(conn)} WHERE key = ?", (key,)
             )
         ]
     rows = notes_by_ids(conn, ids or note_ids_matching(conn, [name]))
@@ -631,7 +694,7 @@ def note_exists(conn: sqlite3.Connection, path: str) -> bool:
 
 
 def note_name_index(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return list(conn.execute("SELECT note_id, key FROM note_names").fetchall())
+    return list(conn.execute(f"SELECT note_id, key FROM {_names_table(conn)}").fetchall())
 
 
 def notes_by_kind(conn: sqlite3.Connection) -> list[sqlite3.Row]:

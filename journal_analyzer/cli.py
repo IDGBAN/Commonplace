@@ -871,6 +871,7 @@ def note(
             data: dict[str, object] = {
                 **serialize.note_briefs(conn, [row])[0],
                 "path": row["file_path"],
+                "learned_names": serialize.learned_names(conn, [row["id"]]).get(row["id"], []),
                 "properties": parsed.properties,
                 "by_year": [dict(r) for r in store.mentions_by_year(conn, row["id"])],
                 "outlinks": [serialize.note_ref(r) for r in store.note_outlinks(conn, row["id"])],
@@ -895,6 +896,12 @@ def _print_note(
     )
     if parsed.aliases:
         console.print(f"  also called: {escape(', '.join(parsed.aliases))}")
+    learned = serialize.learned_names(conn, [row["id"]]).get(row["id"], [])
+    if learned:
+        console.print(
+            "  you also write: "
+            + escape(", ".join(f"{n['name']} ({_count(n['entries'], 'entry', 'entries')})" for n in learned))
+        )
     for key, value in parsed.properties.items():
         console.print(f"  {escape(key)}: {escape(value)}")
     if row["summary"]:

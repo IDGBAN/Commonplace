@@ -9,7 +9,7 @@ from urllib.parse import quote
 import pytest
 from conftest import add_entry, add_note
 
-from journal_analyzer import browse, db, query, store
+from journal_analyzer import browse, db, nicknames, query, store
 from journal_analyzer.models import (
     DatabaseError,
     Extraction,
@@ -227,6 +227,22 @@ def test_links_to_part_of_a_day_or_note_say_which_part(browser, journal):
     assert browser.get(f"/api/entries/{earlier}")["focus"] is None
     note = browser.get(f"/api/notes/{note_id(journal, 'Garden')}?at=Pests")
     assert note["focus"]["lines"] == [2, 4]
+
+
+def test_note_pages_list_the_names_learned_from_link_text(browser, config, journal):
+    for day in (21, 22):
+        entry = ParsedEntry(date(2024, 1, day), "x", f"/vault/{day}.md", links=["john doe"],
+                            link_labels={"john doe": ["Johnny"]})
+        store.upsert_file(journal, entry.source_path, "h", "indexed")
+        store.save_entry(journal, entry, Extraction(summary="s"), "m")
+    nicknames.refresh(config, journal)
+    john = note_id(journal, "John Doe")
+    detail = browser.get(f"/api/notes/{john}")
+    assert detail["learned_names"] == [{"name": "Johnny", "entries": 2}]
+    catalog = next(n for n in browser.get("/api/catalog")["notes"] if n["id"] == john)
+    assert catalog["learned"] == ["Johnny"]
+    listed = next(n for n in browser.get("/api/notes")["notes"] if n["id"] == john)
+    assert listed["learned"] == ["Johnny"]
 
 
 def test_similar_entries_use_stored_vectors(browser, journal):

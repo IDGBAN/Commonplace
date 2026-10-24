@@ -185,6 +185,8 @@ def overview(req: Request) -> Json:
 def catalog(req: Request) -> Json:
     """Everything the jump box and calendar need, in one small payload."""
     conn = req.conn
+    notes = store.all_notes(conn)
+    learned = serialize.learned_names(conn, [r["id"] for r in notes])
     return {
         "mood_scale": req.config.indexing.mood_scale_max,
         "entries": [
@@ -193,8 +195,9 @@ def catalog(req: Request) -> Json:
             for r in store.entry_days(conn)
         ],
         "notes": [
-            {**serialize.note_ref(r), "aliases": json.loads(r["aliases"])}
-            for r in store.all_notes(conn)
+            {**serialize.note_ref(r), "aliases": json.loads(r["aliases"]),
+             "learned": [n["name"] for n in learned.get(r["id"], [])]}
+            for r in notes
         ],
         "tags": [{"name": r["name"], "n": r["n"]} for r in store.tag_stats(conn)],
     }
@@ -330,6 +333,8 @@ def note(req: Request, note_id: str) -> Json:
     return {
         **serialize.note_ref(row),
         "aliases": parsed.aliases,
+        "learned_names": serialize.learned_names(conn, [row["id"]]).get(row["id"], []),
+        "learned_min": req.config.notes.learned_alias_min,
         "properties": parsed.properties,
         "summary": row["summary"],
         "summary_source": summary_source,

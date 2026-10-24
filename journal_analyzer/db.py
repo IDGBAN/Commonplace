@@ -121,6 +121,14 @@ CREATE TABLE IF NOT EXISTS entry_link_anchors (
   PRIMARY KEY (entry_id, target, anchor)
 );
 
+-- how a link was shown when that differs from its target, like Johnny in [[John Doe|Johnny]]
+CREATE TABLE IF NOT EXISTS entry_link_labels (
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  target   TEXT NOT NULL,
+  label    TEXT NOT NULL,
+  PRIMARY KEY (entry_id, target, label)
+);
+
 -- An entry file's name as a link key. Links find a day by its date, or like
 -- Obsidian by its file, so [[2024-01-15 trip]] finds "2024-01-15 trip.md".
 CREATE TABLE IF NOT EXISTS entry_file_keys (
@@ -155,6 +163,24 @@ CREATE VIEW link_targets AS
 CREATE VIEW entry_entities AS
   SELECT DISTINCT el.entry_id, lt.note_id AS entity_id
   FROM entry_links el JOIN link_targets lt ON lt.target = el.target;
+
+-- Link text used for one note often enough to be a name for it, rebuilt by
+-- nicknames.refresh. Questions and unlinked mentions match these names, but
+-- links still only resolve by file name and aliases, like in Obsidian.
+CREATE TABLE IF NOT EXISTS note_learned_names (
+  note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  name    TEXT NOT NULL,
+  key     TEXT NOT NULL,
+  entries INTEGER NOT NULL,
+  PRIMARY KEY (note_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_note_learned_names_key ON note_learned_names(key);
+DROP VIEW IF EXISTS known_names;
+CREATE VIEW known_names AS
+  SELECT note_id, name, key FROM note_names
+  UNION ALL
+  SELECT note_id, name, key FROM note_learned_names
+  WHERE key NOT IN (SELECT key FROM note_names);
 
 CREATE TABLE IF NOT EXISTS rollups (
   id            INTEGER PRIMARY KEY,

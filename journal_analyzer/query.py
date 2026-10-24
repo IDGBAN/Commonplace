@@ -235,13 +235,16 @@ def _words(text: str) -> str:
 
 
 def _notes_used(
-    answer_text: str, notes: list[sqlite3.Row], about: list[int]
+    answer_text: str,
+    notes: list[sqlite3.Row],
+    about: list[int],
+    learned: dict[int, list[str]] | None = None,
 ) -> list[str]:
     # Background notes the answer never mentions would pad every Sources line.
     said = f" {_words(answer_text)} "
     cited: list[str] = []
     for row in notes:
-        names = [row["title"], *store.note_from_row(row).aliases]
+        names = [row["title"], *store.note_from_row(row).aliases, *(learned or {}).get(row["id"], [])]
         mentioned = any(
             (words := _words(name)) and f" {words} " in said for name in names
         )
@@ -604,7 +607,13 @@ def _ensure_day_included(
     return day_rows + candidates
 
 
-def _note_line(row: sqlite3.Row, mentions: store.Mentions | None, vault: Path) -> str:
+def _note_line(
+    row: sqlite3.Row,
+    mentions: store.Mentions | None,
+    vault: Path,
+    learned: Sequence[str] = (),
+) -> str:
+    """`learned` are the names its links are written with (nicknames)."""
     note = store.note_from_row(row, vault)
     facts = [
         note.kind,
@@ -613,12 +622,19 @@ def _note_line(row: sqlite3.Row, mentions: store.Mentions | None, vault: Path) -
     ]
     if note.aliases:
         facts.append("also called " + ", ".join(note.aliases))
+    if learned:
+        facts.append("the journal also writes it as " + ", ".join(learned))
     if mentions is not None:
         facts.append(
             f"linked from {mentions.count} entries, {mentions.first} to {mentions.last}"
         )
     body = row["summary"] or note.raw_text or "(the note itself has no text)"
     return f"- [[{note.title}]] ({'; '.join(facts)}): {' '.join(body.split())}"
+
+
+def _learned_names(conn: sqlite3.Connection, notes: list[sqlite3.Row]) -> dict[int, list[str]]:
+    found = store.learned_names_for(conn, [r["id"] for r in notes])
+    return {note_id: [r["name"] for r in rows] for note_id, rows in found.items()}
 
 
 def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
@@ -687,9 +703,12 @@ def _summary_context(
         sections.append("Journal entries:\n" + "\n".join(lines))
     if notes:
         mentions = store.mention_stats(conn, [r["id"] for r in notes])
+        learned = _learned_names(conn, notes)
         sections.append(
             "Reference notes:\n"
-            + "\n".join(_note_line(r, mentions.get(r["id"]), vault) for r in notes)
+            + "\n".join(
+                _note_line(r, mentions.get(r["id"]), vault, learned.get(r["id"], [])) for r in notes
+            )
         )
     digests = _relationship_digests(conn, config, list(about))
     if digests:
@@ -819,11 +838,16 @@ def _precise_reanalysis(
     used_notes: list[sqlite3.Row] = []
     note_chars = 0
     vault = config.vault.path
+    learned = _learned_names(conn, notes) if conn is not None else {}
     for row in notes:  # most relevant first
         note = store.note_from_row(row, vault)
         over_years = (digests or {}).get(row["id"])
         history = f"\nOver the years: {over_years}" if over_years else ""
-        block = f"### Note: {note.header()}{history}\n{note.raw_text}".rstrip()
+        written = (
+            "\nThe journal also writes it as: " + ", ".join(learned[row["id"]])
+            if row["id"] in learned else ""
+        )
+        block = f"### Note: {note.header()}{written}{history}\n{note.raw_text}".rstrip()
         if note_blocks and note_chars + len(block) > MAX_NOTE_CONTEXT_CHARS:
             continue
         block = block[:MAX_NOTE_CONTEXT_CHARS]
@@ -950,7 +974,7 @@ def answer(
                 fast_answer,
                 "fast_summary",
                 cited_dates=[date.fromisoformat(r["entry_date"]) for r in candidates],
-                cited_notes=_notes_used(fast_answer, notes, about),
+                cited_notes=_notes_used(fast_answer, notes, about, _learned_names(conn, notes)),
                 read_entries=[r["id"] for r in candidates],
                 read_notes=[r["id"] for r in notes],
             )
@@ -967,7 +991,7 @@ def answer(
         text,
         "precise_raw",
         cited_dates=[date.fromisoformat(r["entry_date"]) for r in used],
-        cited_notes=_notes_used(text, used_notes, about),
+        cited_notes=_notes_used(text, used_notes, about, _learned_names(conn, used_notes)),
         read_entries=[r["id"] for r in used],
         read_notes=[r["id"] for r in used_notes],
     )

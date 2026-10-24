@@ -79,8 +79,17 @@ def note_ref(row: sqlite3.Row | dict[str, Any]) -> Json:
     return {"id": row["id"], "title": row["title"], "kind": row["kind"]}
 
 
+def learned_names(conn: sqlite3.Connection, note_ids: list[int]) -> dict[int, list[Json]]:
+    """The names each note's links are written with, from nicknames, by note id."""
+    return {
+        note_id: [{"name": r["name"], "entries": r["entries"]} for r in rows]
+        for note_id, rows in store.learned_names_for(conn, note_ids).items()
+    }
+
+
 def note_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json]:
     mentions = store.mention_stats(conn, [r["id"] for r in rows])
+    learned = learned_names(conn, [r["id"] for r in rows])
     out = []
     for r in rows:
         m = mentions.get(r["id"])
@@ -88,6 +97,7 @@ def note_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json]
             {
                 **note_ref(r),
                 "aliases": json.loads(r["aliases"]),
+                "learned": [n["name"] for n in learned.get(r["id"], [])],
                 "summary": r["summary"],
                 "mentions": m.count if m else 0,
                 "first": m.first if m else None,

@@ -202,11 +202,19 @@ class NotesConfig(BaseModel):
     paths: list[str] = Field(default_factory=list)
     # 0 summarizes every non-empty note
     summarize_over_chars: int = Field(default=280, ge=0)
+    # link text used for one note in this many entries becomes a name for it; 0 turns it off
+    learned_alias_min: int = Field(default=2, ge=0)
+    learned_alias_ignore: list[str] = Field(default_factory=list)
 
     @field_validator("paths")
     @classmethod
     def _normalize(cls, v: list[str]) -> list[str]:
         return [p.strip().replace("\\", "/").strip("/") for p in v if p.strip().strip("/\\")]
+
+    @field_validator("learned_alias_ignore")
+    @classmethod
+    def _names(cls, v: list[str]) -> list[str]:
+        return [name for name in (" ".join(n.casefold().split()) for n in v) if name]
 
 
 class Config(BaseModel):

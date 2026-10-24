@@ -106,3 +106,7 @@ watch_update_minutes = 30         # `journal watch` rewrites it at most this oft
 # these paths, so Links/People/John.md is "people".
 paths = []
 summarize_over_chars = 280        # shorter notes are their own summary; 0 summarizes every note
+# Link text you use for one note, like Johnny in [[John Doe|Johnny]], counts as
+# a name for it once it shows up in this many entries. 0 turns it off.
+learned_alias_min = 2
+learned_alias_ignore = []         # link text that should never count as a name, e.g. ["home"]
