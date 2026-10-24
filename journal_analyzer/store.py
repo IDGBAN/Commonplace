@@ -478,6 +478,24 @@ def metric_keys(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         return []
 
 
+def metric_averages(
+    conn: sqlite3.Connection, date_from: date | None, date_to: date | None
+) -> dict[str, tuple[float, int]]:
+    """Each metric's average and how many entries record it, in a range."""
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    try:
+        rows = conn.execute(
+            f"""SELECT m.key, AVG(m.value) AS avg, COUNT(*) AS n
+                FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+                {where} GROUP BY m.key ORDER BY m.key""",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r["key"]: (round(r["avg"], 2), r["n"]) for r in rows}
+
+
 def monthly_metric(
     conn: sqlite3.Connection,
     key: str,

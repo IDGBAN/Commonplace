@@ -100,6 +100,7 @@ journal chat              # Q&A that remembers the last few turns
 journal insights          # mood, tag and timing patterns you didn't ask about
 journal prompt            # ideas for what to write next, from threads left open
 journal review 2025       # the year in review, as Markdown
+journal compare 2024 2025 # two periods side by side; one period compares it with the one before
 journal profile           # what your journal says about you
 journal profile --update  # read entries it hasn't yet and fold in what's new
 ```
@@ -151,7 +152,7 @@ journal export --format markdown --out ~/journal-export.md
 
 ### JSON for scripts
 
-`ask`, `search`, `show`, `note`, `stats`, `tags`, `entities`, `mood`, `metric`, `streaks`, `on-this-day`, `similar`, `lapsed`, `unlinked`, `links` and `digest` take `--json` and print one JSON object instead of tables, for a launcher, an editor plugin or `jq`. Entries, notes and digests have the same shape as in the `journal browse` API. Errors come out as `{"error": "..."}` with exit code 1, and anything that isn't the result (like the progress of `digest --refresh`) goes to stderr. `ask --json` waits for the whole answer instead of streaming it.
+`ask`, `search`, `show`, `note`, `stats`, `tags`, `entities`, `mood`, `metric`, `streaks`, `on-this-day`, `similar`, `lapsed`, `unlinked`, `links`, `compare` and `digest` take `--json` and print one JSON object instead of tables, for a launcher, an editor plugin or `jq`. Entries, notes and digests have the same shape as in the `journal browse` API. Errors come out as `{"error": "..."}` with exit code 1, and anything that isn't the result (like the progress of `digest --refresh`) goes to stderr. `ask --json` waits for the whole answer instead of streaming it.
 
 ```sh
 journal mood --about "John Doe" --json | jq '.months[] | select(.avg_mood < 5)'
@@ -177,6 +178,8 @@ It opens the cache read-only and never touches your notes, so it's safe to leave
 `journal insights` runs statistics over the cache in plain SQL, then has the model describe only the findings that pass a threshold: tags and linked notes whose average mood differs from your baseline, weekday and seasonal patterns, numbers you keep in frontmatter (see [Metrics](#metrics)), and themes that show up together. These are correlations, not causes, and raw entries are never sent to a model. Use `--since` and `--until` (ISO dates) to limit the range, and set the thresholds in `[insights]` (`min_sample_size`, `mood_deviation_threshold`).
 
 `journal review 2025` puts a year on one page in Markdown: the year digest, writing numbers, mood by month, your best and hardest days by mood, the notes you linked most and the ones that first appear that year, your top tags against the year before, and tags that fell away. Days and notes are `[[links]]`, so it reads well pasted into Obsidian. It makes no model calls; if the year digest isn't written yet it says how to write it. Leave out the year for the latest one you wrote in, and add `--out FILE` to save it (outside the vault).
+
+`journal compare 2024 2025` puts two periods side by side: entries, days written, words, average mood, the longest streak and the average of each number you keep in frontmatter, then the tags you wrote more and less of, the notes you linked more and less, and the notes that are new or no longer linked. Periods are years, months (`2025-03`) or ISO weeks (`2025-W10`), and with one period it compares it with the one just before, so `journal compare 2025-03` is February against March. Tags and notes are compared by the share of each period's entries they're on, since a busy month would otherwise seem to have more of everything, and one needs at least 2 entries in a period to count as rising, falling, new or gone. It makes no model calls, and takes `--json`.
 
 `journal prompt` looks back over recent entries (14 days by default, or `--days N`) and suggests open-ended writing prompts that pick up loose threads, like a project you named, a person who keeps coming up, or a feeling you left unresolved. `--count N` sets how many. It only reads the cache and never touches your notes.
 

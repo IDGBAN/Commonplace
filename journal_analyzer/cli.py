@@ -23,6 +23,7 @@ from rich.text import Text
 
 from . import (
     browse,
+    compare,
     db,
     embedder,
     export,
@@ -1779,6 +1780,90 @@ def _write_out(cfg: Config, out: Path | None, text: str) -> Path | None:
         console.print(f"[red]Could not write {escape(str(out))}: {escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
     return out
+
+
+@app.command(name="compare")
+def compare_cmd(
+    first: Annotated[
+        str, typer.Argument(help="A year (2024), month (2024-03) or ISO week (2024-W10).")
+    ],
+    second: Annotated[
+        str | None,
+        typer.Argument(help="The period to compare it with. Leave out for the one just before."),
+    ] = None,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Two periods side by side: writing, mood, metrics, tags and the notes you linked."""
+    OUT.as_json = as_json
+    kind, key, start, end = _parse_period(first)
+    if second is None:
+        periods = (compare.previous(kind, start), (key, start, end))
+    else:
+        _, other, other_start, other_end = _parse_period(second)
+        periods = ((key, start, end), (other, other_start, other_end))
+    with _guard(), _open(config) as (cfg, conn):
+        result = compare.compare(conn, *periods)
+    a, b = result.a, result.b
+    if not a.writing.entries and not b.writing.entries:
+        _fail(f"No entries in {a.label} or {b.label}.", red=False)
+    if as_json:
+        _emit(asdict(result))
+        return
+    _print_comparison(cfg, result)
+
+
+def _share(n: int, share: float) -> str:
+    return f"{n} ({share:.0%})" if n else "-"
+
+
+def _print_comparison(cfg: Config, result: compare.Comparison) -> None:
+    a, b = result.a, result.b
+    table = Table(title=f"{escape(a.label)} and {escape(b.label)}")
+    table.add_column("")
+    table.add_column(escape(a.label), justify="right")
+    table.add_column(escape(b.label), justify="right")
+    rows = [
+        ("Entries", a.writing.entries, b.writing.entries),
+        ("Days written", a.writing.days_written, b.writing.days_written),
+        ("Words", f"{a.writing.words:,}", f"{b.writing.words:,}"),
+        ("Words per entry", f"{a.writing.avg_words:g}", f"{b.writing.avg_words:g}"),
+        (f"Average mood (1..{cfg.indexing.mood_scale_max})", _mood_str(a.mood), _mood_str(b.mood)),
+        ("Longest streak", _count(a.writing.longest_streak, "day"), _count(b.writing.longest_streak, "day")),
+    ]
+    for key in sorted(set(a.metrics) | set(b.metrics)):
+        before, after = a.metrics.get(key), b.metrics.get(key)
+        rows.append((
+            f"{key} (average)",
+            f"{before[0]:g}" if before else "-",
+            f"{after[0]:g}" if after else "-",
+        ))
+    for label, x, y in rows:
+        table.add_row(escape(label), str(x), str(y))
+    console.print(table)
+    if not a.writing.entries or not b.writing.entries:
+        empty = a if not a.writing.entries else b
+        console.print(f"[dim]No entries in {escape(empty.label)}, so there's nothing to set against it.[/dim]")
+        return
+    lists = (
+        ("Tags you wrote more of", result.tags_up),
+        ("Tags you wrote less of", result.tags_down),
+        ("Notes you linked more", result.notes_up),
+        ("Notes you linked less", result.notes_down),
+        (f"Notes new in {b.label}", result.notes_new),
+        (f"Notes not linked in {b.label}", result.notes_gone),
+    )
+    for title, changes in lists:
+        if not changes:
+            continue
+        part = Table(title=escape(title))
+        part.add_column("Name", style="cyan")
+        part.add_column(escape(a.label), justify="right")
+        part.add_column(escape(b.label), justify="right")
+        for c in changes:
+            part.add_row(escape(c.name), _share(c.a, c.a_share), _share(c.b, c.b_share))
+        console.print(part)
+    console.print("[dim]Shares are of each period's entries, so periods with more writing compare fairly.[/dim]")
 
 
 @app.command(name="review")
