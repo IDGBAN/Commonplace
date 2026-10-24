@@ -103,6 +103,9 @@ journal insights          # mood, tag and timing patterns you didn't ask about
 journal prompt            # ideas for what to write next, from threads left open
 journal review 2025       # the year in review, as Markdown
 journal compare 2024 2025 # two periods side by side; one period compares it with the one before
+
+# other tools
+journal mcp               # read-only tools for an MCP client, on stdin and stdout
 journal profile           # what your journal says about you
 journal profile --update  # read entries it hasn't yet and fold in what's new
 ```
@@ -168,6 +171,22 @@ journal export --format markdown --out ~/journal-export.md
 ```sh
 journal mood --about "John Doe" --json | jq '.months[] | select(.avg_mood < 5)'
 ```
+
+### Tools for MCP clients
+
+`journal mcp` serves the journal as read-only tools over MCP, the protocol desktop chat apps, editors and agents use to call local tools. Point a client at it as a stdio server:
+
+```json
+{
+  "mcpServers": {
+    "journal": { "command": "journal", "args": ["mcp", "--config", "C:/path/to/config.toml"] }
+  }
+}
+```
+
+The tools are `search`, `ask`, `day`, `note`, `notes`, `mood`, `digest`, `on_this_day` and `broken_links`. They return the same JSON as the `--json` commands. `search` falls back to keywords when Ollama isn't running, and `ask` needs Ollama like `journal ask` does. Every call opens the cache read-only, so it can run next to `journal watch`, and nothing is ever written. It needs no extra packages.
+
+Whatever app you connect gets your journal's text, summaries and notes. If that app sends them to a hosted model, they leave your machine, which nothing else in this tool does. Connect it only to clients you'd trust with the journal itself.
 
 ### Browsing in a web page
 

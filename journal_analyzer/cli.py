@@ -32,6 +32,7 @@ from . import (
     ingester,
     insights,
     links,
+    mcp_server,
     memo,
     obsidian,
     parser,
@@ -1777,6 +1778,16 @@ def browse_cmd(
             console.print("[dim]Read-only. Press Ctrl-C to stop.[/dim]")
 
         browse.serve(cfg, port=port, open_browser=not no_open, on_ready=ready)
+
+
+@app.command(name="mcp")
+def mcp_cmd(config: ConfigOpt = None) -> None:
+    """Serve the journal as read-only MCP tools on stdin and stdout, for a local MCP client."""
+    with _guard():
+        cfg = load_config(config)
+        # fail here, where the client shows it, rather than on every call
+        db.connect_readonly(cfg).close()
+        mcp_server.serve(cfg)
 
 
 @app.command(name="export")
