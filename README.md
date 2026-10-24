@@ -62,6 +62,8 @@ Then open `config.toml` and set these:
 
 Every command takes `--config PATH` and defaults to `./config.toml`.
 
+`journal --install-completion` sets up Tab completion for your shell (bash, zsh, fish or PowerShell). Tab then completes from the cache: note titles, aliases and learned names for `note`, `unlinked`, `--about` and `--with`, tags for `--tag`, kinds for `--type`, metric keys for `metric`, days for `show` and `similar`, periods for `digest` and `compare`, properties for `--by`, `property=value` for `--group`, and broken links for `links`. Typing in lower case is fine, since names are matched ignoring case. With no cache yet, Tab just completes nothing.
+
 ## Usage
 
 Check the setup, index everything once, then start asking.

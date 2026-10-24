@@ -1017,7 +1017,7 @@ def note_exists(conn: sqlite3.Connection, path: str) -> bool:
 
 
 def note_name_index(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return list(conn.execute(f"SELECT note_id, key FROM {_names_table(conn)}").fetchall())
+    return list(conn.execute(f"SELECT note_id, name, key FROM {_names_table(conn)}").fetchall())
 
 
 def notes_by_kind(conn: sqlite3.Connection) -> list[sqlite3.Row]:

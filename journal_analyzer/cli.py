@@ -24,6 +24,7 @@ from rich.text import Text
 from . import (
     browse,
     compare,
+    completion,
     db,
     embedder,
     export,
@@ -76,14 +77,21 @@ UntilOpt = Annotated[
 ]
 AboutOpt = Annotated[
     str | None,
-    typer.Option("--about", help="Only entries that link this note (its title or an alias)."),
+    typer.Option(
+        "--about", help="Only entries that link this note (its title or an alias).",
+        autocompletion=completion.notes,
+    ),
 ]
-TagOpt = Annotated[str | None, typer.Option("--tag", help="Only entries with this tag.")]
+TagOpt = Annotated[
+    str | None,
+    typer.Option("--tag", help="Only entries with this tag.", autocompletion=completion.tags),
+]
 GroupOpt = Annotated[
     str | None,
     typer.Option(
         "--group",
         help="Only entries that link a note with this property value, e.g. relationship=family.",
+        autocompletion=completion.groups,
     ),
 ]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON instead of tables.")]
@@ -667,7 +675,11 @@ def _period_title(kind: str, key: str, start: date) -> str:
 @app.command(name="digest")
 def digest_cmd(
     period: Annotated[
-        str, typer.Argument(help="A year (2024), month (2024-03) or ISO week (2024-W10).")
+        str,
+        typer.Argument(
+            help="A year (2024), month (2024-03) or ISO week (2024-W10).",
+            autocompletion=completion.periods,
+        ),
     ],
     config: ConfigOpt = None,
     refresh: Annotated[
@@ -823,7 +835,9 @@ def search(
 
 @app.command()
 def show(
-    day: Annotated[str, typer.Argument(help="Entry date (YYYY-MM-DD).")],
+    day: Annotated[
+        str, typer.Argument(help="Entry date (YYYY-MM-DD).", autocompletion=completion.days)
+    ],
     config: ConfigOpt = None,
     raw: Annotated[
         bool, typer.Option("--raw", help="Also print the stored entry text.")
@@ -918,7 +932,9 @@ def _entry_json(cfg: Config, conn: sqlite3.Connection, row: sqlite3.Row, raw: bo
 
 @app.command()
 def note(
-    name: Annotated[str, typer.Argument(help="Note title or alias.")],
+    name: Annotated[
+        str, typer.Argument(help="Note title or alias.", autocompletion=completion.notes)
+    ],
     config: ConfigOpt = None,
     raw: Annotated[
         bool, typer.Option("--raw", help="Also print the note's own text.")
@@ -1100,12 +1116,18 @@ def _toml_key(name: str) -> str:
 def unlinked_cmd(
     name: Annotated[
         str | None,
-        typer.Argument(help="A note's title or alias. Leave out to list every note with some."),
+        typer.Argument(
+            help="A note's title or alias. Leave out to list every note with some.",
+            autocompletion=completion.notes,
+        ),
     ] = None,
     config: ConfigOpt = None,
     type_: Annotated[
         str | None,
-        typer.Option("--type", help="Only notes of this kind, meaning their folder (e.g. people)."),
+        typer.Option(
+            "--type", help="Only notes of this kind, meaning their folder (e.g. people).",
+            autocompletion=completion.kinds,
+        ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many rows.")] = 20,
     as_json: JsonOpt = False,
@@ -1164,7 +1186,10 @@ def unlinked_cmd(
 def links_cmd(
     target: Annotated[
         str | None,
-        typer.Argument(help="A link as you write it, e.g. 'Jon Doe'. Leave out to list them all."),
+        typer.Argument(
+            help="A link as you write it, e.g. 'Jon Doe'. Leave out to list them all.",
+            autocompletion=completion.broken_links,
+        ),
     ] = None,
     config: ConfigOpt = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many rows.")] = 20,
@@ -1243,17 +1268,26 @@ def entities(
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many notes.")] = 20,
     type_: Annotated[
         str | None,
-        typer.Option("--type", help="Only notes of this kind, meaning their folder (e.g. people)."),
+        typer.Option(
+            "--type", help="Only notes of this kind, meaning their folder (e.g. people).",
+            autocompletion=completion.kinds,
+        ),
     ] = None,
     since: SinceOpt = None,
     until: UntilOpt = None,
     with_: Annotated[
         str | None,
-        typer.Option("--with", help="Only notes linked from the same entries as this one (title or alias)."),
+        typer.Option(
+            "--with", help="Only notes linked from the same entries as this one (title or alias).",
+            autocompletion=completion.notes,
+        ),
     ] = None,
     by: Annotated[
         str | None,
-        typer.Option("--by", help="Group the notes by one of their properties, e.g. relationship."),
+        typer.Option(
+            "--by", help="Group the notes by one of their properties, e.g. relationship.",
+            autocompletion=completion.properties,
+        ),
     ] = None,
     as_json: JsonOpt = False,
 ) -> None:
@@ -1390,7 +1424,8 @@ def mood(
 @app.command()
 def metric(
     key: Annotated[
-        str | None, typer.Argument(help="Which number, e.g. sleep. Leave out to list them.")
+        str | None,
+        typer.Argument(help="Which number, e.g. sleep. Leave out to list them.", autocompletion=completion.metrics),
     ] = None,
     config: ConfigOpt = None,
     since: SinceOpt = None,
@@ -1465,7 +1500,10 @@ def lapsed(
     config: ConfigOpt = None,
     type_: Annotated[
         str | None,
-        typer.Option("--type", help="Only notes of this kind, meaning their folder (e.g. people)."),
+        typer.Option(
+            "--type", help="Only notes of this kind, meaning their folder (e.g. people).",
+            autocompletion=completion.kinds,
+        ),
     ] = None,
     min_links: Annotated[
         int, typer.Option("--min", min=1, help="Linked from at least this many entries.")
@@ -1654,7 +1692,7 @@ def on_this_day(
     config: ConfigOpt = None,
     day: Annotated[
         str | None,
-        typer.Option("--date", help="Anchor date (YYYY-MM-DD); default today."),
+        typer.Option("--date", help="Anchor date (YYYY-MM-DD); default today.", autocompletion=completion.days),
     ] = None,
     as_json: JsonOpt = False,
 ) -> None:
@@ -1680,7 +1718,9 @@ def on_this_day(
 
 @app.command()
 def similar(
-    day: Annotated[str, typer.Argument(help="Entry date (YYYY-MM-DD).")],
+    day: Annotated[
+        str, typer.Argument(help="Entry date (YYYY-MM-DD).", autocompletion=completion.days)
+    ],
     config: ConfigOpt = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="Max results.")] = 5,
     as_json: JsonOpt = False,
@@ -1802,11 +1842,18 @@ def _write_out(cfg: Config, out: Path | None, text: str) -> Path | None:
 @app.command(name="compare")
 def compare_cmd(
     first: Annotated[
-        str, typer.Argument(help="A year (2024), month (2024-03) or ISO week (2024-W10).")
+        str,
+        typer.Argument(
+            help="A year (2024), month (2024-03) or ISO week (2024-W10).",
+            autocompletion=completion.periods,
+        ),
     ],
     second: Annotated[
         str | None,
-        typer.Argument(help="The period to compare it with. Leave out for the one just before."),
+        typer.Argument(
+            help="The period to compare it with. Leave out for the one just before.",
+            autocompletion=completion.periods,
+        ),
     ] = None,
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
