@@ -3,8 +3,11 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import pairwise
 from pathlib import Path, PurePath, PurePosixPath
+from typing import Any
 from urllib.parse import quote
 
 from .config import Config
@@ -393,6 +396,55 @@ def find_section(text: str, anchor: str) -> str | None:
         lines = lines[1:]
     body = "\n".join(line.rstrip("\r") for line in lines).strip()
     return body or None
+
+
+@dataclass(frozen=True)
+class Section:
+    """One part of an entry, cut at a top-level heading."""
+
+    heading: str  # as written; "" for text before the first heading
+    start: int  # lines [start, end) of the entry's text, split on "\n"
+    end: int
+    text: str  # with its heading line
+
+
+def _heading_text(line: str) -> str:
+    m = _HEADING_LINE_RE.match(line.rstrip("\r"))
+    return m.group(2).strip() if m else ""
+
+
+def split_sections(text: str, min_chars: int) -> list[Section]:
+    """An entry cut at its top-level headings, or [] when that leaves fewer than two parts.
+
+    Top level is the biggest heading the entry uses. A part shorter than
+    `min_chars` joins the one before it, or the one after when it comes first.
+    """
+    lines = text.split("\n")
+    headings = _headings(lines)
+    if not headings:
+        return []
+    top = min(level for _, level, _ in headings)
+    cuts = [line for line, level, _ in headings if level == top]
+    bounds = ([0] if cuts[0] > 0 else []) + cuts + [len(lines)]
+    merged: list[list[Any]] = []
+    carry: int | None = None
+    for start, end in pairwise(bounds):
+        heading = _heading_text(lines[start]) if start in cuts else ""
+        if carry is not None:
+            start, carry = carry, None
+        if len("\n".join(lines[start:end]).strip()) < min_chars:
+            if merged:
+                merged[-1][2] = end
+            else:
+                carry = start
+            continue
+        merged.append([heading, start, end])
+    if len(merged) < 2:
+        return []
+    return [
+        Section(heading, start, end, "\n".join(line.rstrip("\r") for line in lines[start:end]).strip())
+        for heading, start, end in merged
+    ]
 
 
 def file_link_key(path: Path | str) -> str:

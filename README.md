@@ -200,6 +200,19 @@ The one-liner stays where a list wants one line: the tables, the browser's entry
 
 Shorter entries are read with exactly the same prompt as before, so changing these settings or upgrading only costs model time for long entries: run `journal index --force` and everything else comes from the memo. Set `detail_min_words = 0` to turn it off.
 
+## Searching by part
+
+A day with several top-level headings, like `# Morning`, `# Work` and `# Evening`, is also stored part by part. Each part gets its own keyword index and its own vector, so a search for "the quarterly review" finds the day by its Work part even when the rest of the day is about something else and the whole entry is too long to embed in full. A part shorter than `[indexing] section_min_chars` (200 characters by default) joins the one before it, and text above the first heading joins the first part. Entries with only one part aren't split.
+
+When a part carries the match:
+
+- the answer reads that part's text next to the day's summary
+- the Sources line cites it, like `[[2024-03-04#Work]]`, and so does `sources.dates[].section` in `ask --json`
+- `journal search` shows the part under the date, and `search --json` gives it as `section`
+- in the browser, search results and Sources open the day at that part, and each entry page lists the parts it was split into
+
+Splitting costs one embedding call per part when an entry is indexed, and nothing else. After an upgrade, or when you change `sections` or `section_min_chars`, the next `journal index` splits the entries already in the cache from their stored text and embeds the parts, without reading them again with the fast model. `sections = false` turns it off.
+
 ## Your profile
 
 The app keeps a short profile of you, written in your voice: names and nicknames (yours, and the ones you use for people), personality, likes and dislikes, hobbies, routines, work, values, health. Answers, `journal chat`, every digest (including relationship digests), `journal insights` and `journal prompt` get it as background, so "my sister" or a nickname reads right and a digest knows what's usual for you. The step that asks your question's dates and names, and the step that rewrites a follow-up, only get the names part. Reading a single entry never uses it, so a wrong guess can't work its way into your summaries and then back into the profile.

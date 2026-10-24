@@ -289,6 +289,10 @@ def entry(req: Request, entry_id: str) -> Json:
     reading = store.entry_reading(conn, row["id"])
     own_mood = fields.frontmatter_mood(frontmatter, req.config)
     parts = serialize.note_parts(conn, row["id"])
+    parts_found = store.sections_for_entries(conn, [row["id"]]).get(row["id"], [])
+    embedded_parts = {
+        p["id"] for p in parts_found if _has_vector(conn, "sections_vec", "section_id", p["id"])
+    }
     return {
         "id": row["id"],
         "date": row["entry_date"],
@@ -322,6 +326,11 @@ def entry(req: Request, entry_id: str) -> Json:
         "linked_from_days": serialize.days_linking_to(conn, row),
         "linked_from_notes": [serialize.note_ref(r) for r in store.notes_linking_day(conn, row)],
         "focus": _focus(req, row["raw_text"]),
+        "parts": [
+            {"heading": p["heading"], "lines": [p["start_line"], p["end_line"]],
+             "embedded": p["id"] in embedded_parts}
+            for p in parts_found
+        ],
         "embedded": _has_vector(conn, "entries_vec", "entry_id", row["id"]),
         "similar": serialize.entry_briefs(conn, similar),
         "digests": digests,
@@ -543,7 +552,7 @@ def search(req: Request) -> Json:
         "q": text,
         "mode": mode,
         "notice": notice,
-        "entries": serialize.entry_briefs(req.conn, results.entries),
+        "entries": serialize.entry_briefs(req.conn, results.entries, results.parts),
         "notes": serialize.note_briefs(req.conn, results.notes),
     }
 

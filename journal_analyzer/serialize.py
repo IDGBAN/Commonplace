@@ -60,9 +60,14 @@ def days_linking_to(conn: sqlite3.Connection, entry: sqlite3.Row) -> list[Json]:
     return _days(rows, lambda r: anchors.get(r["id"], {}).get(r["target"], []))
 
 
-def entry_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json]:
+def entry_briefs(
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    parts: dict[int, sqlite3.Row] | None = None,
+) -> list[Json]:
+    """With `parts` (search results), each says which of its parts matched, if any."""
     tags = store.tags_for_entries(conn, [r["id"] for r in rows])
-    return [
+    briefs = [
         {
             "id": r["id"],
             "date": r["entry_date"],
@@ -73,6 +78,11 @@ def entry_briefs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Json
         }
         for r in rows
     ]
+    if parts is not None:
+        for brief in briefs:
+            part = parts.get(brief["id"])
+            brief["section"] = (part["heading"] or None) if part is not None else None
+    return briefs
 
 
 def note_ref(row: sqlite3.Row | dict[str, Any]) -> Json:
@@ -149,7 +159,11 @@ def answer_json(conn: sqlite3.Connection, answer: Answer) -> Json:
     dates = []
     for day in answer.cited_dates:
         rows = store.entries_in_range(conn, day, day)
-        dates.append({"date": day.isoformat(), "id": rows[0]["id"] if rows else None})
+        dates.append({
+            "date": day.isoformat(),
+            "id": rows[0]["id"] if rows else None,
+            "section": answer.cited_parts.get(day.isoformat()),
+        })
     notes = []
     for title in answer.cited_notes:
         found = store.find_notes(conn, title)

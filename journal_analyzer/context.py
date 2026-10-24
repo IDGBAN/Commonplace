@@ -15,7 +15,7 @@ from . import parser, store
 from .models import ParsedEntry
 
 
-def _clip(text: str, chars: int) -> str:
+def clip(text: str, chars: int) -> str:
     body = " ".join(text.split())
     if len(body) > chars:
         body = body[: max(chars - 1, 0)].rsplit(" ", 1)[0] + "…"
@@ -58,7 +58,7 @@ def note_block(
     pieces = [text for _, text in parts]
     if not parts or "" in (anchors or []):
         pieces.insert(0, row["summary"] or note.raw_text or "")
-    body = _clip(" ".join(p for p in pieces if p), chars)
+    body = clip(" ".join(p for p in pieces if p), chars)
     return "- " + "; ".join(facts) + (f": {body}" if body else "")
 
 
@@ -140,7 +140,7 @@ def _day_blocks(other: sqlite3.Row, anchors: list[str], chars: int) -> list[str]
             continue
         blocks.append(
             f"- [[{other['entry_date']}#{anchor}]], {_part_phrase(anchor)} of another day "
-            f"this entry links to: {_clip(text, chars)}"
+            f"this entry links to: {clip(text, chars)}"
         )
     if whole and other["summary"]:
         blocks.append(

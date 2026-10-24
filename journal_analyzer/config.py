@@ -108,6 +108,10 @@ class IndexingConfig(BaseModel):
     detail_min_words: int = Field(default=400, ge=0)
     # and from this long, a longer one still
     detail_long_words: int = Field(default=1000, ge=1)
+    # search entries with several top-level headings part by part, with a vector each
+    sections: bool = True
+    # parts shorter than this join the one before
+    section_min_chars: int = Field(default=200, ge=0)
 
     @model_validator(mode="after")
     def _detail_tiers(self) -> IndexingConfig:

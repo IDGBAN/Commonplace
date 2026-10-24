@@ -9,7 +9,7 @@ from urllib.parse import quote
 import pytest
 from conftest import add_entry, add_note
 
-from journal_analyzer import browse, db, nicknames, query, store
+from journal_analyzer import browse, db, nicknames, parser, query, store
 from journal_analyzer.models import (
     DatabaseError,
     Extraction,
@@ -255,6 +255,18 @@ def test_property_values_group_notes_and_filter_entries(browser, journal):
     assert [(p["value"], p["notes"]) for p in jane["property_groups"]] == [("Friend", 2), ("Family", 1)]
 
 
+def test_entries_cut_into_parts_show_them_and_search_names_the_part(browser, journal):
+    day = add_entry(journal, date(2024, 1, 25), text="# Morning\nTea.\n# Work\nThe quarterly review.",
+                    path="/vault/25.md")
+    store.replace_entry_sections(journal, day, parser.split_sections("# Morning\nTea.\n# Work\nThe quarterly review.", 0))
+    data = browser.get(f"/api/entries/{day}")
+    assert [(p["heading"], p["lines"], p["embedded"]) for p in data["parts"]] == [
+        ("Morning", [0, 2], False), ("Work", [2, 4], False),
+    ]
+    found = browser.get(f"/api/search?q={quote('quarterly review')}")
+    assert found["entries"][0]["id"] == day and found["entries"][0]["section"] == "Work"
+
+
 def test_notes_page_says_why_links_find_nothing(browser, journal):
     add_entry(journal, date(2024, 1, 21), links=["Jon Doe", "2024-01-30"], path="/vault/21.md")
     data = browser.get("/api/notes")
@@ -483,7 +495,7 @@ def test_ask_streams_its_steps_then_the_answer(browser, journal, fake_client):
     assert answer["body"] == "You hiked Bear Mountain with John on 2024-01-15."
     assert answer["stage"] == "fast_summary"
     first = entry_id(journal, "2024-01-15")
-    assert {"date": "2024-01-15", "id": first} in answer["sources"]["dates"]
+    assert {"date": "2024-01-15", "id": first, "section": None} in answer["sources"]["dates"]
     assert {e["id"] for e in answer["entries"]} == {first, entry_id(journal, "2024-01-16")}
     assert "Sources:" in answer["text"]
 

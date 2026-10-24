@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -47,6 +47,9 @@ MAX_CONTEXT_NOTES = 12
 MAX_NOTE_CONTEXT_CHARS = 16_000
 # extra room for long entries' longer summaries when answering from summaries
 ANSWER_DETAILS_CHARS = 6000
+# and for the part of a long, many-headed entry that matched, each and in all
+ANSWER_PART_CHARS = 700
+ANSWER_PARTS_CHARS = 4000
 # notes called "Go" or "Me" would match ordinary words all the time
 MIN_NAME_CHARS = 3
 
@@ -260,17 +263,24 @@ def _finalize(
     cited_notes: Iterable[str] = (),
     read_entries: Iterable[int] = (),
     read_notes: Iterable[int] = (),
+    cited_parts: dict[str, str] | None = None,
 ) -> Answer:
+    """`cited_parts` is the heading of the part of a cited day that matched, by ISO date."""
     dates = sorted(set(cited_dates))
     notes = sorted(set(cited_notes), key=str.casefold)
+    parts = {d: h for d, h in (cited_parts or {}).items() if h and date.fromisoformat(d) in dates}
     body = text.rstrip()
-    links = [f"[[{d.isoformat()}]]" for d in dates] + [f"[[{n}]]" for n in notes]
+    links = [
+        f"[[{d.isoformat()}#{parts[d.isoformat()]}]]" if d.isoformat() in parts else f"[[{d.isoformat()}]]"
+        for d in dates
+    ] + [f"[[{n}]]" for n in notes]
     if links:
         text = f"{body}\n\nSources: {' '.join(links)}"
     return Answer(
         text=text,
         body=body,
         cited_dates=dates,
+        cited_parts=parts,
         cited_notes=notes,
         stage_used=stage,
         read_entry_ids=list(dict.fromkeys(read_entries)),
@@ -414,15 +424,22 @@ def _get_ranker(model_name: str) -> Any:
     return _RANKER_CACHE[model_name]
 
 
+def _passage(row: sqlite3.Row, part: sqlite3.Row | None) -> str:
+    # the cross-encoder only reads the start, so the part that matched goes first
+    pieces = [row["summary"], part["text"] if part is not None else None, row["raw_text"]]
+    return "\n\n".join(p for p in pieces if p)
+
+
 def _rerank(
-    question: str, rows: list[sqlite3.Row], model_name: str, top_k: int
+    question: str,
+    rows: list[sqlite3.Row],
+    model_name: str,
+    top_k: int,
+    parts: dict[int, sqlite3.Row] | None = None,
 ) -> list[sqlite3.Row]:
     global _RERANK_WARNED
     passages = [
-        {
-            "id": idx,
-            "text": f"{r['summary']}\n\n{r['raw_text']}" if r["summary"] else r["raw_text"],
-        }
+        {"id": idx, "text": _passage(r, (parts or {}).get(r["id"]))}
         for idx, r in enumerate(rows)
     ]
     try:
@@ -461,7 +478,9 @@ def _retrieve(
     query_vector: list[float] | None = None,
     boost_note_ids: list[int] | None = None,
     only: store.EntryFilter | None = None,
+    parts: dict[int, sqlite3.Row] | None = None,
 ) -> list[sqlite3.Row]:
+    """`parts`, when given, collects the part of each entry found that matched best."""
     allowed = store.filtered_entry_ids(conn, plan.date_from, plan.date_to, plan.entities, only)
     if not allowed:
         return []
@@ -474,6 +493,11 @@ def _retrieve(
         store.vec_search(conn, query_vector, allowed, fetch_k),
         store.fts_search(conn, plan.keywords + plan.entities, allowed, fetch_k),
     ]
+    best: dict[int, sqlite3.Row] = {}
+    if config.indexing.sections:
+        ranked_lists.extend(
+            _part_rankings(conn, query_vector, plan.keywords + plan.entities, allowed, fetch_k, best)
+        )
     if boost_note_ids:
         # a third ranking, so linked entries get a lift without crowding out the rest
         allowed_set = set(allowed)
@@ -487,9 +511,44 @@ def _retrieve(
     order = {eid: i for i, eid in enumerate(merged)}
     ranked = sorted(rows, key=lambda r: order.get(r["id"], len(order)))
 
-    if not config.reranking.enabled or len(ranked) <= 1:
-        return ranked[:top_k]
-    return _rerank(question, ranked, config.reranking.model, top_k)
+    if config.reranking.enabled and len(ranked) > 1:
+        ranked = _rerank(question, ranked, config.reranking.model, top_k, best)
+    ranked = ranked[:top_k]
+    if parts is not None:
+        parts.update({r["id"]: best[r["id"]] for r in ranked if r["id"] in best})
+    return ranked
+
+
+def _part_rankings(
+    conn: sqlite3.Connection,
+    query_vector: list[float] | None,
+    terms: list[str],
+    allowed: list[int] | None,
+    k: int,
+    best: dict[int, sqlite3.Row],
+) -> list[list[int]]:
+    """Entries ranked by their best part, by meaning and by keywords.
+
+    `best` collects that part for each entry: the one scoring highest across
+    both rankings, the same fusion the entries get.
+    """
+    searches = [store.sections_fts_search(conn, terms, allowed, k)]
+    if query_vector is not None:
+        searches.insert(0, store.section_vec_search(conn, query_vector, allowed, k))
+    rankings = []
+    scores: dict[int, float] = {}
+    found: dict[int, sqlite3.Row] = {}
+    for hits in searches:
+        ranked: dict[int, None] = {}
+        for rank, part in enumerate(hits):
+            ranked.setdefault(part["entry_id"], None)
+            scores[part["id"]] = scores.get(part["id"], 0.0) + 1.0 / (RRF_DAMPING + rank + 1)
+            found[part["id"]] = part
+        if ranked:
+            rankings.append(list(ranked))
+    for part_id in sorted(scores, key=lambda i: -scores[i]):
+        best.setdefault(found[part_id]["entry_id"], found[part_id])
+    return rankings
 
 
 def _matching_notes(
@@ -533,6 +592,8 @@ _SEARCH_WORD_RE = re.compile(r"(?<!\w)[^\W_][\w'-]{2,}")
 class SearchResults:
     entries: list[sqlite3.Row]
     notes: list[sqlite3.Row]
+    # entry id -> the part of it that matched best, for entries cut into parts
+    parts: dict[int, sqlite3.Row] = field(default_factory=dict)
 
 
 def search(
@@ -552,12 +613,13 @@ def search(
     )
     query_vector = _embed_question(text, config, conn, client)
     named = notes_named_in(text, conn)
+    parts: dict[int, sqlite3.Row] = {}
     entries = _retrieve(
         text, plan, config, conn, client, top_k=limit,
-        query_vector=query_vector, boost_note_ids=named, only=only,
+        query_vector=query_vector, boost_note_ids=named, only=only, parts=parts,
     )
     note_ids = _matching_notes(conn, query_vector, keywords, named, NOTE_SEARCH_K)
-    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids))
+    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids), parts=parts)
 
 
 def search_keywords(text: str) -> list[str]:
@@ -581,6 +643,8 @@ def keyword_search(
         store.filtered_entry_ids(conn, date_from, date_to) if date_from or date_to else None
     )
     ranked_lists = [store.fts_search(conn, keywords, allowed, limit)]
+    best: dict[int, sqlite3.Row] = {}
+    ranked_lists.extend(_part_rankings(conn, None, keywords, allowed, limit, best))
     if named:
         allowed_set = set(allowed) if allowed is not None else None
         linked = [
@@ -591,10 +655,11 @@ def keyword_search(
     merged = _rrf_merge(ranked_lists, limit)
     order = {eid: i for i, eid in enumerate(merged)}
     entries = sorted(store.entries_by_ids(conn, merged), key=lambda r: order[r["id"]])
+    parts = {eid: best[eid] for eid in merged if eid in best}
     note_ids = list(
         dict.fromkeys([*named, *store.notes_fts_search(conn, keywords, NOTE_SEARCH_K)])
     )
-    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids))
+    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids), parts=parts)
 
 
 def _ensure_day_included(
@@ -685,12 +750,15 @@ def _summary_context(
     config: Config,
     conn: sqlite3.Connection,
     about: Sequence[int] = (),
+    parts: dict[int, sqlite3.Row] | None = None,
 ) -> str:
+    """`parts` is the part of each entry that matched the question best, when one did."""
     vault = config.vault.path
     sections: list[str] = []
     linked = store.entities_for_entries(conn, [r["id"] for r in candidates])
     metrics = store.metrics_for_entries(conn, [r["id"] for r in candidates])
     longer = context.longer_summaries(conn, candidates, ANSWER_DETAILS_CHARS)
+    room = ANSWER_PARTS_CHARS
     lines = []
     for r in candidates:
         details = [f"file: {parser.relative_path(r['file_path'], vault)}"]
@@ -701,6 +769,13 @@ def _summary_context(
             details.append(f"recorded: {_metric_text(metrics[r['id']])}")
         summary = longer.get(r["id"]) or r["summary"] or "(no summary)"
         lines.append(f"- [{r['entry_date']}] {summary} ({'; '.join(details)})")
+        part = (parts or {}).get(r["id"])
+        if part is not None:
+            text = context.clip(part["text"], ANSWER_PART_CHARS)
+            if len(text) <= room:
+                room -= len(text)
+                where = f'under "{part["heading"]}"' if part["heading"] else "before its first heading"
+                lines.append(f"  The part of that entry that matches, {where}: {text}")
     lines.extend(_digest_lines(plan, conn))
     if lines:
         sections.append("Journal entries:\n" + "\n".join(lines))
@@ -952,9 +1027,10 @@ def answer(
     on_stage("Searching entries and notes...")
     about = _named_notes(conn, plan, named)
     query_vector = _embed_question(question, config, conn, client)
+    found_parts: dict[int, sqlite3.Row] = {}
     candidates = _retrieve(
         question, plan, config, conn, client,
-        query_vector=query_vector, boost_note_ids=named, only=only,
+        query_vector=query_vector, boost_note_ids=named, only=only, parts=found_parts,
     )
     explicit_day = _explicit_day(question, today)
     if explicit_day is not None and (since is None or since <= explicit_day) and (
@@ -970,7 +1046,7 @@ def answer(
 
     if not plan.needs_raw_text:
         on_stage("Answering from summaries...")
-        context = _summary_context(candidates, notes, plan, config, conn, about)
+        context = _summary_context(candidates, notes, plan, config, conn, about, found_parts)
         fast_answer = _fast_attempt(question, context, config, client, on_text, writer)
         if fast_answer is not None:
             return _finalize(
@@ -980,6 +1056,7 @@ def answer(
                 cited_notes=_notes_used(fast_answer, notes, about, _learned_names(conn, notes)),
                 read_entries=[r["id"] for r in candidates],
                 read_notes=[r["id"] for r in notes],
+                cited_parts=_cited_parts(candidates, found_parts),
             )
 
     on_stage("Re-reading the full entries...")
@@ -997,4 +1074,15 @@ def answer(
         cited_notes=_notes_used(text, used_notes, about, _learned_names(conn, used_notes)),
         read_entries=[r["id"] for r in used],
         read_notes=[r["id"] for r in used_notes],
+        cited_parts=_cited_parts(used, found_parts),
     )
+
+
+def _cited_parts(rows: list[sqlite3.Row], parts: dict[int, sqlite3.Row]) -> dict[str, str]:
+    """The heading of each cited day's best part; the first entry of a day wins."""
+    cited: dict[str, str] = {}
+    for r in rows:
+        part = parts.get(r["id"])
+        if part is not None and part["heading"]:
+            cited.setdefault(r["entry_date"], part["heading"])
+    return cited

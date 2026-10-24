@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path, PurePath
@@ -47,6 +48,7 @@ _LINK_DETAILS_META_KEY = "link_details"
 LINK_DETAILS_VERSION = "2"
 _NOTE_PROPERTIES_META_KEY = "note_properties"
 NOTE_PROPERTIES_VERSION = "1"
+_SECTIONS_META_KEY = "section_settings"
 
 WATCH_POLL_SECONDS = 1.0
 
@@ -145,12 +147,16 @@ def _index_entries(
         )
         for entry, reading in zip(entries, readings, strict=True)
     ]
+    sections = [_sections(entry.raw_text, config) for entry in entries]
+    section_vectors = [embedder.section_vectors(parts, config, client) for parts in sections]
     _clear_file(conn, key)
     # entries have a foreign key on files
     store.upsert_file(conn, key, content_hash, "pending")
     if entries:
         store.save_file_frontmatter(conn, key, entries[0].frontmatter)
-    for entry, reading, vector in zip(entries, readings, vectors, strict=True):
+    for entry, reading, vector, parts, part_vectors in zip(
+        entries, readings, vectors, sections, section_vectors, strict=True
+    ):
         entry_id = store.save_entry(
             conn,
             entry,
@@ -163,10 +169,45 @@ def _index_entries(
         store.replace_entry_metrics(conn, entry_id, fields.entry_metrics(entry.frontmatter, config))
         if vector is not None:
             store.save_entry_vector(conn, entry_id, vector)
+        if parts:
+            store.replace_entry_sections(conn, entry_id, parts, part_vectors)
         store.mark_rollups_stale(conn, entry.entry_date)
         store.mark_note_digests_stale(conn, entry.links)
     store.mark_note_digests_stale(conn, store.note_keys_linking_file_days(conn, key))
     return True
+
+
+def _sections(text: str, config: Config) -> list[parser.Section]:
+    if not config.indexing.sections:
+        return []
+    return parser.split_sections(text, config.indexing.section_min_chars)
+
+
+def _refresh_sections(
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    just_indexed: Collection[str] = (),
+) -> None:
+    # Entries indexed before sections existed, or with other section settings,
+    # get them from their stored text. Only the vectors need the model, and
+    # files indexed in this run already have theirs.
+    settings = json.dumps({"on": config.indexing.sections, "min": config.indexing.section_min_chars})
+    if db.get_meta(conn, _SECTIONS_META_KEY) == settings:
+        return
+    rows = [r for r in store.all_entry_texts(conn) if r["file_path"] not in just_indexed]
+    split = [(r["id"], _sections(r["raw_text"], config)) for r in rows]
+    todo = sum(1 for _, parts in split if parts)
+    with Progress(console=console, transient=True) as progress:
+        task = progress.add_task("Splitting entries into parts", total=len(split))
+        for entry_id, parts in split:
+            store.replace_entry_sections(
+                conn, entry_id, parts, embedder.section_vectors(parts, config, client)
+            )
+            progress.advance(task)
+    db.set_meta(conn, _SECTIONS_META_KEY, settings)
+    if todo:
+        console.print(f"Split {todo} {'entry' if todo == 1 else 'entries'} into parts for search.")
 
 
 def _details(reading: Extraction) -> str:
@@ -336,6 +377,7 @@ def _plan_file(
             texts = [e.raw_text.strip() for e in planned.entries]
             # empty entries skip both the model and the embedding
             planned.extractions = planned.embeddings = sum(1 for t in texts if t)
+            planned.embeddings += sum(len(_sections(e.raw_text, config)) for e in planned.entries)
         else:
             note = parser.parse_note(path, kind, config)
             planned.private = note.private
@@ -394,6 +436,7 @@ def run_backfill(
             if result == "indexed":
                 indexed.append(str(path))
             progress.advance(task)
+    _refresh_sections(config, conn, client, set(indexed))
     _refresh_links(config, conn)
     dropped = f", {counts['dropped']} dropped" if counts["dropped"] else ""
     private = f", {counts['private']} private" if counts["private"] else ""
@@ -679,6 +722,7 @@ def run_watch(
     _refresh_readings(config, conn)
     _refresh_link_details(config, conn)
     _refresh_note_properties(config, conn)
+    _refresh_sections(config, conn, client)
     _refresh_links(config, conn)
     handler = _DebounceHandler(config)
     observer = Observer()

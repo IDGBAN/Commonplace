@@ -224,13 +224,16 @@ const noteChip = (note, cls = "chip") =>
 
 function entryLines(entries, scale, { emptyText } = {}) {
   if (!entries.length) return empty(emptyText || "No entries.");
+  // search results say which part of a many-headed entry matched, and open there
   return h("ol", { class: "lines" }, entries.map((e) =>
     h("li", {},
-      h("a", { class: "line", href: href.entry(e.id) },
+      h("a", { class: "line", href: href.entry(e.id, e.section ? { at: e.section } : null) },
         h("span", { class: "line-date" }, mediumDate(e.date)),
         swatch(e.mood, scale),
         h("span", { class: e.summary ? "line-summary" : "line-summary none" }, e.summary || "No summary stored"),
-        e.tags && e.tags.length ? h("span", { class: "line-tags" }, e.tags.join(" · ")) : null))));
+        (e.section || (e.tags && e.tags.length))
+          ? h("span", { class: "line-tags" }, [e.section && `in “${e.section}”`, ...(e.tags || [])].filter(Boolean).join(" · "))
+          : null))));
 }
 
 // The stored text, with the part a link's #heading or #^block points at marked.
@@ -692,6 +695,13 @@ async function entryView([id], params) {
       e.linked_from_days.length ? [h("div", { class: "quiet" }, "Linked from"), dayChips(e.linked_from_days, false)] : null),
     e.linked_from_notes.length > 0 && gloss("Notes that link this day",
       h("div", { class: "chips" }, e.linked_from_notes.map((n) => h("a", { class: "chip pencil", href: href.note(n.id), title: kindLabel(n.kind) }, n.title)))),
+    e.parts.length > 0 && gloss("Searched in parts",
+      h("div", { class: "chips" }, e.parts.map((p) => p.heading
+        ? h("a", { class: "chip pencil", href: href.entry(e.id, { at: p.heading }) }, p.heading)
+        : h("span", { class: "chip ghost" }, "before the first heading"))),
+      h("div", { class: "quiet" }, e.parts.every((p) => p.embedded)
+        ? "Each part has its own meaning vector, so a search can find it on its own"
+        : "Searched by keywords part by part; some parts have no meaning vector yet")),
     gloss("Read by",
       h("div", {}, e.model_used || "unknown model"),
       h("div", { class: "quiet" }, stamp(e.extracted_at)),
@@ -1320,9 +1330,11 @@ function sourceChips(answer) {
   return h("div", { class: "turn-sources" },
     h("span", { class: "gloss-label" }, "Sources"),
     h("div", { class: "chips" },
-      dates.map((d) => d.id != null
-        ? h("a", { class: "chip pencil", href: href.entry(d.id) }, mediumDate(d.date))
-        : h("span", { class: "chip ghost" }, mediumDate(d.date))),
+      dates.map((d) => d.id == null
+        ? h("span", { class: "chip ghost" }, mediumDate(d.date))
+        : d.section
+          ? sectionChip(mediumDate(d.date), href.entry(d.id, { at: d.section }), d.section, `The part of ${longDate(d.date)} that matched`)
+          : h("a", { class: "chip pencil", href: href.entry(d.id) }, mediumDate(d.date))),
       notes.map((n) => n.id != null
         ? h("a", { class: "chip pencil", href: href.note(n.id) }, n.title)
         : h("span", { class: "chip ghost" }, n.title))));

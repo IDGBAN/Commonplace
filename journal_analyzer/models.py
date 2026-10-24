@@ -88,6 +88,8 @@ class QueryPlan(BaseModel):
 class Answer(BaseModel):
     text: str  # with the Sources line
     cited_dates: list[date] = Field(default_factory=list)
+    # ISO date -> the heading of the part of that day that matched, when one did
+    cited_parts: dict[str, str] = Field(default_factory=dict)
     cited_notes: list[str] = Field(default_factory=list)
     stage_used: AnswerStage
     body: str = ""  # without it

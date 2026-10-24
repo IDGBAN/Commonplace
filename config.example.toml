@@ -54,6 +54,12 @@ linked_note_chars = 600           # of each linked note sent along when an entry
 # detail_long_words a longer one (3-5). 0 turns it off.
 detail_min_words = 400
 detail_long_words = 1000
+# Entries with several top-level headings are also searched part by part,
+# each with its own vector, so a short part of a long day can be found and
+# cited as [[2024-03-04#Work]]. Parts shorter than section_min_chars join the
+# one before. Changing either needs no re-index, only vectors for the parts.
+sections = true
+section_min_chars = 200
 
 [reranking]
 # Reorders search hits before answering, which gives better results.

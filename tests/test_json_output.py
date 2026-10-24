@@ -86,7 +86,7 @@ def test_ask_and_search(tmp_path, config, journal, fake_client, monkeypatch):
     assert answer["question"] == "When did I hike?"
     assert answer["body"] == "You hiked with John on 2024-01-15."
     assert answer["stage"] == "fast_summary"
-    assert {"date": "2024-01-15", "id": 1} in answer["sources"]["dates"]
+    assert {"date": "2024-01-15", "id": 1, "section": None} in answer["sources"]["dates"]
     assert fake_client.streamed_calls == []  # nothing to stream into
     found = _json(tmp_path, config, "search", "hiked")
     assert found["query"] == "hiked" and found["entries"][0]["date"] == "2024-01-15"

@@ -266,8 +266,10 @@ def _entry_table(
     rows: list[sqlite3.Row],
     title: str | None = None,
     longer: bool = False,
+    parts: dict[int, sqlite3.Row] | None = None,
 ) -> Table:
-    """With `longer`, long entries show their longer summary."""
+    """With `longer`, long entries show their longer summary, and with `parts`
+    (search results) the heading of the part that matched goes under the date."""
     tags_by_entry = store.tags_for_entries(conn, [r["id"] for r in rows])
     details = store.details_for_entries(conn, [r["id"] for r in rows]) if longer else {}
     table = Table(show_lines=False, title=title)
@@ -276,8 +278,9 @@ def _entry_table(
     table.add_column("Tags")
     table.add_column("Summary")
     for r in rows:
+        part = (parts or {}).get(r["id"])
         table.add_row(
-            r["entry_date"],
+            r["entry_date"] + (f"\n#{escape(part['heading'])}" if part is not None and part["heading"] else ""),
             _mood_str(r["mood_score"]),
             escape(", ".join(tags_by_entry.get(r["id"], []))),
             escape(details.get(r["id"]) or r["summary"] or "(no summary)"),
@@ -472,7 +475,9 @@ def _print_answer(
     links: list[Text] = []
     for day in answer.cited_dates:
         rows = store.entries_in_range(conn, day, day)
-        links.append(_source_link(f"[[{day.isoformat()}]]", rows[0]["file_path"] if rows else None))
+        part = answer.cited_parts.get(day.isoformat())
+        label = f"[[{day.isoformat()}#{part}]]" if part else f"[[{day.isoformat()}]]"
+        links.append(_source_link(label, rows[0]["file_path"] if rows else None))
     for title in answer.cited_notes:
         notes = store.find_notes(conn, title)
         links.append(_source_link(f"[[{title}]]", notes[0]["file_path"] if notes else None))
@@ -798,7 +803,7 @@ def search(
         if as_json:
             _emit({
                 "query": text,
-                "entries": serialize.entry_briefs(conn, results.entries),
+                "entries": serialize.entry_briefs(conn, results.entries, results.parts),
                 "notes": serialize.note_briefs(conn, results.notes),
             })
             return
@@ -808,7 +813,7 @@ def search(
         if results.notes:
             console.print(_note_table(conn, results.notes, title="Related notes"))
         if results.entries:
-            console.print(_entry_table(conn, results.entries))
+            console.print(_entry_table(conn, results.entries, parts=results.parts))
 
 
 @app.command()

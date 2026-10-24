@@ -12,7 +12,7 @@ from pathlib import Path
 import sqlite_vec
 
 from .models import Extraction, FrontmatterValue, ParsedEntry, ParsedNote
-from .parser import file_link_key, relative_path
+from .parser import Section, file_link_key, relative_path
 
 # Lists go in as one JSON array rather than a placeholder each. An id list can
 # be the whole journal, and SQLite before 3.32 allows only 999 variables.
@@ -112,6 +112,7 @@ def delete_entries_for_file(conn: sqlite3.Connection, path: str) -> list[date]:
         # vec0 tables don't cascade
         for r in rows:
             conn.execute("DELETE FROM entries_vec WHERE entry_id = ?", (r["id"],))
+            _delete_section_vectors(conn, r["id"])
         conn.execute("DELETE FROM entries WHERE file_path = ?", (path,))
         conn.execute("DELETE FROM entry_file_keys WHERE path = ?", (path,))
     return dates
@@ -538,6 +539,117 @@ def prune_unused_tags(conn: sqlite3.Connection) -> None:
         conn.execute(
             "DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM entry_tags)"
         )
+
+
+def _delete_section_vectors(conn: sqlite3.Connection, entry_id: int) -> None:
+    if not _has_table(conn, "sections_vec"):
+        return
+    conn.execute(
+        "DELETE FROM sections_vec WHERE section_id IN "
+        "(SELECT id FROM entry_sections WHERE entry_id = ?)",
+        (entry_id,),
+    )
+
+
+def replace_entry_sections(
+    conn: sqlite3.Connection,
+    entry_id: int,
+    sections: Sequence[Section],
+    vectors: Sequence[list[float] | None] = (),
+) -> None:
+    """`vectors` go with `sections` in order; a missing one leaves that part to keywords."""
+    with conn:
+        _delete_section_vectors(conn, entry_id)
+        conn.execute("DELETE FROM entry_sections WHERE entry_id = ?", (entry_id,))
+        for i, section in enumerate(sections):
+            cur = conn.execute(
+                """INSERT INTO entry_sections(entry_id, heading, start_line, end_line, text)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (entry_id, section.heading, section.start, section.end, section.text),
+            )
+            vector = vectors[i] if i < len(vectors) else None
+            if vector is not None:
+                assert cur.lastrowid is not None
+                conn.execute(
+                    "INSERT INTO sections_vec(section_id, embedding) VALUES (?, ?)",
+                    (cur.lastrowid, sqlite_vec.serialize_float32(vector)),
+                )
+
+
+def sections_for_entries(
+    conn: sqlite3.Connection, entry_ids: list[int]
+) -> dict[int, list[sqlite3.Row]]:
+    if not entry_ids:
+        return {}
+    try:
+        rows = conn.execute(
+            f"""SELECT * FROM entry_sections WHERE entry_id IN ({_JSON_VALUES})
+                ORDER BY entry_id, start_line""",
+            (_json_list(entry_ids),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # a read-only connection to a cache from before the table
+    out: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for r in rows:
+        out[r["entry_id"]].append(r)
+    return dict(out)
+
+
+def section_vec_search(
+    conn: sqlite3.Connection, query_vector: list[float], allowed_ids: list[int] | None, k: int
+) -> list[sqlite3.Row]:
+    """The parts closest in meaning, best first, with the entry each belongs to."""
+    try:
+        sql = "SELECT section_id, distance FROM sections_vec WHERE embedding MATCH ?"
+        params: list[object] = [sqlite_vec.serialize_float32(query_vector)]
+        if allowed_ids is not None:
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    f"SELECT id FROM entry_sections WHERE entry_id IN ({_JSON_VALUES})",
+                    (_json_list(allowed_ids),),
+                )
+            ]
+            if not ids:
+                return []
+            sql += f" AND section_id IN ({_JSON_VALUES})"
+            params.append(_json_list(ids))
+        hits = conn.execute(f"{sql} ORDER BY distance LIMIT ?", [*params, k]).fetchall()
+    except sqlite3.OperationalError:
+        return []  # sections_vec is created by the first index run
+    return _sections_in_order(conn, [r["section_id"] for r in hits])
+
+
+def sections_fts_search(
+    conn: sqlite3.Connection, terms: list[str], allowed_ids: list[int] | None, k: int
+) -> list[sqlite3.Row]:
+    match = _match_expression(terms)
+    if match is None:
+        return []
+    sql = """SELECT f.rowid AS id FROM sections_fts f
+             JOIN entry_sections s ON s.id = f.rowid
+             WHERE sections_fts MATCH ?"""
+    params: list[object] = [match]
+    if allowed_ids is not None:
+        sql += f" AND s.entry_id IN ({_JSON_VALUES})"
+        params.append(_json_list(allowed_ids))
+    try:
+        rows = conn.execute(f"{sql} ORDER BY rank LIMIT ?", [*params, k]).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return _sections_in_order(conn, [r["id"] for r in rows])
+
+
+def _sections_in_order(conn: sqlite3.Connection, ids: list[int]) -> list[sqlite3.Row]:
+    if not ids:
+        return []
+    by_id = {
+        r["id"]: r
+        for r in conn.execute(
+            f"SELECT * FROM entry_sections WHERE id IN ({_JSON_VALUES})", (_json_list(ids),)
+        )
+    }
+    return [by_id[i] for i in ids if i in by_id]
 
 
 def save_entry_vector(conn: sqlite3.Connection, entry_id: int, vector: list[float]) -> None:
@@ -2359,6 +2471,12 @@ def entry_days(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             "SELECT id, entry_date, mood_score, word_count, summary FROM entries "
             "ORDER BY entry_date, id"
         ).fetchall()
+    )
+
+
+def all_entry_texts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute("SELECT id, file_path, raw_text FROM entries ORDER BY id").fetchall()
     )
 
 

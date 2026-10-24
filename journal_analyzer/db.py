@@ -271,6 +271,32 @@ CREATE TRIGGER IF NOT EXISTS entries_fts_au AFTER UPDATE OF raw_text ON entries 
   INSERT INTO entries_fts(rowid, raw_text) VALUES (new.id, new.raw_text);
 END;
 
+-- The parts of an entry with several top-level headings, searched on their
+-- own so a short part of a long day can still be found. Entries with one
+-- part have none. Their vectors are in sections_vec.
+CREATE TABLE IF NOT EXISTS entry_sections (
+  id         INTEGER PRIMARY KEY,
+  entry_id   INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  heading    TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line   INTEGER NOT NULL,
+  text       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entry_sections_entry ON entry_sections(entry_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(
+  text,
+  content='entry_sections',
+  content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS sections_fts_ai AFTER INSERT ON entry_sections BEGIN
+  INSERT INTO sections_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS sections_fts_ad AFTER DELETE ON entry_sections BEGIN
+  INSERT INTO sections_fts(sections_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
   title,
   aliases,
@@ -478,7 +504,9 @@ def verify_embed_model(conn: sqlite3.Connection, dim: int, model: str) -> None:
 
 def ensure_vec_table(conn: sqlite3.Connection, dim: int, model: str) -> None:
     verify_embed_model(conn, dim, model)
-    for table, id_column in (("entries_vec", "entry_id"), ("notes_vec", "note_id")):
+    for table, id_column in (
+        ("entries_vec", "entry_id"), ("notes_vec", "note_id"), ("sections_vec", "section_id"),
+    ):
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0("
             f"{id_column} INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
