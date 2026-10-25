@@ -110,6 +110,25 @@ def test_period_bounds():
         store.period_bounds("month", "March")
 
 
+@pytest.mark.parametrize(
+    ("typed", "parsed"),
+    [
+        ("2024", ("year", "2024", date(2024, 1, 1), date(2024, 12, 31))),
+        (" 2024-02 ", ("month", "2024-02", date(2024, 2, 1), date(2024, 2, 29))),
+        ("2024-2", ("month", "2024-02", date(2024, 2, 1), date(2024, 2, 29))),
+        ("2024-w3", ("week", "2024-W03", date(2024, 1, 15), date(2024, 1, 21))),
+    ],
+)
+def test_parse_period_writes_keys_the_way_rollups_are_stored(typed, parsed):
+    assert store.parse_period(typed) == parsed
+
+
+@pytest.mark.parametrize("typed", ["March", "2024-13", "2023-W53", "2024-03-01", "24"])
+def test_parse_period_refuses_anything_else(typed):
+    with pytest.raises(ValueError):
+        store.parse_period(typed)
+
+
 def test_serves_the_page_with_a_strict_content_policy(browser):
     response = browser.request("/")
     body = response.read()

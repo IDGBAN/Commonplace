@@ -253,10 +253,8 @@ class Server:
 
     def _tool_digest(self, conn: sqlite3.Connection, args: Json) -> object:
         period = _text_arg(args, "period")
-        kind = "week" if "w" in period.casefold() else "month" if len(period) == 7 else "year"
-        key = period.upper() if kind == "week" else period
         try:
-            start, end = store.period_bounds(kind, key)
+            kind, key, start, end = store.parse_period(period)
         except ValueError:
             raise ToolError(
                 f"'{period}' isn't a period. Use a year (2024), a month (2024-03) or a week (2024-W10)."

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 import sqlite3
 from collections import defaultdict
 from collections.abc import Sequence
@@ -67,6 +68,27 @@ def period_bounds(period_type: str, period_key: str) -> tuple[date, date]:
         start = datetime.strptime(period_key, "%Y").date()
         return start, date(start.year, 12, 31)
     raise ValueError(f"unknown period type '{period_type}'")
+
+
+_PERIOD_PATTERNS = (
+    ("year", re.compile(r"\d{4}")),
+    ("month", re.compile(r"\d{4}-\d{1,2}")),
+    ("week", re.compile(r"\d{4}-[Ww]\d{1,2}")),
+)
+
+
+def parse_period(text: str) -> tuple[str, str, date, date]:
+    """A year, month or ISO week as typed, like 2024, 2024-03 or 2024-W10.
+
+    Returns (kind, key, first day, last day), the key written the way rollups
+    are stored, so 2024-w3 is 2024-W03. ValueError if it's none of those.
+    """
+    value = text.strip()
+    for kind, pattern in _PERIOD_PATTERNS:
+        if pattern.fullmatch(value):
+            start, end = period_bounds(kind, value.upper())
+            return kind, _PERIOD_KEY_FN[kind](start), start, end
+    raise ValueError(f"'{text}' isn't a year, a month or an ISO week")
 
 
 def get_file_record(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:

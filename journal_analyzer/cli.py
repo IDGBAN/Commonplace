@@ -631,23 +631,11 @@ def rollup(
     )
 
 
-_PERIOD_PATTERNS = (
-    ("year", re.compile(r"\d{4}")),
-    ("month", re.compile(r"\d{4}-\d{2}")),
-    ("week", re.compile(r"\d{4}-[Ww]\d{2}")),
-)
-
-
 def _parse_period(value: str) -> tuple[str, str, date, date]:
-    text = value.strip()
-    for kind, pattern in _PERIOD_PATTERNS:
-        if pattern.fullmatch(text):
-            key = text.upper() if kind == "week" else text
-            try:
-                start, end = store.period_bounds(kind, key)
-            except ValueError:
-                break
-            return kind, key, start, end
+    try:
+        return store.parse_period(value)
+    except ValueError:
+        pass
     console.print(
         f"[red]'{escape(value)}' isn't a period. Use a year (2024), a month (2024-03) "
         "or an ISO week (2024-W10).[/red]"
