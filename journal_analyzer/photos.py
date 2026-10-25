@@ -11,6 +11,7 @@ bytes, so a photo is described once however many entries show it.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,8 +61,9 @@ class _Images:
         return found
 
     def find(self, vault: Path, name: str) -> Path | None:
-        direct = vault / name
-        if "/" in name and direct.is_file():
+        # ../ or an absolute path could reach any file on the disk
+        direct = Path(os.path.normpath(vault / name))
+        if "/" in name and direct.is_relative_to(vault) and direct.is_file():
             return direct
         key = name.rsplit("/", 1)[-1].casefold()
         stamp, index = self._by_vault.get(vault, (0.0, {}))

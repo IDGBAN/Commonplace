@@ -47,6 +47,15 @@ def test_images_are_found_the_way_obsidian_finds_them(tmp_path):
     assert photos.find(cfg, "SUNSET.png") == root / "sunset.png"
 
 
+def test_images_outside_the_vault_are_never_read(tmp_path):
+    cfg = _vault(tmp_path)
+    outside = tmp_path / "outside" / "private.jpg"
+    outside.parent.mkdir()
+    outside.write_bytes(b"jpg")
+    assert photos.find(cfg, "../outside/private.jpg") is None
+    assert photos.find(cfg, outside.as_posix()) is None
+
+
 def test_only_so_many_photos_and_only_with_a_vision_model(tmp_path):
     cfg = _vault(tmp_path)
     entry = ParsedEntry(date(2024, 3, 4), "x", "x", images=["beach.jpg", "sunset.png", "missing.jpg"])
