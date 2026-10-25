@@ -40,6 +40,7 @@ _NON_PROPERTY_KEYS = frozenset(
      "private"}
 )
 _TAG_KEYS = frozenset({"tags", "tag"})
+_ALIAS_KEYS = frozenset({"aliases", "alias"})
 # `private: true` in the frontmatter keeps a whole file out of the cache
 PRIVATE_KEY = "private"
 # Obsidian hides %% comments %% in reading view; an unclosed one runs to the end
@@ -524,7 +525,7 @@ def _file_date(
     if vault.date_source == "filename":
         return date_from_text(path.stem, vault.date_format)
     if vault.date_source == "frontmatter":
-        values = _as_list(frontmatter.get(vault.frontmatter_date_key))
+        values = _as_list(frontmatter_value(frontmatter, vault.frontmatter_date_key))
         return date_from_text(values[0], vault.date_format) if values else None
     for line in body.splitlines():
         if line.lstrip().startswith("#") and not line.lstrip().startswith("#["):
@@ -688,9 +689,12 @@ def parse_note(path: Path | str, kind: str, config: Config) -> ParsedNote:
     title = path.stem
 
     aliases: dict[str, str] = {}
-    for alias in _as_list(frontmatter.get("aliases")) + _as_list(frontmatter.get("alias")):
-        if alias.casefold() != title.casefold():
-            aliases.setdefault(alias.casefold(), alias)
+    for key, value in frontmatter.items():
+        if key.casefold() not in _ALIAS_KEYS:
+            continue
+        for alias in _as_list(value):
+            if alias.casefold() != title.casefold():
+                aliases.setdefault(alias.casefold(), alias)
 
     properties: dict[str, str] = {}
     values: dict[str, list[str]] = {}

@@ -292,6 +292,18 @@ def test_parse_note_reads_aliases_properties_and_links(tmp_path):
     )
 
 
+def test_property_names_are_read_ignoring_case(tmp_path):
+    cfg = make_config(tmp_path, date_source="frontmatter")
+    note_path = tmp_path / "John Doe.md"
+    note_path.write_text("---\nAliases: [Johnny]\nAlias: JD\n---\nFriend.", encoding="utf-8")
+    note = parser.parse_note(note_path, "people", cfg)
+    assert note.aliases == ["Johnny", "JD"]
+    assert note.properties == {}
+    entry_path = cfg.vault.path / "diary.md"
+    entry_path.write_text("---\nDate: 2024-03-05\n---\nWalked.", encoding="utf-8")
+    assert [e.entry_date for e in parser.parse_file(entry_path, cfg)] == [date(2024, 3, 5)]
+
+
 def test_an_empty_note_still_parses(tmp_path):
     path = tmp_path / "Chess.md"
     path.write_text("", encoding="utf-8")
