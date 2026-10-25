@@ -46,6 +46,7 @@ LINKED_WITH_LIMIT = 12
 GROUP_VALUES_LIMIT = 30
 PROFILE_FACTS_LIMIT = 300
 _MAX_ROWID = 2**63 - 1
+_OTHER_SITES = frozenset({"cross-site", "same-site"})
 _NO_ENTRY = "There is no indexed entry with that id."
 _NO_NOTE = "There is no indexed note with that id."
 
@@ -617,6 +618,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Unexpected Host header."})
             return
         url = urlsplit(self.path)
+        # The Host check doesn't stop a page elsewhere from sending requests
+        # to 127.0.0.1 itself. It can't read the replies, but /api/ask would
+        # still set the models going. Browsers say where a request came from.
+        if url.path.startswith("/api/") and self.headers.get("Sec-Fetch-Site") in _OTHER_SITES:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Requests from other sites are refused."})
+            return
         if url.path == "/api/ask":
             self._ask(url.query)
         elif url.path.startswith("/api/"):

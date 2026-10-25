@@ -24,11 +24,15 @@ class Browser:
         self.port = port
 
     def request(
-        self, path: str, method: str = "GET", host: str | None = None
+        self,
+        path: str,
+        method: str = "GET",
+        host: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> http.client.HTTPResponse:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        headers = {"Host": host} if host is not None else {}
-        conn.request(method, path, headers=headers)
+        sent = {"Host": host} if host is not None else {}
+        conn.request(method, path, headers={**sent, **(headers or {})})
         return conn.getresponse()
 
     def get(self, path: str, status: int = 200) -> dict:
@@ -128,6 +132,21 @@ def test_refuses_requests_for_another_host_name(browser):
     response = browser.request("/api/overview", host="attacker.example:80")
     assert response.status == 403
     assert "John" not in response.read().decode()
+
+
+def test_refuses_api_calls_from_other_sites(browser, fake_client):
+    for site in ("cross-site", "same-site"):
+        response = browser.request("/api/ask?q=hello", headers={"Sec-Fetch-Site": site})
+        assert response.status == 403
+        assert "John" not in response.read().decode()
+    assert fake_client.chat_calls == fake_client.structured_calls == []
+    response = browser.request("/api/overview", headers={"Sec-Fetch-Site": "same-origin"})
+    response.read()
+    assert response.status == 200
+    # a link from elsewhere can still open the page itself
+    response = browser.request("/", headers={"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate"})
+    response.read()
+    assert response.status == 200
 
 
 def test_is_read_only(browser):
