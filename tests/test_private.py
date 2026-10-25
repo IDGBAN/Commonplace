@@ -156,6 +156,17 @@ def test_a_new_private_tag_hides_unchanged_files_without_models(tmp_path, fake_c
     assert counts["indexed"] == 1 and _status(conn, secret) == "indexed"
 
 
+def test_a_new_private_tag_survives_a_file_that_lost_its_date(tmp_path, fake_client):
+    cfg = make_config(tmp_path, date_source="frontmatter")
+    path = _write(cfg, "diary.md", "---\ndate: 2024-01-01\n---\nDiary.")
+    conn, _ = _indexed(cfg, fake_client)
+    assert _status(conn, path) == "indexed"
+    path.write_text("Diary, date gone.", encoding="utf-8")
+    cfg.vault.private_tag = "secret"
+    counts = ingester.run_backfill(cfg, conn, client=fake_client)
+    assert counts["error"] == 1 and _status(conn, path) == "error"
+
+
 def test_a_cache_from_before_private_tags_gets_checked_once(tmp_path, fake_client):
     cfg = make_config(tmp_path)
     secret = _write(cfg, "2024-01-01.md", "Diary. #private")

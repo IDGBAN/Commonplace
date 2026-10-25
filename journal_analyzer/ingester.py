@@ -167,8 +167,7 @@ def _index_entries(
     _clear_file(conn, key)
     # entries have a foreign key on files
     store.upsert_file(conn, key, content_hash, "pending")
-    if entries:
-        store.save_file_frontmatter(conn, key, entries[0].frontmatter)
+    store.save_file_frontmatter(conn, key, entries[0].frontmatter)
     for entry, reading, vector, parts, part_vectors, seen in zip(
         entries, readings, vectors, sections, section_vectors, described, strict=True
     ):
@@ -521,8 +520,8 @@ def _private_now(path: Path, config: Config, stored_entries: int) -> bool | None
         if kind is not None:
             return True if parser.parse_note(path, kind, config).private else None
         entries = parser.parse_file(path, config)
-    except (OSError, ValueError):
-        return None  # DateParseError is a ValueError
+    except (OSError, JournalError):
+        return None
     if not entries:
         return True
     return False if len(entries) != stored_entries else None
