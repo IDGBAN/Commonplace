@@ -338,6 +338,13 @@ def init(config: ConfigOpt = None) -> None:
 
 @app.command()
 def index(
+    paths: Annotated[
+        list[Path] | None,
+        typer.Argument(
+            help="Only these files or folders, from the vault root or the current folder.",
+            show_default=False,
+        ),
+    ] = None,
     config: ConfigOpt = None,
     vault: Annotated[
         Path | None, typer.Option(help="Override the vault path from config.")
@@ -359,17 +366,23 @@ def index(
         with _guard():
             cfg = _with_vault(load_config(config), vault)
             if not db.cache_has_data(cfg):
+                targets = ingester.resolve_targets(cfg, None, paths) if paths else None
                 _print_plan(
-                    ingester.plan_backfill(cfg, None, force=force), cfg.vault.path, cache=False
+                    ingester.plan_backfill(cfg, None, force=force, targets=targets),
+                    cfg.vault.path, cache=False,
                 )
                 return
             with closing(db.connect_readonly(cfg)) as conn:
+                targets = ingester.resolve_targets(cfg, conn, paths) if paths else None
                 _print_plan(
-                    ingester.plan_backfill(cfg, conn, force=force), cfg.vault.path, cache=True
+                    ingester.plan_backfill(cfg, conn, force=force, targets=targets),
+                    cfg.vault.path, cache=True,
                 )
         return
     with _guard(), _open(config) as (cfg, conn):
-        ingester.run_backfill(_memo(_with_vault(cfg, vault), no_memo), conn, force=force)
+        cfg = _memo(_with_vault(cfg, vault), no_memo)
+        targets = ingester.resolve_targets(cfg, conn, paths) if paths else None
+        ingester.run_backfill(cfg, conn, force=force, targets=targets)
 
 
 def _with_vault(cfg: Config, vault: Path | None) -> Config:
@@ -390,8 +403,9 @@ def _print_plan(plan: ingester.BackfillPlan, vault: Path, cache: bool) -> None:
         console.print("[dim]There's no cache yet, so every file counts as new.[/dim]")
     notes = sum(1 for f in plan.files if f.kind is not None)
     console.print(
-        f"Files found     : {len(plan.files)} ({len(plan.files) - notes} journal, "
-        f"{notes} notes), {plan.ignored} ignored"
+        f"Files {'named' if plan.targeted else 'found'}     : {len(plan.files)} "
+        f"({len(plan.files) - notes} journal, {notes} notes)"
+        + ("" if plan.targeted else f", {plan.ignored} ignored")
     )
     by_status = {s: sum(1 for f in plan.files if f.status == s) for s in (
         "new", "changed", "retry", "switching", "forced", "unchanged")}

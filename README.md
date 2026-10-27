@@ -77,6 +77,7 @@ journal init              # create the DB schema and detect the embedding size
 journal index             # index the vault, skipping unchanged files
 journal index --force     # re-process everything (model results it's seen before are reused)
 journal index --dry-run   # what would be indexed, which files won't parse, how many model calls
+journal index 2024-03-04.md --force   # read one file (or folder) again, leaving the rest alone
 journal stats             # entries, notes, links, date range, DB size, errored and future-dated files
 
 # questions
@@ -120,6 +121,8 @@ journal profile --update  # read entries it hasn't yet and fold in what's new
 It never writes to `.obsidian` or anywhere in the vault, and with no `.obsidian` folder it skips these checks.
 
 Before a long first run, or after changing `date_source`, `date_format` or `split_heading_regex`, run `journal index --dry-run`. It walks the vault the same way `journal index` does and parses every file it would index, without Ollama and without touching the cache. It lists files that would fail and why, files that split into several entries, entries dated in the future, files that would be dropped, and roughly how many model calls the real run would make. Add `--force` to check every file, not just new and changed ones.
+
+To index just some files, name them: `journal index 2024-03-04.md Trips/Lisbon` takes files and folders from the vault root (or from the folder you're in), and nothing else in the vault is read or dropped. It's handy after editing an entry when `journal watch` isn't running, or with `--force` to have the model read one entry again. A named file that's been deleted is taken out of the cache, and one a full run wouldn't index (outside the vault, left out by `ignore_patterns`, or matched by neither `daily_note_glob` nor `notes.paths`) is refused with the reason. `--dry-run` works the same way.
 
 `journal rollup` shows a progress bar with the time left. `--since` and `--until` limit it to periods that overlap those dates and `--only` to some kinds (`profile`, `month`, `year`, `note`, `week`); your profile and relationship digests cover the whole journal, so the dates don't apply to them. `--dry-run` lists what it would write and why (not written yet, out of date, or rewritten for `--rebuild-all`). To read one digest, or to write just the one you want instead of waiting for a full run, use `journal digest`. A year is written from its month digests, so refreshing a year writes any of its months that are missing first.
 

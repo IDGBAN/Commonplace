@@ -325,6 +325,73 @@ def _prune_vanished(config: Config, conn: sqlite3.Connection, files: list[Path])
     return len(gone)
 
 
+@dataclass
+class Targets:
+    """The files `journal index PATH...` names."""
+
+    files: list[Path]
+    # cache keys of named files that aren't there any more
+    gone: list[str] = field(default_factory=list)
+
+
+def _named_path(raw: Path, config: Config) -> Path:
+    # the vault root first, since that's how Obsidian shows paths, then the
+    # current folder, so a path Tab completed in the shell works too
+    path = raw.expanduser()
+    if not path.is_absolute():
+        in_vault = config.vault.path / path
+        path = in_vault if in_vault.exists() or not path.exists() else path
+    return path.resolve()
+
+
+def _not_indexed_reason(path: Path, config: Config) -> str:
+    rel = parser.relative_path(path, config.vault.path)
+    if is_ignored(path, config):
+        return f"{rel} is left out by ignore_patterns in config.toml."
+    return (
+        f"{rel} isn't a journal entry or a note: daily_note_glob "
+        f"('{config.vault.daily_note_glob}') doesn't match it, and it isn't under notes.paths."
+    )
+
+
+def resolve_targets(config: Config, conn: sqlite3.Connection | None, paths: list[Path]) -> Targets:
+    """Files as they are and folders by the files in them, each checked the
+    way a full run would pick it. A file that's gone but still in the cache
+    is to be dropped. Raises ConfigError for anything a run wouldn't index."""
+    _require_vault(config)
+    vault = config.vault.path
+    tracked = store.tracked_paths(conn) if conn is not None else []
+    files: dict[Path, None] = {}
+    gone: dict[str, None] = {}
+    walked: list[Path] | None = None
+    for raw in paths:
+        path = _named_path(raw, config)
+        if not PurePath(path).is_relative_to(vault):
+            raise ConfigError(f"{raw} isn't in the vault, which is {vault}.")
+        if path.is_dir():
+            walked = vault_files(config) if walked is None else walked
+            inside = [p for p in walked if PurePath(p).is_relative_to(path)]
+            if not inside:
+                rel = parser.relative_path(path, vault)
+                raise ConfigError(
+                    f"Nothing in {'the vault' if rel == '.' else rel} is a journal entry or a "
+                    "note. daily_note_glob, notes.paths and ignore_patterns in config.toml "
+                    "decide which files are read."
+                )
+            files.update(dict.fromkeys(inside))
+        elif path.is_file():
+            if not _matches_glob(path, config):
+                raise ConfigError(_not_indexed_reason(path, config))
+            files[path] = None
+        else:
+            # a file or folder deleted since, as watch would have seen it
+            missing = [k for k in tracked if PurePath(k).is_relative_to(path) and not Path(k).exists()]
+            if not missing:
+                raise ConfigError(f"There's no file or folder at {path}.")
+            gone.update(dict.fromkeys(missing))
+    return Targets(list(files), list(gone))
+
+
 PlanStatus = Literal["new", "changed", "retry", "switching", "forced", "unchanged"]
 
 
@@ -347,6 +414,7 @@ class BackfillPlan:
     files: list[PlannedFile]
     ignored: int
     dropped: list[str]
+    targeted: bool = False  # only the files `journal index PATH...` named
 
     @property
     def to_index(self) -> list[PlannedFile]:
@@ -412,10 +480,20 @@ def _plan_file(
 
 
 def plan_backfill(
-    config: Config, conn: sqlite3.Connection | None, force: bool = False
+    config: Config,
+    conn: sqlite3.Connection | None,
+    force: bool = False,
+    targets: Targets | None = None,
 ) -> BackfillPlan:
     """What run_backfill would do, without calling a model or writing anything."""
     _require_vault(config)
+    if targets is not None:
+        return BackfillPlan(
+            files=[_plan_file(p, config, conn, force) for p in sorted(targets.files)],
+            ignored=0,
+            dropped=list(targets.gone),
+            targeted=True,
+        )
     candidates = _candidate_files(config)
     files = sorted(p for p in candidates if not is_ignored(p, config))
     return BackfillPlan(
@@ -430,18 +508,31 @@ def run_backfill(
     conn: sqlite3.Connection,
     force: bool = False,
     client: OllamaClient | None = None,
+    targets: Targets | None = None,
 ) -> dict[str, int]:
+    """With `targets`, only those files are indexed and only the gone ones
+    among them dropped; the rest of the vault isn't walked."""
     _require_vault(config)
     client = client or OllamaClient(config)
     _ensure_vec(config, conn, client)
     # notes first so entry links resolve even if the run gets cut short
-    files = sorted(vault_files(config), key=lambda p: parser.note_kind(p, config) is None)
+    files = sorted(
+        vault_files(config) if targets is None else targets.files,
+        key=lambda p: parser.note_kind(p, config) is None,
+    )
+    if targets is None:
+        gone = _prune_vanished(config, conn, files)
+    else:
+        for key in targets.gone:
+            _forget_file(conn, key)
+            console.print(f"[yellow]removed[/yellow] {escape(key)}")
+        gone = len(targets.gone)
     counts = {
         "indexed": 0,
         "private": 0,
         "skipped": 0,
         "error": 0,
-        "dropped": _prune_vanished(config, conn, files),
+        "dropped": gone,
     }
     _apply_private_settings(config, conn)
     _apply_photo_settings(config, conn)
