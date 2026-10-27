@@ -651,11 +651,10 @@ def _parse_period(value: str) -> tuple[str, str, date, date]:
         return store.parse_period(value)
     except ValueError:
         pass
-    console.print(
-        f"[red]'{escape(value)}' isn't a period. Use a year (2024), a month (2024-03) "
-        "or an ISO week (2024-W10).[/red]"
+    _fail(
+        f"'{value}' isn't a period. Use a year (2024), a month (2024-03) "
+        "or an ISO week (2024-W10)."
     )
-    raise typer.Exit(1)
 
 
 def _when(stamp: str | None) -> str:
@@ -665,15 +664,6 @@ def _when(stamp: str | None) -> str:
         return datetime.fromisoformat(stamp).astimezone().strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return stamp
-
-
-def _period_title(kind: str, key: str, start: date) -> str:
-    if kind == "month":
-        return start.strftime("%B %Y")
-    if kind == "week":
-        year, week = key.split("-W")
-        return f"Week {int(week)} of {year}"
-    return key
 
 
 @app.command(name="digest")
@@ -696,7 +686,7 @@ def digest_cmd(
     """Show the digest for one week, month or year."""
     OUT.as_json = as_json
     kind, key, start, end = _parse_period(period)
-    title = _period_title(kind, key, start)
+    title = store.period_title(kind, key)
     with _guard(), _open(config) as (cfg, conn):
         members = store.entries_in_range(conn, start, end)
         row = store.get_rollup(conn, kind, key)
@@ -1949,30 +1939,43 @@ def _print_comparison(cfg: Config, result: compare.Comparison) -> None:
 
 @app.command(name="review")
 def review_cmd(
-    year: Annotated[
-        int | None, typer.Argument(help="The year, e.g. 2025. Default: the latest year you wrote in.")
+    period: Annotated[
+        str | None,
+        typer.Argument(
+            help="A year (2025), month (2025-03) or ISO week (2025-W10). Default: the latest year you wrote in.",
+            autocompletion=completion.periods,
+            show_default=False,
+        ),
     ] = None,
     config: ConfigOpt = None,
     out: Annotated[
         Path | None,
         typer.Option("--out", help="Write the Markdown to this file instead of stdout."),
     ] = None,
+    as_json: JsonOpt = False,
 ) -> None:
-    """A year in review as Markdown: mood, best and hardest days, people, tags."""
+    """A year, month or week in review as Markdown: mood, best and hardest days, people, tags."""
+    OUT.as_json = as_json
+    if as_json and out is not None:
+        _fail("--out writes Markdown. Leave out --json, or send the JSON to a file with >.")
+    if period is not None:
+        _parse_period(period)
     with _guard(), _open(config) as (cfg, conn):
-        if year is None:
+        if period is None:
             _, last = store.date_bounds(conn, None, None)
             if last is None:
-                console.print("No entries indexed yet. Run 'journal index' first.")
-                raise typer.Exit(1)
-            year = int(last[:4])
-        built = review.build(cfg, conn, year)
-    if built is None:
-        console.print(f"No entries in {year}.")
-        raise typer.Exit(1)
+                _fail("No entries indexed yet. Run 'journal index' first.", red=False)
+            period = last[:4]
+        built = review.build(cfg, conn, period)
+        kind, key, _, _ = store.parse_period(period)
+        if built is None:
+            _fail(f"No entries in {store.period_title(kind, key)}.", red=False)
+        if as_json:
+            _emit(review.to_json(conn, built))
+            return
     written = _write_out(cfg, out, review.to_markdown(built))
     if written is not None:
-        console.print(f"Wrote the {year} review to {escape(str(written))}")
+        console.print(f"Wrote the {built.title} review to {escape(str(written))}")
 
 
 @app.command(name="insights")

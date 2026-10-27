@@ -91,6 +91,16 @@ def parse_period(text: str) -> tuple[str, str, date, date]:
     raise ValueError(f"'{text}' isn't a year, a month or an ISO week")
 
 
+def period_title(kind: str, key: str) -> str:
+    """2024, March 2024 or Week 10 of 2024, for a key the way rollups store it."""
+    if kind == "month":
+        return datetime.strptime(key, "%Y-%m").strftime("%B %Y")
+    if kind == "week":
+        year, week = key.split("-W")
+        return f"Week {int(week)} of {year}"
+    return key
+
+
 def get_file_record(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM files WHERE path = ?", (path,)).fetchone()
 
@@ -1878,7 +1888,7 @@ def top_entities(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return list(
         conn.execute(
-            f"""SELECT en.name, en.type, COUNT(*) AS n
+            f"""SELECT en.name, en.type, COUNT(*) AS n, MIN(en.id) AS id
                 FROM entities en
                 JOIN entry_entities ee ON ee.entity_id = en.id
                 JOIN entries e ON e.id = ee.entry_id
