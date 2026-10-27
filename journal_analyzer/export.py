@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sqlite3
 from datetime import date
@@ -8,6 +10,11 @@ from typing import Any
 from . import store
 
 ExportEntry = dict[str, Any]
+
+# Spreadsheets run a cell that starts with one of these as a formula, so
+# "- [x] pack lunch" shows up as #NAME?. Text cells get a ' in front.
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+_CSV_LIST_SEPARATOR = "; "
 
 
 def collect_entries(
@@ -74,3 +81,41 @@ def to_markdown(entries: list[ExportEntry]) -> str:
             lines.append(str(e["raw_text"]))
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _text_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_FORMULA_START) else text
+
+
+def _number_cell(value: float | int | None) -> str:
+    return "" if value is None else f"{value:g}"
+
+
+def to_csv(entries: list[ExportEntry]) -> str:
+    """One row per entry, with a column for each metric any entry has."""
+    keys = sorted({key for e in entries for key in e["metrics"]})
+    fixed = ["date", "mood", "words", "tags", "notes"]
+    raw = any("raw_text" in e for e in entries)
+    tail = ["summary", "details", "source_path", *(["raw_text"] if raw else [])]
+    # a metric called words or tags would otherwise share a header with them
+    taken = set(fixed + tail)
+    header = [*fixed, *(f"{k} (metric)" if k in taken else k for k in keys), *tail]
+    buf = io.StringIO()
+    # the file is written in text mode, which turns these into the platform's line ends
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(header)
+    for e in entries:
+        writer.writerow([
+            e["date"],
+            _number_cell(e["mood_score"]),
+            e["word_count"],
+            _text_cell(_CSV_LIST_SEPARATOR.join(e["tags"])),
+            _text_cell(_CSV_LIST_SEPARATOR.join(x["name"] for x in e["entities"])),
+            *(_number_cell(e["metrics"].get(k)) for k in keys),
+            _text_cell(e["summary"]),
+            _text_cell(e["details"]),
+            _text_cell(e["source_path"]),
+            *([_text_cell(e.get("raw_text"))] if raw else []),
+        ])
+    return buf.getvalue()

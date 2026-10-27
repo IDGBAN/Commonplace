@@ -64,6 +64,7 @@ LINKED_WITH_SHOWN = 8
 class ExportFormat(StrEnum):
     json = "json"
     markdown = "markdown"
+    csv = "csv"
 
 
 ConfigOpt = Annotated[
@@ -1811,7 +1812,7 @@ def export_cmd(
         bool, typer.Option("--include-raw", help="Include full entry text.")
     ] = False,
 ) -> None:
-    """Export entries as JSON or Markdown."""
+    """Export entries as JSON, Markdown or CSV."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag, group)
@@ -1821,17 +1822,20 @@ def export_cmd(
     if not entries:
         console.print("No entries in the requested range.")
         raise typer.Exit(1)
-    text = (
-        export.to_json(entries)
-        if fmt is ExportFormat.json
-        else export.to_markdown(entries)
-    )
-    written = _write_out(cfg, out, text)
+    if fmt is ExportFormat.csv:
+        # print ends the last row itself
+        text = export.to_csv(entries) if out is not None else export.to_csv(entries).removesuffix("\n")
+        # Excel reads a CSV file without one in the ANSI code page
+        bom = out is not None
+    else:
+        text = export.to_json(entries) if fmt is ExportFormat.json else export.to_markdown(entries)
+        bom = False
+    written = _write_out(cfg, out, text, bom=bom)
     if written is not None:
         console.print(f"Wrote {len(entries)} entries to {escape(str(written))}")
 
 
-def _write_out(cfg: Config, out: Path | None, text: str) -> Path | None:
+def _write_out(cfg: Config, out: Path | None, text: str, bom: bool = False) -> Path | None:
     """Print to stdout, or write to a file outside the vault."""
     if out is None:
         # plain print so rich doesn't read markup or rewrap the text
@@ -1845,7 +1849,7 @@ def _write_out(cfg: Config, out: Path | None, text: str) -> Path | None:
         raise typer.Exit(1)
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        out.write_text(text, encoding="utf-8-sig" if bom else "utf-8")
     except OSError as exc:
         console.print(f"[red]Could not write {escape(str(out))}: {escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc

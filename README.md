@@ -163,9 +163,12 @@ journal streaks                          # days written, words, longest run
 journal on-this-day                      # what you wrote on this date in earlier years
 journal similar 2024-01-15               # closest entries by stored embedding
 journal export --format markdown --out ~/journal-export.md
+journal export --format csv --out ~/journal.csv   # one row per day, for a spreadsheet
 ```
 
 `search`, `tags`, `entities`, `mood`, `metric`, `insights` and `export` take `--since` and `--until` as ISO dates. `search`, `mood`, `metric` and `export`, as well as `ask` and `chat`, also take `--about NOTE` (only entries that link that note, by title or alias), `--tag TAG` and `--group PROPERTY=VALUE` (only entries that link a note with that property value). On `ask` and `chat`, `--since` and `--until` replace whatever dates the question's wording suggests, which helps when the small routing model reads a date wrong; with `chat` the filters apply to every question in the conversation. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
+
+`--format csv` is for spreadsheets: one row per entry with its date, mood, word count, tags and linked notes, a column for each number you keep in frontmatter (see [Metrics](#metrics)), then the summaries and the file. Tags and notes are separated by `; `. A text cell that starts with `=`, `+`, `-` or `@` gets a `'` in front, since a spreadsheet would otherwise run it as a formula (an entry that starts with `- [x]` shows up as `#NAME?` in Excel). Written to a file with `--out`, it starts with a byte-order mark so Excel reads it as UTF-8; printed to the terminal it doesn't.
 
 ### JSON for scripts
 
