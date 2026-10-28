@@ -584,6 +584,29 @@ def _ask_params(params: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
     return question, history
 
 
+def _ask_scope(req: Request) -> tuple[store.EntryFilter | None, date | None, date | None]:
+    """?note=, ?tag=, ?group= and ?from=/?to= keep an answer to some entries,
+    like --about, --tag, --group, --since and --until on `journal ask`."""
+    note_ids: tuple[int, ...] = ()
+    raw_note = req.params.get("note", "").strip()
+    if raw_note:
+        if not raw_note.isdigit():
+            raise ApiError(HTTPStatus.BAD_REQUEST, "'note' must be a note's id.")
+        rows = store.notes_by_ids(req.conn, [_row_id(raw_note, _NO_NOTE)])
+        if not rows:
+            raise ApiError(HTTPStatus.NOT_FOUND, _NO_NOTE)
+        note_ids = (rows[0]["id"],)
+    tag = req.params.get("tag", "").strip().lstrip("#").strip().lower() or None
+    if tag and not store.tag_exists(req.conn, tag):
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No indexed entry is tagged '{tag}'.")
+    group = _group_param(req)
+    date_from, date_to = req.day("from"), req.day("to")
+    if date_from and date_to and date_from > date_to:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"'from' ({date_from}) is after 'to' ({date_to}).")
+    only = store.EntryFilter(tag, note_ids, group[0] if group else None, tuple(group[1]) if group else ())
+    return only or None, date_from, date_to
+
+
 Handler = Callable[..., Json]
 
 _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
@@ -676,10 +699,19 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _ask(self, query_string: str) -> None:
         params = {k: v[-1] for k, v in parse_qs(query_string).items()}
+        config = self.server.config
         try:
             question, history = _ask_params(params)
+            with closing(db.connect_readonly(config)) as conn:
+                only, since, until = _ask_scope(Request(config, conn, params, self.server.make_client))
         except ApiError as exc:
             self._send_json(exc.status, {"error": str(exc)})
+            return
+        except JournalError as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+        except sqlite3.Error as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"The cache couldn't be read: {exc}"})
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -692,7 +724,6 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event}\ndata: {body}\n\n".encode())
             self.wfile.flush()
 
-        config = self.server.config
         try:
             try:
                 with closing(db.connect_readonly(config)) as conn:
@@ -708,6 +739,7 @@ class _Handler(BaseHTTPRequestHandler):
                     result = query.answer(
                         standalone, config, conn, client,
                         on_stage=lambda stage: send("stage", {"text": stage}),
+                        since=since, until=until, only=only,
                         on_text=lambda text: send("text", {"text": text}),
                     )
                     send("answer", {"question": standalone, **serialize.answer_json(conn, result)})

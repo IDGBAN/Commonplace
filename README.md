@@ -214,6 +214,8 @@ journal browse --port 9000 --no-open
 
 The Ask page answers questions the same way `journal ask` does. You see each step while it works and the answer as it's written, then its sources linked to their entry and note pages, and a list of everything the model read. Follow-ups build on earlier answers like `journal chat`, and the conversation stays put while you open the pages it cites. Asking needs Ollama; Cancel stops waiting for an answer. From the jump box, type a question and pick "Ask".
 
+Note, tag and digest pages, and the Entries page once it's filtered, have an Ask box of their own. A question asked there only reads the entries that page shows: the ones that link the note, have the tag, fall in the digest's dates, or pass the filters (all but the words filter). It works like `--about`, `--tag`, `--group`, `--since` and `--until` on `journal ask`. The Ask page shows what it's kept to above the question box, and follow-ups stay kept to it until you take it off with ×.
+
 It opens the cache read-only and never touches your notes, so it's safe to leave open while `journal watch` runs. Reload a page to see new changes. It only listens on 127.0.0.1 and turns away requests that use any other host name. Keyword search works offline; matching by meaning needs Ollama and falls back to keywords when it isn't running. Nothing loads from the internet. Ctrl-C stops it.
 
 ### Reflection commands

@@ -576,6 +576,9 @@ table.links td:first-child { white-space: nowrap; }
 .turn-read[open] summary { margin-bottom: 0.8rem; }
 .turn-read .note-grid { margin-bottom: 0.8rem; }
 .ask-box { max-width: 52rem; }
+.ask-scope { max-width: 52rem; margin-bottom: 0.6rem; }
+.ask-scope:empty { display: none; }
+.ask-here { margin-bottom: 0; }
 .ask-box button:disabled { opacity: 0.45; pointer-events: none; }
 .ask-foot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: 52rem; }
 .ask-foot .section-note { margin: 0; }

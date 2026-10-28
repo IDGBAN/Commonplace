@@ -652,3 +652,32 @@ def test_entry_pages_carry_the_longer_summary(browser, journal):
     assert browser.get(f"/api/entries/{first}")["details"] is None
     store.save_entry_details(journal, first, "A longer account of the hike.")
     assert browser.get(f"/api/entries/{first}")["details"] == "A longer account of the hike."
+
+
+def test_ask_can_be_kept_to_a_note_tag_group_or_dates(browser, journal, fake_client):
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "Only the hike."
+    john = note_id(journal, "John Doe")
+    events = _events(browser.request(f"/api/ask?q=what+happened&note={john}"))
+    answer = events[-1][1]
+    assert events[-1][0] == "answer"
+    assert [e["date"] for e in answer["entries"]] == ["2024-01-15"]
+
+    events = _events(browser.request("/api/ask?q=what+happened&tag=rain"))
+    assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-16"]
+
+    events = _events(browser.request("/api/ask?q=what+happened&group=relationship%3Dfriend"))
+    assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-15"]
+
+    events = _events(browser.request("/api/ask?q=what+happened&from=2024-01-16&to=2024-01-31"))
+    assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-16"]
+
+
+def test_a_scope_that_finds_nothing_is_refused_before_streaming(browser, journal):
+    assert "no indexed note" in browser.get("/api/ask?q=hi&note=99999", status=404)["error"]
+    assert "must be a note's id" in browser.get("/api/ask?q=hi&note=john", status=400)["error"]
+    assert "tagged 'nope'" in browser.get("/api/ask?q=hi&tag=nope", status=404)["error"]
+    assert "property and a value" in browser.get("/api/ask?q=hi&group=relationship", status=400)["error"]
+    assert "No note's relationship" in browser.get("/api/ask?q=hi&group=relationship%3Denemy", status=404)["error"]
+    assert "is after" in browser.get("/api/ask?q=hi&from=2024-02-01&to=2024-01-01", status=400)["error"]
+    assert "a date like" in browser.get("/api/ask?q=hi&from=yesterday", status=400)["error"]

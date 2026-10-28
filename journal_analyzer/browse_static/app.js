@@ -122,7 +122,7 @@ const href = {
   digest: (type, key) => `#/digest/${type}/${encodeURIComponent(key)}`,
   files: (params) => `#/files${query(params)}`,
   search: (q) => `#/search${query({ q })}`,
-  ask: (q) => `#/ask${query({ q })}`,
+  ask: (q, scope) => `#/ask${query({ q, ...scope })}`,
 };
 
 function query(params) {
@@ -592,6 +592,7 @@ async function entriesView(_, params) {
   const noteSlot = h("div", { class: "field" });
   const groupSlot = h("div", { class: "field" });
   const clear = h("button", { class: "button", type: "button" }, "Clear filters");
+  const askSlot = h("div", {});
 
   let token = 0;
   async function load() {
@@ -617,6 +618,12 @@ async function entriesView(_, params) {
       : []);
     const pages = Math.max(1, Math.ceil(data.total / pageSize));
     const filtered = state.q || state.tag || state.note || state.group || state.from || state.to;
+    const scope = scopeParams(state);
+    fill(askSlot, data.total && Object.keys(scope).length
+      ? askHere(scope, "What happened on these days?", state.q
+        ? "Answers read the entries the other filters keep. The words filter isn't used for asking."
+        : "Answers only read the entries these filters keep.")
+      : null);
     const go = (p) => () => { state.page = p; load(); window.scrollTo(0, 0); };
     fill(results,
       h("p", { class: "result-count" }, filtered
@@ -647,7 +654,8 @@ async function entriesView(_, params) {
     h("div", { class: "filters", role: "search" },
       field("Contains", text, true), field("Tag", tagSelect), field("From", from), field("To", to),
       field("Order", order), noteSlot, groupSlot, clear),
-    results);
+    results,
+    askSlot);
 }
 
 async function entryView([id], params) {
@@ -934,6 +942,8 @@ async function noteView([id], params) {
         rawText(n.raw_text, n.focus, "This note has no text of its own.")),
       margin),
     overYears,
+    askHere({ note: n.id }, `What did I write about ${n.title} last year?`,
+      ["Answers only read the entries that link ", n.title, "."]),
     n.linked_with.length ? section("Often linked with", h("div", { class: "chips" }, n.linked_with.map((o) =>
       h("a", { class: "chip", href: href.note(o.id), title: `${kindLabel(o.kind)}, in ${plural(o.n, "entry", "entries")} with ${n.title}` },
         o.title, h("span", { class: "n" }, fmtNum(o.n))))), {
@@ -1037,6 +1047,7 @@ async function tagView([name]) {
     t.cooccurring.length ? section("Often tagged alongside", h("div", { class: "chips" }, t.cooccurring.map((c) => tagChip(c.name, c.n))), {
       note: "number of shared entries",
     }) : null,
+    askHere({ tag: t.name }, "What do these days have in common?", `Answers only read the entries tagged ${t.name}.`),
     section("Entries", entryLines(t.entries, scale), {
       note: t.entries_capped ? h("a", { href: href.entries({ tag: t.name }) }, `newest ${fmtNum(t.entries.length)} shown, filter to see all`) : null,
     }));
@@ -1116,6 +1127,8 @@ async function digestView([type, key]) {
         h("p", { class: "reading-label" }, r ? "What the model wrote about this period" : "No digest for this period yet"),
         h("div", { class: r && r.summary ? "raw" : "raw empty" }, (r && r.summary) || "Nothing written.")),
       margin),
+    d.entries.length ? askHere({ from: d.start, to: d.end }, "What stood out in this period?",
+      `Answers only read the entries from ${periodRange(type, d.start, d.end)}.`) : null,
     section("Entries in this period", entryLines(d.entries, scale, { emptyText: "No entries in this period." })));
 }
 
@@ -1238,9 +1251,12 @@ const STAGE_LABELS = {
 const HISTORY_TURNS = 6;
 const HISTORY_ANSWER_CHARS = 400;
 
+// what an answer can be kept to, as /api/ask and the entries page name them
+const SCOPE_KEYS = ["note", "tag", "group", "from", "to"];
+
 // Kept outside the view so a question keeps running, and the conversation
 // stays, while you look at the entries it cites.
-const ask = { turns: loadTurns(), controller: null, redraw: null };
+const ask = { turns: loadTurns(), scope: loadScope(), controller: null, redraw: null };
 
 function loadTurns() {
   try {
@@ -1252,12 +1268,64 @@ function loadTurns() {
   }
 }
 
+function loadScope() {
+  try {
+    return JSON.parse(sessionStorage.getItem("ask-scope") || "null");
+  } catch {
+    return null;
+  }
+}
+
 function saveTurns() {
   try {
     sessionStorage.setItem("ask-turns", JSON.stringify(ask.turns));
+    sessionStorage.setItem("ask-scope", JSON.stringify(ask.scope));
   } catch {
     // storage can be full or refused; the conversation still works for this visit
   }
+}
+
+function scopeFrom(params) {
+  const scope = {};
+  for (const key of SCOPE_KEYS) {
+    const value = (params.get(key) || "").trim();
+    if (value) scope[key] = value;
+  }
+  return Object.keys(scope).length ? scope : null;
+}
+
+function scopeLabel(scope, cat) {
+  const parts = [];
+  if (scope.note) {
+    const note = cat.notes.find((n) => String(n.id) === String(scope.note));
+    parts.push(`linking ${note ? note.title : "a note that's gone"}`);
+  }
+  if (scope.group) {
+    const [key, value] = scope.group.split("=");
+    parts.push(`linking a note whose ${key} is ${value}`);
+  }
+  if (scope.tag) parts.push(`tagged ${scope.tag}`);
+  if (scope.from && scope.to) parts.push(`from ${mediumDate(scope.from)} to ${mediumDate(scope.to)}`);
+  else if (scope.from) parts.push(`from ${mediumDate(scope.from)} on`);
+  else if (scope.to) parts.push(`up to ${mediumDate(scope.to)}`);
+  return `Only entries ${parts.join(" and ")}`;
+}
+
+const scopeParams = (scope) => Object.fromEntries(SCOPE_KEYS.filter((k) => scope && scope[k]).map((k) => [k, scope[k]]));
+
+// a question box on a note, tag, digest or entries page, kept to what that page shows
+function askHere(scope, placeholder, intro) {
+  const input = h("input", {
+    type: "text", placeholder, "aria-label": "Your question", autocomplete: "off", maxlength: 2000,
+  });
+  const form = h("form", { class: "search-box ask-box ask-here", role: "search" },
+    input, h("button", { class: "button", type: "submit" }, "Ask"));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const q = input.value.trim();
+    if (q) location.hash = href.ask(q, scope);
+  });
+  return section("Ask about this", form, { intro });
 }
 
 function changed() {
@@ -1293,13 +1361,14 @@ async function askQuestion(question) {
     .filter((t) => t.status === "done")
     .slice(-HISTORY_TURNS)
     .map((t) => [t.rewritten || t.question, t.answer.text.slice(0, HISTORY_ANSWER_CHARS)]);
-  const turn = { question, status: "running", stage: "Starting…" };
+  const turn = { question, status: "running", stage: "Starting…", scope: ask.scope };
   ask.turns.push(turn);
   const controller = new AbortController();
   ask.controller = controller;
   changed();
   try {
-    const response = await fetch(`/api/ask${query({ q: question, history: history.length ? JSON.stringify(history) : "" })}`, {
+    const params = { q: question, history: history.length ? JSON.stringify(history) : "", ...scopeParams(turn.scope) };
+    const response = await fetch(`/api/ask${query(params)}`, {
       headers: { Accept: "text/event-stream" }, signal: controller.signal,
     });
     if (!response.ok) {
@@ -1346,6 +1415,7 @@ function sourceChips(answer) {
 
 function turnView(turn, scale, index) {
   const parts = [h("p", { class: "turn-q" }, turn.question)];
+  if (turn.scope) parts.push(h("p", { class: "turn-rewrite" }, `${turn.scope.label}.`));
   if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, turn.rewritten)));
   if (turn.status === "running") {
     if (turn.partial) parts.push(h("div", { class: "turn-answer writing" }, turn.partial));
@@ -1387,12 +1457,26 @@ async function askView(_, params) {
   const go = h("button", { class: "button", type: "submit" }, "Ask");
   const reset = h("button", { class: "button", type: "button" }, "New conversation");
   const hint = h("p", { class: "section-note" });
+  const scopeSlot = h("div", { class: "ask-scope" });
   const form = h("form", { class: "search-box ask-box", role: "search" }, input, go);
+
+  // a question from the jump box is about everything; one from a page, about what it shows
+  const fromLink = scopeFrom(params);
+  if (fromLink) ask.scope = { ...fromLink, label: scopeLabel(fromLink, cat) };
+  else if ((params.get("q") || "").trim()) ask.scope = null;
 
   const draw = () => {
     const running = ask.turns.some((t) => t.status === "running");
     go.disabled = running;
     reset.hidden = !ask.turns.length || running;
+    fill(scopeSlot, ask.scope
+      ? h("span", { class: "chip pencil" }, ask.scope.label,
+        h("button", {
+          type: "button", "aria-label": "Ask about the whole journal again",
+          title: "Ask about the whole journal again",
+          onclick: () => { ask.scope = null; changed(); input.focus(); },
+        }, "×"))
+      : null);
     hint.textContent = ask.turns.some((t) => t.status === "done")
       ? "Follow-ups like “what about the month after?” build on the answers above."
       : "";
@@ -1418,10 +1502,11 @@ async function askView(_, params) {
   });
 
   const preset = (params.get("q") || "").trim();
-  if (preset) {
+  if (preset || fromLink) {
     replaceParams("/ask", {});
-    if (!ask.controller) askQuestion(preset);
+    saveTurns();
   }
+  if (preset && !ask.controller) askQuestion(preset);
   draw();
   setTimeout(() => input.focus(), 0);
   return h("div", {},
@@ -1429,7 +1514,7 @@ async function askView(_, params) {
       eyebrow: "Questions about your journal", title: "Ask",
       lede: "Ask in plain words. The answer cites the days and notes it drew on, and you can open each one.",
     }),
-    thread, form, h("div", { class: "ask-foot" }, hint, reset));
+    thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset));
 }
 
 // ---------------------------------------------------------------- you
