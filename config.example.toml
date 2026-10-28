@@ -132,3 +132,14 @@ learned_alias_ignore = []         # link text that should never count as a name,
 # Properties whose values group notes for `journal insights`, e.g.
 # ["relationship"]. Empty means every property two notes have in common.
 group_keys = []
+
+[mcp]
+# What `journal mcp` lets a connected app see. An app that sends it to a
+# hosted model sends that much of your journal with it.
+raw_text = true                   # entry and note text; false leaves summaries, digests and numbers
+# Entries with any of these tags (inline, in frontmatter or from the model)
+# and notes with one in their file are left out of every tool, along with
+# the digests and profile written from them.
+exclude_tags = []                 # e.g. ["therapy", "health"]
+exclude_kinds = []                # kinds of note (their folder) to leave out, e.g. ["health"]
+tools = []                        # only these tools, e.g. ["search", "day", "mood"]; empty means all

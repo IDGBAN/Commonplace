@@ -32,9 +32,10 @@ from . import (
     serialize,
     store,
     unlinked,
+    withhold,
 )
 from .config import Config
-from .models import JournalError
+from .models import ConfigError, JournalError
 from .ollama_client import OllamaClient
 
 # newest first; the client's version is used when this server knows it
@@ -54,6 +55,10 @@ ClientFactory = Callable[[Config], OllamaClient]
 
 class ToolError(Exception):
     """A problem with the call itself, reported to the client as a tool error."""
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
 
 
 def _text(value: object) -> str:
@@ -314,20 +319,53 @@ TOOLS: list[Json] = [
 
 class Server:
     def __init__(self, config: Config, make_client: ClientFactory = OllamaClient):
+        """ConfigError if [mcp] tools names a tool there isn't."""
         self.config = config
         self.make_client = make_client
+        names = [t["name"] for t in TOOLS]
+        unknown = [t for t in config.mcp.tools if t not in names]
+        if unknown:
+            raise ConfigError(
+                f"[mcp] tools in config.toml names {', '.join(repr(t) for t in unknown)}, which "
+                f"{'isn' if len(unknown) == 1 else 'aren'}'t tools. The tools are {', '.join(names)}."
+            )
+        self.tools = [t for t in TOOLS if not config.mcp.tools or t["name"] in config.mcp.tools]
+        self.filtered = withhold.FilteredCache(config) if withhold.active(config) else None
 
     @contextlib.contextmanager
     def _cache(self) -> Iterator[sqlite3.Connection]:
+        if self.filtered is not None:
+            yield self.filtered.connection()
+            return
         with closing(db.connect_readonly(self.config)) as conn:
             yield conn
 
     def call(self, name: str, args: Json) -> object:
         handler = getattr(self, f"_tool_{name}", None)
-        if handler is None or name not in {t["name"] for t in TOOLS}:
+        if handler is None or name not in {t["name"] for t in self.tools}:
             raise ToolError(f"There's no tool called '{name}'.")
         with self._cache() as conn:
             return handler(conn, args)
+
+    def notice(self) -> str:
+        """What [mcp] keeps from the client, for stderr when the server starts. Empty if nothing."""
+        mcp = self.config.mcp
+        kept = []
+        if self.filtered is not None:
+            self.filtered.connection()
+            w = self.filtered.withheld
+            parts = [
+                _count(w.entries, "entry", "entries"),
+                _count(w.notes, "note", "notes"),
+                _count(w.digests, "digest", "digests"),
+                _count(w.note_digests, "relationship digest", "relationship digests"),
+            ]
+            kept.append(", ".join(parts) + (" and your profile" if w.profile else ""))
+        if not mcp.raw_text:
+            kept.append("the text of entries and notes")
+        if mcp.tools:
+            kept.append("every tool but " + ", ".join(t["name"] for t in self.tools))
+        return ("Leaving out " + "; ".join(kept) + " ([mcp] in config.toml).") if kept else ""
 
     def _tool_search(self, conn: sqlite3.Connection, args: Json) -> object:
         text = _text_arg(args, "query")
@@ -376,7 +414,7 @@ class Server:
                     ],
                     "links_to_days": serialize.days_linked_from(conn, r["id"]),
                     "path": parser.relative_path(r["file_path"], self.config.vault.path),
-                    "text": r["raw_text"],
+                    **({"text": r["raw_text"]} if self.config.mcp.raw_text else {}),
                 }
                 for r in rows
             ],
@@ -388,7 +426,7 @@ class Server:
         return {
             **serialize.note_briefs(conn, [row])[0],
             "properties": parsed.properties,
-            "text": parsed.raw_text,
+            **({"text": parsed.raw_text} if self.config.mcp.raw_text else {}),
             "by_year": [dict(r) for r in store.mentions_by_year(conn, row["id"])],
             "linked_with": [dict(r) for r in store.notes_linked_with(conn, row["id"], NOTE_ENTRIES)],
             "digest": serialize.note_digest_json(store.get_note_digest(conn, row["link_key"])),
@@ -510,9 +548,14 @@ class Server:
             return {"notes": [asdict(row) for row in found[:limit]], "total": len(found)}
         note = _one_note(conn, name)
         mentions = unlinked.for_note(conn, note["id"])
+        shown = [asdict(m) for m in mentions[:limit]]
+        if not self.config.mcp.raw_text:
+            # the sentence that names it is the entry's own text
+            for m in shown:
+                del m["snippet"]
         return {
             "note": serialize.note_ref(note),
-            "entries": [asdict(m) for m in mentions[:limit]],
+            "entries": shown,
             "total": len(mentions),
         }
 
@@ -540,7 +583,7 @@ class Server:
         if method == "ping":
             return _result(msg_id, {})
         if method == "tools/list":
-            return _result(msg_id, {"tools": TOOLS})
+            return _result(msg_id, {"tools": self.tools})
         if method == "tools/call":
             name = params.get("name")
             args = params.get("arguments") or {}
@@ -572,6 +615,16 @@ def serve(
     reader = stdin or open(sys.stdin.fileno(), encoding="utf-8", closefd=False)  # noqa: SIM115
     writer = stdout or open(sys.stdout.fileno(), "w", encoding="utf-8", closefd=False)  # noqa: SIM115
     server = Server(config, make_client)
+    try:
+        if notice := server.notice():
+            print(notice, file=sys.stderr)
+        _answer_lines(server, reader, writer)
+    finally:
+        if server.filtered is not None:
+            server.filtered.close()
+
+
+def _answer_lines(server: Server, reader: IO[str], writer: IO[str]) -> None:
     for line in reader:
         if not line.strip():
             continue

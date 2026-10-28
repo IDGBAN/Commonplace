@@ -194,6 +194,15 @@ The tools are `search`, `ask`, `day`, `note`, `notes`, `mood`, `digest`, `on_thi
 
 Whatever app you connect gets your journal's text, summaries and notes. If that app sends them to a hosted model, they leave your machine, which nothing else in this tool does. Connect it only to clients you'd trust with the journal itself.
 
+`[mcp]` in `config.toml` narrows what a client can see:
+
+- `raw_text = false` leaves out the text of entries and notes, and the sentences `unlinked` quotes, so a client gets summaries, digests, tags and numbers. Answers from `ask` are still written from the full text by your local model and can repeat parts of it; leave `ask` out of `tools` if that matters.
+- `exclude_tags = ["therapy"]` takes every entry with one of those tags out of every tool: tagged inline, in the file's frontmatter, or by the model, even if `[tags] ignore` drops the tag. A note with one in its file goes too. So does what was written from them: the digests of any period they fall in, the relationship digests of the notes they link and of notes that link their days, the facts about you they gave, and your profile if those facts went into it. Links to a day that has nothing left on it are dropped as well, so they don't show up as broken links that give the date away.
+- `exclude_kinds = ["health"]` does the same for notes of those kinds, along with the links to them and the digests that read them. The entries that link such a note stay. Their summaries were written with the note as background, so they can repeat what it says; tag those entries too if they should go.
+- `tools = ["search", "day", "mood"]` offers only those tools.
+
+With `exclude_tags` or `exclude_kinds` set, the server keeps a copy of the cache in memory with all of that taken out, and makes it again whenever the cache file changes, so it keeps up with `journal watch`. The cache itself isn't touched. When it starts, it says on stderr what it's leaving out, which most clients show in their logs.
+
 ### Browsing in a web page
 
 ```sh

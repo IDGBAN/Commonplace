@@ -231,6 +231,32 @@ class NotesConfig(BaseModel):
         return [name for name in (" ".join(n.casefold().split()) for n in v) if name]
 
 
+class McpConfig(BaseModel):
+    # entry and note text; false leaves summaries, digests and numbers
+    raw_text: bool = True
+    # entries tagged with any of these, and notes tagged in their file, are left out
+    exclude_tags: list[str] = Field(default_factory=list)
+    # notes of these kinds (their folder, like people) are left out
+    exclude_kinds: list[str] = Field(default_factory=list)
+    # only these tools; empty means all of them
+    tools: list[str] = Field(default_factory=list)
+
+    @field_validator("exclude_tags")
+    @classmethod
+    def _tags(cls, v: list[str]) -> list[str]:
+        return [name for name in (_tag_name(t) for t in v) if name]
+
+    @field_validator("exclude_kinds")
+    @classmethod
+    def _kinds(cls, v: list[str]) -> list[str]:
+        return [k.strip().casefold() for k in v if k.strip()]
+
+    @field_validator("tools")
+    @classmethod
+    def _tools(cls, v: list[str]) -> list[str]:
+        return [t.strip() for t in v if t.strip()]
+
+
 class Config(BaseModel):
     vault: VaultConfig
     ollama: OllamaConfig = OllamaConfig()
@@ -243,6 +269,7 @@ class Config(BaseModel):
     tags: TagsConfig = TagsConfig()
     metrics: MetricsConfig = MetricsConfig()
     profile: ProfileConfig = ProfileConfig()
+    mcp: McpConfig = McpConfig()
 
 
 def load_config(path: Path | str | None = None) -> Config:
