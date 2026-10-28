@@ -1166,6 +1166,11 @@ def months_before(day: date, months: int) -> date:
     return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
 
 
+def months_between(start: date, end: date) -> int:
+    """Whole months from start to end."""
+    return (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day)
+
+
 @dataclass(frozen=True)
 class Lapsed:
     note_id: int
@@ -1997,6 +2002,23 @@ def notes_first_linked_in(
             (date_to.isoformat(), date_from.isoformat(), date_to.isoformat(), limit),
         ).fetchall()
     )
+
+
+def similar_to_day(conn: sqlite3.Connection, day: date, limit: int) -> list[sqlite3.Row] | None:
+    """The entries closest in meaning to that day's, best first, or None if
+    nothing was written that day. The day's own entries are left out."""
+    day_rows = entries_in_range(conn, day, day)
+    if not day_rows:
+        return None
+    day_ids = {r["id"] for r in day_rows}
+    seen: dict[int, None] = {}
+    for r in day_rows:
+        for eid in similar_entry_ids(conn, r["id"], limit + len(day_rows)):
+            if eid not in day_ids:
+                seen.setdefault(eid, None)
+    ids = list(seen)[:limit]
+    order = {eid: i for i, eid in enumerate(ids)}
+    return sorted(entries_by_ids(conn, ids), key=lambda r: order[r["id"]])
 
 
 def similar_entry_ids(conn: sqlite3.Connection, entry_id: int, k: int) -> list[int]:

@@ -400,3 +400,15 @@ def facts_json(conn: sqlite3.Connection, limit: int = 500) -> list[dict[str, obj
         for r in store.profile_facts(conn, limit)
     ]
 
+
+def to_json(conn: sqlite3.Connection, config: Config, facts: int) -> dict[str, object]:
+    """The profile, its counts and the newest facts, as `journal profile --json` prints them."""
+    found = current(conn)
+    return {
+        "profile": None if found is None else {
+            "text": found.text, "names": found.names, "updated_at": found.updated_at,
+        },
+        "note": config.profile.note or None,
+        **summary_counts(conn),
+        "recent_facts": facts_json(conn, facts),
+    }

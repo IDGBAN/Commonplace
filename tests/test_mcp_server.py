@@ -2,9 +2,9 @@ import io
 import json
 from datetime import date
 
-from conftest import add_entry, add_note
+from conftest import EMBED_DIM, add_entry, add_note, invoke_cli
 
-from journal_analyzer import mcp_server
+from journal_analyzer import mcp_server, store
 from journal_analyzer.models import OllamaUnavailableError, QueryPlan
 
 
@@ -119,3 +119,92 @@ def test_bad_calls_are_tool_errors(config, conn, fake_client):
     assert "no tool called" in texts[3]
     assert "'query' is required" in texts[4]
     assert replies[5]["error"]["code"] == -32602
+
+
+def _richer(conn):
+    _journal(conn)
+    add_note(conn, "Jun Park", properties={"relationship": "family"})
+    add_entry(conn, date(2023, 2, 1), text="Lunch with John Doe today.", summary="Lunch", path="/vault/2023-02-01.md")
+    for day in (1, 2, 3, 4, 5, 6):
+        add_entry(conn, date(2023, 6, day), text=f"Called Jun Park, day {day}.", mood=6,
+                  tags=["family"], links=["Jun Park"], summary=f"Called Jun {day}", path=f"/vault/2023-06-0{day}.md")
+    conn.execute("INSERT INTO entry_metrics(entry_id, key, value) SELECT id, 'sleep', 7 FROM entries")
+    conn.commit()
+
+
+def test_the_new_read_tools_match_their_commands(tmp_path, config, conn, fake_client):
+    _richer(conn)
+    replies = _session(
+        config, fake_client,
+        _call(1, "compare", first="2024", second="2023"),
+        _call(2, "compare", first="2024-01"),
+        _call(3, "review", period="2023-06"),
+        _call(4, "review"),
+        _call(5, "metric"),
+        _call(6, "metric", key="Sleep", tag="family"),
+        _call(7, "tags", limit=1),
+        _call(8, "lapsed", min=3, quiet_months=6),
+        _call(9, "unlinked"),
+        _call(10, "unlinked", name="john"),
+        _call(11, "profile"),
+        _call(12, "mood", group="relationship=family"),
+    )[:12]
+    both, one, month, latest, metrics, sleep, tags, lapsed, unlinked_all, john, prof, mood = map(_payload, replies)
+    assert (both["a"]["label"], both["b"]["label"]) == ("2024", "2023")
+    assert (one["a"]["label"], one["b"]["label"]) == ("2023-12", "2024-01")
+    assert month["title"] == "June 2023" and month["writing"]["entries"] == 6
+    assert latest["key"] == "2024"
+    assert metrics["metrics"][0]["key"] == "sleep"
+    assert sleep == {"metric": "sleep", "months": [{"month": "2023-06", "avg": 7.0, "n": 6}]}
+    assert tags == {"tags": [{"name": "family", "n": 6}]}
+    assert [n["title"] for n in lapsed["notes"]] == ["Jun Park"] and lapsed["notes"][0]["months_quiet"] == 7
+    assert unlinked_all["total"] == 1 and unlinked_all["notes"][0]["title"] == "John Doe"
+    assert john["note"]["title"] == "John Doe" and john["entries"][0]["entry_date"] == "2023-02-01"
+    assert prof["profile"] is None and prof["recent_facts"] == []
+    assert [m["month"] for m in mood["months"]] == ["2023-06"]
+
+    # the same JSON as the commands print
+    for args, payload in (
+        (["compare", "2024", "2023"], both), (["review", "2023-06"], month), (["lapsed", "--min", "3"], lapsed),
+    ):
+        result = invoke_cli(tmp_path, config, *args, "--json")
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == json.loads(json.dumps(payload))
+
+
+def test_similar_returns_the_closest_days(config, conn, fake_client):
+    _journal(conn)
+    rows = conn.execute("SELECT id FROM entries ORDER BY entry_date").fetchall()
+    for i, (entry_id,) in enumerate(rows):
+        store.save_entry_vector(conn, entry_id, [float(i + 1)] * EMBED_DIM)
+    similar, missing = _session(
+        config, fake_client, _call(1, "similar", date="2024-01-15"), _call(2, "similar", date="2020-01-01"),
+    )[:2]
+    assert [e["date"] for e in _payload(similar)["entries"]] == ["2023-01-15"]
+    assert missing["result"]["isError"] and "no entry on 2020-01-01" in missing["result"]["content"][0]["text"]
+
+
+def test_bad_arguments_to_the_new_tools_are_tool_errors(config, conn, fake_client):
+    _richer(conn)
+    config.profile.enabled = False
+    replies = _session(
+        config, fake_client,
+        _call(1, "compare", first="spring"),
+        _call(2, "review", period="1999"),
+        _call(3, "metric", key="steps"),
+        _call(4, "tags", limit="lots"),
+        _call(5, "mood", tag="nope"),
+        _call(6, "mood", group="relationship"),
+        _call(7, "profile"),
+        _call(8, "unlinked", name="Nobody"),
+    )[:8]
+    texts = [r["result"]["content"][0]["text"] for r in replies]
+    assert all(r["result"]["isError"] for r in replies), texts
+    assert "isn't a period" in texts[0]
+    assert "no entries in 1999" in texts[1]
+    assert "No entry records 'steps'. Known: sleep." in texts[2]
+    assert "must be a whole number" in texts[3]
+    assert "No entry is tagged 'nope'" in texts[4]
+    assert "takes a property and a value" in texts[5]
+    assert "profile is turned off" in texts[6]
+    assert "No note is called 'Nobody'" in texts[7]

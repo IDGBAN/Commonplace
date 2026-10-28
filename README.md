@@ -190,7 +190,7 @@ journal mood --about "John Doe" --json | jq '.months[] | select(.avg_mood < 5)'
 }
 ```
 
-The tools are `search`, `ask`, `day`, `note`, `notes`, `mood`, `digest`, `on_this_day` and `broken_links`. They return the same JSON as the `--json` commands. `search` falls back to keywords when Ollama isn't running, and `ask` needs Ollama like `journal ask` does. Every call opens the cache read-only, so it can run next to `journal watch`, and nothing is ever written. It needs no extra packages.
+The tools are `search`, `ask`, `day`, `note`, `notes`, `mood`, `digest`, `on_this_day`, `broken_links`, `compare`, `review`, `metric`, `similar`, `tags`, `lapsed`, `unlinked` and `profile`. They return the same JSON as the `--json` commands, and `ask`, `mood` and `metric` take the same `about`, `tag` and `group` filters. `search` falls back to keywords when Ollama isn't running, and `ask` needs Ollama like `journal ask` does. Every call opens the cache read-only, so it can run next to `journal watch`, and nothing is ever written. It needs no extra packages.
 
 Whatever app you connect gets your journal's text, summaries and notes. If that app sends them to a hosted model, they leave your machine, which nothing else in this tool does. Connect it only to clients you'd trust with the journal itself.
 

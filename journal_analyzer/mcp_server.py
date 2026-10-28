@@ -19,7 +19,20 @@ from dataclasses import asdict
 from datetime import date
 from typing import IO, Any
 
-from . import __version__, db, links, parser, query, serialize, store
+from . import (
+    __version__,
+    compare,
+    db,
+    fields,
+    links,
+    parser,
+    profile,
+    query,
+    review,
+    serialize,
+    store,
+    unlinked,
+)
 from .config import Config
 from .models import JournalError
 from .ollama_client import OllamaClient
@@ -28,6 +41,12 @@ from .ollama_client import OllamaClient
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SEARCH_LIMIT = 10
 NOTE_ENTRIES = 10
+# defaults the tools share with their commands
+LIST_LIMIT = 20
+SIMILAR_LIMIT = 5
+LAPSED_MIN_LINKS = 5
+LAPSED_QUIET_MONTHS = 6
+PROFILE_FACTS = 50
 
 Json = dict[str, Any]
 ClientFactory = Callable[[Config], OllamaClient]
@@ -60,20 +79,70 @@ def _text_arg(args: Json, key: str) -> str:
     return value
 
 
-def _about(conn: sqlite3.Connection, args: Json) -> store.EntryFilter | None:
-    name = str(args.get("about") or "").strip()
-    if not name:
-        return None
-    found = store.find_notes(conn, name)
-    if len(found) != 1:
+def _number(args: Json, key: str, default: int, lo: int, hi: int) -> int:
+    value = args.get(key)
+    if value in (None, ""):
+        return default
+    try:
+        return min(max(int(value), lo), hi)
+    except (TypeError, ValueError):
+        raise ToolError(f"'{key}' must be a whole number, not '{value}'.") from None
+
+
+def _period(args: Json, key: str) -> tuple[str, str, date, date]:
+    period = _text_arg(args, key)
+    try:
+        return store.parse_period(period)
+    except ValueError:
         raise ToolError(
-            f"No note is called '{name}'." if not found
-            else f"'{name}' matches {len(found)} notes: " + ", ".join(r["title"] for r in found)
-        )
-    return store.EntryFilter(note_ids=(found[0]["id"],))
+            f"'{period}' isn't a period. Use a year (2024), a month (2024-03) or a week (2024-W10)."
+        ) from None
+
+
+def _one_note(conn: sqlite3.Connection, name: str) -> sqlite3.Row:
+    found = store.find_notes(conn, name)
+    if not found:
+        raise ToolError(f"No note is called '{name}'. The 'notes' tool lists them.")
+    if len(found) > 1:
+        raise ToolError(f"'{name}' matches {len(found)} notes: " + ", ".join(r["title"] for r in found))
+    return found[0]
+
+
+def _filter(conn: sqlite3.Connection, args: Json) -> store.EntryFilter | None:
+    """`about` a note, a `tag` and a `group` like relationship=family, as the commands take them."""
+    name = str(args.get("about") or "").strip()
+    note_ids = (_one_note(conn, name)["id"],) if name else ()
+    tag = str(args.get("tag") or "").strip().lstrip("#").strip().lower() or None
+    if tag and not store.tag_exists(conn, tag):
+        raise ToolError(f"No entry is tagged '{tag}'. The 'tags' tool lists them.")
+    group: tuple[str, str] | None = None
+    group_ids: tuple[int, ...] = ()
+    raw = str(args.get("group") or "").strip()
+    if raw:
+        key, sep, value = raw.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not key or not value:
+            raise ToolError(f"'group' takes a property and a value, like relationship=family, not '{raw}'.")
+        group_ids = tuple(store.group_note_ids(conn, key, value))
+        if not group_ids:
+            raise ToolError(f"No note's {key} is '{value}'.")
+        group = (key, value)
+    only = store.EntryFilter(tag, note_ids, group, group_ids)
+    return only if only else None
 
 
 _SCHEMA_DATE = {"type": "string", "description": "An ISO date, like 2024-01-15."}
+_SCHEMA_PERIOD = {"type": "string", "description": "A year (2024), month (2024-03) or ISO week (2024-W10)."}
+_SCHEMA_KIND = {"type": "string", "description": "A kind of note, meaning its folder, like people."}
+_SCHEMA_LIMIT = {"type": "integer", "minimum": 1, "maximum": 500}
+_SCHEMA_FILTER = {
+    "about": {"type": "string", "description": "Only entries that link this note."},
+    "tag": {"type": "string", "description": "Only entries with this tag."},
+    "group": {
+        "type": "string",
+        "description": "Only entries that link a note with this property value, like relationship=family.",
+    },
+}
 
 TOOLS: list[Json] = [
     {
@@ -101,7 +170,7 @@ TOOLS: list[Json] = [
                 "question": {"type": "string"},
                 "since": _SCHEMA_DATE,
                 "until": _SCHEMA_DATE,
-                "about": {"type": "string", "description": "Only entries that link this note."},
+                **_SCHEMA_FILTER,
             },
             "required": ["question"],
         },
@@ -126,10 +195,11 @@ TOOLS: list[Json] = [
     },
     {
         "name": "mood",
-        "description": "Average mood by month, optionally for the days that link one note.",
+        "description": "Average mood by month, optionally for the days that link one note, have "
+        "one tag or link a note in one group.",
         "inputSchema": {
             "type": "object",
-            "properties": {"since": _SCHEMA_DATE, "until": _SCHEMA_DATE, "about": {"type": "string"}},
+            "properties": {"since": _SCHEMA_DATE, "until": _SCHEMA_DATE, **_SCHEMA_FILTER},
         },
     },
     {
@@ -148,6 +218,96 @@ TOOLS: list[Json] = [
         "name": "broken_links",
         "description": "Links in the journal that find no note or day, with why and what to do.",
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "compare",
+        "description": "Two periods side by side: entries, words, mood, streaks, frontmatter numbers, "
+        "and the tags and notes that rose, fell, appeared or went. Given one period, it's compared "
+        "with the one just before.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "first": _SCHEMA_PERIOD,
+                "second": {**_SCHEMA_PERIOD, "description": "Leave out for the period just before the first."},
+            },
+            "required": ["first"],
+        },
+    },
+    {
+        "name": "review",
+        "description": "A year, month or week in review: its digest, mood by month or week, best "
+        "and hardest days, the notes and tags that came up, and what was new. The latest year by default.",
+        "inputSchema": {"type": "object", "properties": {"period": _SCHEMA_PERIOD}},
+    },
+    {
+        "name": "metric",
+        "description": "Numbers kept in entry frontmatter, like sleep: 7. Without a key, lists them "
+        "with their range; with one, its average by month.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Which number, like sleep."},
+                "since": _SCHEMA_DATE,
+                "until": _SCHEMA_DATE,
+                **_SCHEMA_FILTER,
+            },
+        },
+    },
+    {
+        "name": "similar",
+        "description": "The entries closest in meaning to the one on a day.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"date": _SCHEMA_DATE, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+            "required": ["date"],
+        },
+    },
+    {
+        "name": "tags",
+        "description": "The most used tags, or with similar set, tags that look like the same thing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": _SCHEMA_DATE, "until": _SCHEMA_DATE, "limit": _SCHEMA_LIMIT,
+                "similar": {"type": "boolean"},
+            },
+        },
+    },
+    {
+        "name": "lapsed",
+        "description": "Notes linked often that haven't been linked lately, counted back from the "
+        "latest entry rather than today.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": _SCHEMA_KIND,
+                "min": {"type": "integer", "minimum": 1, "description": "Linked from at least this many entries."},
+                "quiet_months": {"type": "integer", "minimum": 1, "description": "Months without a link."},
+                "limit": _SCHEMA_LIMIT,
+            },
+        },
+    },
+    {
+        "name": "unlinked",
+        "description": "Entries that name a note without linking it. Without a name, lists the notes "
+        "this happens to; with one, that note's entries and the sentence that names it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "A note's title or alias."},
+                "kind": _SCHEMA_KIND,
+                "limit": _SCHEMA_LIMIT,
+            },
+        },
+    },
+    {
+        "name": "profile",
+        "description": "The short profile of the writer that the journal keeps (names, likes, "
+        "routines and so on), with the newest facts it was built from.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"facts": {"type": "integer", "minimum": 0, "maximum": 500}},
+        },
     },
 ]
 
@@ -171,7 +331,7 @@ class Server:
 
     def _tool_search(self, conn: sqlite3.Connection, args: Json) -> object:
         text = _text_arg(args, "query")
-        limit = min(max(int(args.get("limit") or SEARCH_LIMIT), 1), 50)
+        limit = _number(args, "limit", SEARCH_LIMIT, 1, 50)
         since, until = _day(args, "since"), _day(args, "until")
         notice = None
         try:
@@ -193,7 +353,7 @@ class Server:
         question = _text_arg(args, "question")
         answer = query.answer(
             question, self.config, conn, self.make_client(self.config),
-            since=_day(args, "since"), until=_day(args, "until"), only=_about(conn, args),
+            since=_day(args, "since"), until=_day(args, "until"), only=_filter(conn, args),
         )
         return {"question": question, **serialize.answer_json(conn, answer)}
 
@@ -223,13 +383,7 @@ class Server:
         }
 
     def _tool_note(self, conn: sqlite3.Connection, args: Json) -> object:
-        name = _text_arg(args, "name")
-        found = store.find_notes(conn, name)
-        if not found:
-            raise ToolError(f"No note is called '{name}'. The 'notes' tool lists them.")
-        if len(found) > 1:
-            raise ToolError(f"'{name}' matches {len(found)} notes: " + ", ".join(r["title"] for r in found))
-        row = found[0]
+        row = _one_note(conn, _text_arg(args, "name"))
         parsed = store.note_from_row(row)
         return {
             **serialize.note_briefs(conn, [row])[0],
@@ -247,18 +401,12 @@ class Server:
         return {"notes": serialize.note_briefs(conn, rows)}
 
     def _tool_mood(self, conn: sqlite3.Connection, args: Json) -> object:
-        only = _about(conn, args)
+        only = _filter(conn, args)
         rows = store.monthly_mood(conn, _day(args, "since"), _day(args, "until"), only)
         return {"scale": self.config.indexing.mood_scale_max, "months": [dict(r) for r in rows]}
 
     def _tool_digest(self, conn: sqlite3.Connection, args: Json) -> object:
-        period = _text_arg(args, "period")
-        try:
-            kind, key, start, end = store.parse_period(period)
-        except ValueError:
-            raise ToolError(
-                f"'{period}' isn't a period. Use a year (2024), a month (2024-03) or a week (2024-W10)."
-            ) from None
+        kind, key, start, end = _period(args, "period")
         row = store.get_rollup(conn, kind, key)
         members = store.entries_in_range(conn, start, end)
         return {
@@ -277,6 +425,101 @@ class Server:
     def _tool_broken_links(self, conn: sqlite3.Connection, args: Json) -> object:
         files = links.vault_markdown(self.config) if self.config.vault.path.is_dir() else None
         return {"links": [asdict(b) for b in links.diagnose(self.config, conn, files)]}
+
+    def _tool_compare(self, conn: sqlite3.Connection, args: Json) -> object:
+        kind, key, start, end = _period(args, "first")
+        if args.get("second") in (None, ""):
+            periods = (compare.previous(kind, start), (key, start, end))
+        else:
+            _, other, other_start, other_end = _period(args, "second")
+            periods = ((key, start, end), (other, other_start, other_end))
+        return asdict(compare.compare(conn, *periods))
+
+    def _tool_review(self, conn: sqlite3.Connection, args: Json) -> object:
+        if args.get("period") in (None, ""):
+            _, last = store.date_bounds(conn, None, None)
+            if last is None:
+                raise ToolError("Nothing is indexed yet.")
+            kind, key = "year", last[:4]
+        else:
+            kind, key, _, _ = _period(args, "period")
+        built = review.build(self.config, conn, key)
+        if built is None:
+            raise ToolError(f"There are no entries in {store.period_title(kind, key)}.")
+        return review.to_json(conn, built)
+
+    def _tool_metric(self, conn: sqlite3.Connection, args: Json) -> object:
+        known = store.metric_keys(conn)
+        name = str(args.get("key") or "").strip().casefold()
+        if not name:
+            return {"metrics": [dict(r) for r in known]}
+        if name not in {r["key"] for r in known}:
+            raise ToolError(
+                f"No entry records '{name}'. Known: {', '.join(r['key'] for r in known) or 'none yet'}."
+            )
+        rows = store.monthly_metric(conn, name, _day(args, "since"), _day(args, "until"), _filter(conn, args))
+        return {"metric": name, "months": [dict(r) for r in rows]}
+
+    def _tool_similar(self, conn: sqlite3.Connection, args: Json) -> object:
+        day = _day(args, "date", required=True)
+        assert day is not None
+        rows = store.similar_to_day(conn, day, _number(args, "limit", SIMILAR_LIMIT, 1, 50))
+        if rows is None:
+            raise ToolError(f"There's no entry on {day}.")
+        return {"date": day, "entries": serialize.entry_briefs(conn, rows)}
+
+    def _tool_tags(self, conn: sqlite3.Connection, args: Json) -> object:
+        if args.get("similar"):
+            pairs = fields.similar_tags(store.tag_stats(conn))
+            merge: dict[str, str] = {}
+            for rare, _, common, _ in pairs:
+                merge.setdefault(rare, common)
+            return {
+                "similar": [
+                    {"tag": rare, "entries": n_rare, "like": common, "like_entries": n_common}
+                    for rare, n_rare, common, n_common in pairs
+                ],
+                "merge": merge,
+            }
+        limit = _number(args, "limit", LIST_LIMIT, 1, 500)
+        rows = store.top_tags(conn, _day(args, "since"), _day(args, "until"), limit=limit)
+        return {"tags": [{"name": r["name"], "n": r["n"]} for r in rows]}
+
+    def _tool_lapsed(self, conn: sqlite3.Connection, args: Json) -> object:
+        min_links = _number(args, "min", LAPSED_MIN_LINKS, 1, 100_000)
+        quiet = _number(args, "quiet_months", LAPSED_QUIET_MONTHS, 1, 1200)
+        _, latest = store.date_bounds(conn, None, None)
+        if latest is None:
+            return {"anchor": None, "min": min_links, "quiet_months": quiet, "notes": []}
+        anchor = date.fromisoformat(latest)
+        kind = str(args.get("kind") or "").strip() or None
+        rows = store.lapsed_notes(conn, min_links, store.months_before(anchor, quiet), kind)
+        return {
+            "anchor": anchor, "min": min_links, "quiet_months": quiet,
+            "notes": [
+                {**asdict(r), "months_quiet": store.months_between(date.fromisoformat(r.last), anchor)}
+                for r in rows[:_number(args, "limit", LIST_LIMIT, 1, 500)]
+            ],
+        }
+
+    def _tool_unlinked(self, conn: sqlite3.Connection, args: Json) -> object:
+        limit = _number(args, "limit", LIST_LIMIT, 1, 500)
+        name = str(args.get("name") or "").strip()
+        if not name:
+            found = unlinked.by_note(conn, str(args.get("kind") or "").strip() or None)
+            return {"notes": [asdict(row) for row in found[:limit]], "total": len(found)}
+        note = _one_note(conn, name)
+        mentions = unlinked.for_note(conn, note["id"])
+        return {
+            "note": serialize.note_ref(note),
+            "entries": [asdict(m) for m in mentions[:limit]],
+            "total": len(mentions),
+        }
+
+    def _tool_profile(self, conn: sqlite3.Connection, args: Json) -> object:
+        if not self.config.profile.enabled:
+            raise ToolError("The profile is turned off in config.toml ([profile] enabled = false).")
+        return profile.to_json(conn, self.config, _number(args, "facts", PROFILE_FACTS, 0, 500))
 
     def handle(self, message: Json) -> Json | None:
         """The reply to one JSON-RPC message, or None for a notification."""

@@ -1485,10 +1485,6 @@ def metric(
     console.print(table)
 
 
-def _months_between(start: date, end: date) -> int:
-    return (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day)
-
-
 @app.command()
 def lapsed(
     config: ConfigOpt = None,
@@ -1524,7 +1520,7 @@ def lapsed(
         _emit({
             "anchor": anchor, "min": min_links, "quiet_months": quiet,
             "notes": [
-                {**asdict(r), "months_quiet": _months_between(date.fromisoformat(r.last), anchor)}
+                {**asdict(r), "months_quiet": store.months_between(date.fromisoformat(r.last), anchor)}
                 for r in rows[:limit]
             ],
         })
@@ -1545,7 +1541,7 @@ def lapsed(
     table.add_column("Last linked", no_wrap=True)
     table.add_column("Quiet for", justify="right", no_wrap=True)
     for r in rows[:limit]:
-        months = _months_between(date.fromisoformat(r.last), anchor)
+        months = store.months_between(date.fromisoformat(r.last), anchor)
         table.add_row(
             escape(r.title), escape(r.kind), str(r.count),
             f"{r.busiest_year} ({r.busiest_count})", r.last, _count(months, "month"),
@@ -1610,20 +1606,12 @@ def profile_cmd(
                     rewritten = profile.update(cfg, conn, client, rebuild=rebuild or rescan)
                 if not rewritten:
                     console.print("[dim]Nothing new to add.[/dim]")
+        if as_json:
+            _emit(profile.to_json(conn, cfg, limit))
+            return
         found_profile = profile.current(conn)
         counts = profile.summary_counts(conn)
-        fact_rows = profile.facts_json(conn, limit) if facts or as_json else []
-    if as_json:
-        _emit({
-            "profile": None if found_profile is None else {
-                "text": found_profile.text, "names": found_profile.names,
-                "updated_at": found_profile.updated_at,
-            },
-            "note": cfg.profile.note or None,
-            **counts,
-            "recent_facts": fact_rows,
-        })
-        return
+        fact_rows = profile.facts_json(conn, limit) if facts else []
     if facts:
         if not fact_rows:
             console.print("No facts yet. 'journal profile --update' reads your entries for them.")
@@ -1723,31 +1711,18 @@ def similar(
     OUT.as_json = as_json
     d = _parse_date(day, "DATE")
     with _guard(), _open(config) as (_, conn):
-        day_rows = store.entries_in_range(conn, d, d)
-        if not day_rows:
+        rows = store.similar_to_day(conn, d, limit)
+        if rows is None:
             _fail(f"No indexed entry on {d}.", red=False)
-        day_ids = {r["id"] for r in day_rows}
-        seen: dict[int, None] = {}
-        for r in day_rows:
-            for eid in store.similar_entry_ids(conn, r["id"], limit + len(day_rows)):
-                if eid not in day_ids:
-                    seen.setdefault(eid, None)
-        ids = list(seen)[:limit]
         if as_json:
-            found = store.entries_by_ids(conn, ids)
-            order = {eid: i for i, eid in enumerate(ids)}
-            found.sort(key=lambda r: order[r["id"]])
-            _emit({"date": d, "entries": serialize.entry_briefs(conn, found)})
+            _emit({"date": d, "entries": serialize.entry_briefs(conn, rows)})
             return
-        if not ids:
+        if not rows:
             console.print(
                 "No similar entries found. If the entry is new, run 'journal index' "
                 "so it gets embedded."
             )
             return
-        rows = store.entries_by_ids(conn, ids)
-        order = {eid: i for i, eid in enumerate(ids)}
-        rows.sort(key=lambda r: order[r["id"]])
         console.print(f"[bold]Entries similar to {d}:[/bold]")
         console.print(_entry_table(conn, rows))
 
