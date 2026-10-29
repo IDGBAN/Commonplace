@@ -541,7 +541,8 @@ def test_ask_streams_its_steps_then_the_answer(browser, journal, fake_client):
     assert answer["body"] == "You hiked Bear Mountain with John on 2024-01-15."
     assert answer["stage"] == "fast_summary"
     first = entry_id(journal, "2024-01-15")
-    assert {"date": "2024-01-15", "id": first, "section": None} in answer["sources"]["dates"]
+    assert {"date": "2024-01-15", "id": first, "section": None,
+            "quote": "Hiked Bear Mountain with John Doe."} in answer["sources"]["dates"]
     assert {e["id"] for e in answer["entries"]} == {first, entry_id(journal, "2024-01-16")}
     assert "Sources:" in answer["text"]
 

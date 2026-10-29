@@ -527,6 +527,13 @@ def _print_reading(conn: sqlite3.Connection, answer: Answer) -> None:
         )
     elif not entries and not notes:
         console.print("Nothing matched, so the model read nothing.")
+    if answer.quotes:
+        table = Table(title="What those days say, by the question's words", show_header=False)
+        table.add_column("Date", style="cyan", no_wrap=True)
+        table.add_column("Quote")
+        for day, quote in sorted(answer.quotes.items()):
+            table.add_row(day, escape(f"“{quote}”"))
+        console.print(table)
     if entries:
         console.print(_entry_table(conn, entries, title="Entries it read", longer=True))
     if notes:

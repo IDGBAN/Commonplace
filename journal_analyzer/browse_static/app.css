@@ -575,6 +575,10 @@ table.links td:first-child { white-space: nowrap; }
 .turn-read summary { cursor: pointer; color: var(--pencil); font-size: 0.9rem; width: fit-content; }
 .turn-read[open] summary { margin-bottom: 0.8rem; }
 .turn-read .note-grid { margin-bottom: 0.8rem; }
+.turn-quotes { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.55rem; max-width: var(--measure); }
+.turn-quotes li { display: grid; grid-template-columns: 7.5rem 1fr; gap: 0.8rem; align-items: baseline; }
+.turn-quotes .line-date { color: var(--pencil); font-size: 0.86rem; white-space: nowrap; }
+.turn-quotes q { font: 0.98rem/1.55 var(--read); overflow-wrap: anywhere; }
 .ask-box { max-width: 52rem; }
 .ask-scope { max-width: 52rem; margin-bottom: 0.6rem; }
 .ask-scope:empty { display: none; }

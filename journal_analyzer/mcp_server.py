@@ -393,7 +393,12 @@ class Server:
             question, self.config, conn, self.make_client(self.config),
             since=_day(args, "since"), until=_day(args, "until"), only=_filter(conn, args),
         )
-        return {"question": question, **serialize.answer_json(conn, answer)}
+        found = serialize.answer_json(conn, answer)
+        if not self.config.mcp.raw_text:
+            # a quote is the entry's own text
+            for day in found["sources"]["dates"]:
+                day["quote"] = None
+        return {"question": question, **found}
 
     def _tool_day(self, conn: sqlite3.Connection, args: Json) -> object:
         day = _day(args, "date", required=True)

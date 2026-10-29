@@ -1397,6 +1397,19 @@ async function askQuestion(question) {
   }
 }
 
+// the sentence of each cited day that has the question's words, to check the answer against
+function sourceQuotes(answer) {
+  const quoted = answer.sources.dates.filter((d) => d.quote);
+  if (!quoted.length) return null;
+  return h("details", { class: "turn-read" },
+    h("summary", {}, `What those days say: ${plural(quoted.length, "line")} with the question's words`),
+    h("ul", { class: "turn-quotes" }, quoted.map((d) => h("li", {},
+      d.id == null
+        ? h("span", { class: "line-date" }, mediumDate(d.date))
+        : h("a", { class: "line-date", href: href.entry(d.id, d.section ? { at: d.section } : null) }, mediumDate(d.date)),
+      h("q", {}, d.quote)))));
+}
+
 function sourceChips(answer) {
   const { dates, notes } = answer.sources;
   if (!dates.length && !notes.length) return null;
@@ -1432,6 +1445,7 @@ function turnView(turn, scale, index) {
     parts.push(
       h("div", { class: "turn-answer" }, a.body),
       sourceChips(a),
+      sourceQuotes(a),
       h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}.`),
       readCount ? h("details", { class: "turn-read" },
         h("summary", {}, `What it read: ${plural(a.entries.length, "entry", "entries")}, ${plural(a.notes.length, "note")}`),
