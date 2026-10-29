@@ -418,6 +418,45 @@ def plan_rollups(
     return planned
 
 
+# what `journal watch` keeps up to date; years are written from months, so
+# they're left to `journal rollup`
+WATCH_KINDS = ("month", "week")
+_KEY_FN = {"month": store.month_key, "week": store.week_key}
+
+
+def _due_for_days(
+    conn: sqlite3.Connection, groups: dict[str, dict[str, list[sqlite3.Row]]], days: set[date]
+) -> list[tuple[str, str]]:
+    due = []
+    for kind in WATCH_KINDS:
+        for key in sorted({_KEY_FN[kind](d) for d in days}, reverse=True):
+            if key in groups[kind] and _reason(store.get_rollup(conn, kind, key), only_stale=True):
+                due.append((kind, key))
+    return due
+
+
+def refresh_days(
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    days: set[date],
+    keep_going: Callable[[], bool] = lambda: True,
+) -> tuple[list[tuple[str, str]], set[date]]:
+    """Writes the month and week digests of these days that are missing or
+    out of date, months first and newest first, one at a time while
+    keep_going() says to. Returns the ones written and the days whose
+    digests are still due."""
+    groups = _entry_periods(conn)
+    written = []
+    for kind, key in _due_for_days(conn, groups, days):
+        if not keep_going():
+            break
+        _write_period(kind, key, groups[kind][key], config, conn, client)
+        written.append((kind, key))
+    still = set(_due_for_days(conn, groups, days))
+    return written, {d for d in days if any((k, _KEY_FN[k](d)) in still for k in WATCH_KINDS)}
+
+
 def generate_rollups(
     config: Config,
     conn: sqlite3.Connection,

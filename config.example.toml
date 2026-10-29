@@ -78,6 +78,11 @@ note_min_mentions = 8
 note_entries_per_year = 30         # entries per year that go into one; busier years are sampled
 linked_notes_chars = 6000          # room for linked notes in each digest's prompt; 0 sends none
 entry_details_chars = 8000         # room for long entries' longer summaries in each digest; the rest get one line
+# `journal watch` writes the week and month digests of the days it indexes,
+# when nothing is queued and at most this often. Each digest is a call to
+# the precise model, so on a CPU 30 or more is kinder. 0 leaves them to
+# `journal rollup`.
+watch_refresh_minutes = 0
 
 [insights]
 # `journal insights` only reports a tag, person or weekly/seasonal pattern once

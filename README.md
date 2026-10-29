@@ -96,7 +96,7 @@ journal digest 2024-03        # read one digest: a year (2024), month (2024-03) 
 journal digest 2024-03 --refresh   # write that one first if it's missing or out of date
 
 # live updates
-journal watch             # keeps running and indexes notes as you save them
+journal watch             # keeps running and indexes notes as you save them (and digests, if you turn that on)
 
 # reflection
 journal chat              # Q&A that remembers the last few turns
@@ -127,6 +127,8 @@ To index just some files, name them: `journal index 2024-03-04.md Trips/Lisbon` 
 `journal rollup` shows a progress bar with the time left. `--since` and `--until` limit it to periods that overlap those dates and `--only` to some kinds (`profile`, `month`, `year`, `note`, `week`); your profile and relationship digests cover the whole journal, so the dates don't apply to them. `--dry-run` lists what it would write and why (not written yet, out of date, or rewritten for `--rebuild-all`). To read one digest, or to write just the one you want instead of waiting for a full run, use `journal digest`. A year is written from its month digests, so refreshing a year writes any of its months that are missing first.
 
 Notes you link often (from 8 or more entries by default) also get a relationship digest: a few sentences on how that person, place or topic figures in your journal over the years. It's written from the note itself and the summaries of the entries that link to it, a sample of each year's when there are many. `journal note` shows it, so do the note's page and the Digests page in the browser, and answers that name the note read it. It goes out of date when an entry that links the note, or the note itself, changes. `[rollups] note_min_mentions` sets the threshold (0 turns them off) and `note_entries_per_year` caps how many entries from each year go in.
+
+`journal watch` can keep the week and month digests current as you write. Set `[rollups] watch_refresh_minutes` (0, off, by default) and, once nothing is waiting to be indexed and that many minutes have passed since it last did this, watch writes the digests of the weeks and months it indexed or dropped entries in: the ones that are out of date, and the ones that don't exist yet. Months go first and newest first, since answers read months, and it stops as soon as a file changes and picks up again later. It only looks at days that changed while it was running, so a backlog from before (after `journal index --force`, say) is still `journal rollup`'s job, and so are year and relationship digests. If Ollama is down, the days wait for the next try.
 
 Each digest is one call to the precise model, so on a CPU a full `journal rollup` can take hours. Your profile is updated first, since every digest is written with it, then month and year digests, because those are what answers use, so if you stop a run partway they're already there.
 

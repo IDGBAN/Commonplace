@@ -31,6 +31,7 @@ from . import (
     parser,
     photos,
     profile,
+    rollups,
     store,
 )
 from .config import Config
@@ -874,11 +875,14 @@ def run_watch(
     # most every watch_update_minutes, since each rewrite is a precise-model call
     facts_waiting = profile.needs_update(conn, config)
     last_rewrite = float("-inf")
+    # the same goes for digests, for the days this run indexed or dropped
+    touched: set[date] = set()
+    last_digests = float("-inf")
     try:
         while True:
             time.sleep(WATCH_POLL_SECONDS)
             indexed: list[str] = []
-            outage = _apply_due(handler, config, conn, client, indexed)
+            outage = _apply_due(handler, config, conn, client, indexed, touched)
             if outage is not None:
                 console.print(
                     f"[yellow]{escape(str(outage))}[/yellow]\n"
@@ -892,11 +896,42 @@ def run_watch(
                 facts_waiting = not _update_profile(config, conn, client) and profile.needs_update(
                     conn, config
                 )
+            digest_gap = config.rollups.watch_refresh_minutes * 60
+            if (
+                digest_gap and touched and not handler.pending
+                and time.monotonic() - last_digests >= digest_gap
+            ):
+                last_digests = time.monotonic()
+                touched = _refresh_digests(config, conn, client, touched, handler)
     except KeyboardInterrupt:
         pass
     finally:
         observer.stop()
         observer.join()
+
+
+def _refresh_digests(
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    days: set[date],
+    handler: _DebounceHandler,
+) -> set[date]:
+    """Writes the digests these days need until a file changes. Returns the days still waiting."""
+    try:
+        written, waiting = rollups.refresh_days(
+            config, conn, client, days, keep_going=lambda: not handler.pending
+        )
+    except JournalError as exc:
+        console.print(f"[yellow]Couldn't write the digests: {escape(str(exc))}[/yellow]")
+        return days
+    for kind, key in written:
+        console.print(f"[green]digest[/green] {kind} {key}")
+    return waiting
+
+
+def _file_days(conn: sqlite3.Connection, key: str) -> set[date]:
+    return {date.fromisoformat(r["entry_date"]) for r in store.entries_for_file(conn, key)}
 
 
 def _apply_due(
@@ -905,13 +940,15 @@ def _apply_due(
     conn: sqlite3.Connection,
     client: OllamaClient,
     indexed: list[str] | None = None,
+    touched: set[date] | None = None,
 ) -> OllamaUnavailableError | None:
-    """`indexed` collects the files that were indexed, when given."""
+    """`indexed` collects the files that were indexed and `touched` the
+    days whose entries changed, when given."""
     due = handler.take_due(config.indexing.watch_debounce_seconds)
     try:
         for i, (path, kind) in enumerate(due):
             try:
-                if _apply_event(path, kind, config, conn, client) == "indexed" and indexed is not None:
+                if _apply_event(path, kind, config, conn, client, touched) == "indexed" and indexed is not None:
                     indexed.append(path)
             except OllamaUnavailableError as exc:
                 # requeue the rest so restarting Ollama doesn't end the watch
@@ -930,6 +967,7 @@ def _apply_event(
     config: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
+    touched: set[date] | None = None,
 ) -> FileResult | None:
     if kind == "delete" or not Path(path).exists():
         # whole vault gone, probably an unplugged drive
@@ -939,10 +977,15 @@ def _apply_event(
         root = PurePath(path)
         for key in store.tracked_paths(conn):
             if PurePath(key).is_relative_to(root) and not Path(key).exists():
+                if touched is not None:
+                    touched |= _file_days(conn, key)
                 _forget_file(conn, key)
                 console.print(f"[yellow]removed[/yellow] {escape(key)}")
         return None
+    before = _file_days(conn, path) if touched is not None else set()
     result = process_file(Path(path), config, conn, client)
+    if touched is not None:
+        touched |= before | _file_days(conn, path)
     style = _RESULT_STYLE[result]
     console.print(f"[{style}]{result}[/{style}] {escape(path)}")
     return result

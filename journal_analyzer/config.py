@@ -137,6 +137,9 @@ class RollupsConfig(BaseModel):
     linked_notes_chars: int = Field(default=6000, ge=0)
     # room for long entries' longer summaries in each digest; the rest get one line
     entry_details_chars: int = Field(default=8000, ge=0)
+    # `journal watch` writes the week and month digests of what it indexed, at
+    # most this often; 0 leaves them to `journal rollup`
+    watch_refresh_minutes: float = Field(default=0, ge=0)
 
 
 class InsightsConfig(BaseModel):
