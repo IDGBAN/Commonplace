@@ -90,6 +90,10 @@ function bytes(n) {
 }
 
 function periodTitle(type, key) {
+  if (type === "range") {
+    const [start, end] = key.split("..");
+    return start === end ? mediumDate(start) : `${mediumDate(start)} to ${mediumDate(end)}`;
+  }
   if (type === "month") return fmtMonth.format(toDate(`${key}-01`));
   if (type === "week") {
     const [year, week] = key.split("-W");
@@ -104,7 +108,8 @@ function periodRange(type, start, end) {
   return `${mediumDate(start)} – ${mediumDate(end)}`;
 }
 
-const KIND_LABELS = { week: "Week", month: "Month", year: "Year" };
+const KIND_LABELS = { week: "Week", month: "Month", year: "Year", range: "Span" };
+const DIGEST_TABS = ["year", "month", "week", "range", "notes"];
 const kindLabel = (kind) => kind.replace(/[-_]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 // ---------------------------------------------------------------- links
@@ -1056,7 +1061,7 @@ async function tagView([name]) {
 async function digestsView([type]) {
   const data = await api("digests");
   const scale = data.mood_scale;
-  const current = ["year", "month", "week", "notes"].includes(type) ? type : "month";
+  const current = DIGEST_TABS.includes(type) ? type : "month";
   document.title = "Digests · Commonplace";
   const list = current === "notes" ? [] : data.digests[current] || [];
   const tabCount = (t) => (t === "notes" ? data.notes.length : (data.digests[t] || []).length);
@@ -1077,7 +1082,7 @@ async function digestsView([type]) {
       title: "Digests",
       lede: "Summaries of each week, month and year, and of the people, places and topics you link most. Answers read these instead of every entry. A digest goes out of date when an entry it covers changes, until the next journal rollup.",
     }),
-    h("nav", { class: "tabs", "aria-label": "Digest periods" }, ["year", "month", "week", "notes"].map((t) =>
+    h("nav", { class: "tabs", "aria-label": "Digest periods" }, DIGEST_TABS.map((t) =>
       h("a", { class: "tab", href: href.digests(t), "aria-current": t === current ? "page" : null },
         t === "notes" ? "Notes " : `${KIND_LABELS[t]}s `, h("span", { class: "count" }, fmtNum(tabCount(t)))))),
     current === "notes" ? noteCards : list.length
@@ -1089,7 +1094,9 @@ async function digestsView([type]) {
           d.stale && h("div", { class: "digest-sub" }, h("span", { class: "status pending" }, "out of date"))),
         h("div", { class: "digest-summary clamp" }, d.summary || "No summary text."),
         d.tags.length ? h("div", { class: "digest-tags" }, d.tags.join(" · ")) : null)))
-      : empty(`No ${current} digests yet. Run `, h("code", {}, "journal rollup"), " to write them."));
+      : current === "range"
+        ? empty("No digests of a span of days yet. For a trip or a hard fortnight, ", h("code", {}, "journal digest 2024-03-02..2024-03-11 --refresh"), " writes one, and answers about those days read it.")
+        : empty(`No ${current} digests yet. Run `, h("code", {}, "journal rollup"), " to write them."));
 }
 
 async function digestView([type, key]) {
@@ -1110,7 +1117,9 @@ async function digestView([type, key]) {
       gloss("Built from", plural(r.entries ?? 0, "entry", "entries")),
       gloss("Main tags", r.tags.length ? h("div", { class: "chips" }, r.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t) }, t))) : h("span", { class: "quiet" }, "None")),
       gloss("Written", stamp(r.generated_at), r.stale && h("div", {}, "Out of date: an entry in this period changed since. Run journal rollup.")),
-    ] : gloss("Status", "Not written yet. Run journal rollup."));
+    ] : gloss("Status", type === "range"
+      ? ["Not written yet. ", h("code", {}, `journal digest ${key} --refresh`), " writes it."]
+      : "Not written yet. Run journal rollup."));
 
   return h("div", {},
     pageHead({
@@ -1632,8 +1641,8 @@ const routes = [
   [/^\/note\/(\d+)$/, noteView, "notes"],
   [/^\/tags$/, tagsView, "tags"],
   [/^\/tag\/(.+)$/, tagView, "tags"],
-  [/^\/digests(?:\/(year|month|week|notes))?$/, digestsView, "digests"],
-  [/^\/digest\/(year|month|week)\/([^/]+)$/, digestView, "digests"],
+  [/^\/digests(?:\/(year|month|week|range|notes))?$/, digestsView, "digests"],
+  [/^\/digest\/(year|month|week|range)\/([^/]+)$/, digestView, "digests"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],

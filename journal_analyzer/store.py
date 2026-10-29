@@ -54,8 +54,22 @@ def period_keys_for_date(d: date) -> dict[str, str]:
     return {"week": week_key(d), "month": month_key(d), "year": year_key(d)}
 
 
+# `journal digest 2024-03-02..2024-03-11`; longer spans have month and year digests
+RANGE_MAX_DAYS = 92
+_RANGE_SEP = ".."
+
+
+def range_key(start: date, end: date) -> str:
+    return f"{start.isoformat()}{_RANGE_SEP}{end.isoformat()}"
+
+
 def period_bounds(period_type: str, period_key: str) -> tuple[date, date]:
-    """First and last day of a week, month or year key. ValueError if malformed."""
+    """First and last day of a week, month, year or range key. ValueError if malformed."""
+    if period_type == "range":
+        first, sep, last = period_key.partition(_RANGE_SEP)
+        if not sep:
+            raise ValueError(f"'{period_key}' isn't a span of days")
+        return date.fromisoformat(first), date.fromisoformat(last)
     if period_type == "week":
         year, week = period_key.split("-W")
         start = date.fromisocalendar(int(year), int(week), 1)
@@ -77,13 +91,33 @@ _PERIOD_PATTERNS = (
 )
 
 
-def parse_period(text: str) -> tuple[str, str, date, date]:
-    """A year, month or ISO week as typed, like 2024, 2024-03 or 2024-W10.
+_RANGE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})")
+
+
+def parse_period(text: str, ranges: bool = False) -> tuple[str, str, date, date]:
+    """A year, month or ISO week as typed, like 2024, 2024-03 or 2024-W10, and
+    with `ranges` a span of days like 2024-03-02..2024-03-11.
 
     Returns (kind, key, first day, last day), the key written the way rollups
-    are stored, so 2024-w3 is 2024-W03. ValueError if it's none of those.
+    are stored, so 2024-w3 is 2024-W03. ValueError if it's none of those, or
+    a span that ends before it starts or is longer than RANGE_MAX_DAYS.
     """
     value = text.strip()
+    found = _RANGE_RE.fullmatch(value) if ranges else None
+    if found:
+        try:
+            start, end = date.fromisoformat(found[1]), date.fromisoformat(found[2])
+        except ValueError:
+            raise ValueError(f"'{text}' has a day that isn't a date") from None
+        if end < start:
+            raise ValueError(f"{value} ends before it starts")
+        days = (end - start).days + 1
+        if days > RANGE_MAX_DAYS:
+            raise ValueError(
+                f"{value} is {days} days, and a span can be up to {RANGE_MAX_DAYS}. "
+                "For longer ones, read the month or year digests"
+            )
+        return "range", range_key(start, end), start, end
     for kind, pattern in _PERIOD_PATTERNS:
         if pattern.fullmatch(value):
             start, end = period_bounds(kind, value.upper())
@@ -91,8 +125,22 @@ def parse_period(text: str) -> tuple[str, str, date, date]:
     raise ValueError(f"'{text}' isn't a year, a month or an ISO week")
 
 
+def _day_title(d: date, month: bool = True, year: bool = True) -> str:
+    return " ".join([str(d.day), *([d.strftime("%B")] if month else []), *([str(d.year)] if year else [])])
+
+
 def period_title(kind: str, key: str) -> str:
-    """2024, March 2024 or Week 10 of 2024, for a key the way rollups store it."""
+    """2024, March 2024, Week 10 of 2024 or 2 to 11 March 2024, for a key the
+    way rollups store it."""
+    if kind == "range":
+        start, end = period_bounds(kind, key)
+        if start == end:
+            return _day_title(start)
+        if start.year != end.year:
+            return f"{_day_title(start)} to {_day_title(end)}"
+        if start.month != end.month:
+            return f"{_day_title(start, year=False)} to {_day_title(end)}"
+        return f"{_day_title(start, month=False, year=False)} to {_day_title(end)}"
     if kind == "month":
         return datetime.strptime(key, "%Y-%m").strftime("%B %Y")
     if kind == "week":
@@ -1281,6 +1329,30 @@ def mark_rollups_stale(conn: sqlite3.Connection, d: date) -> None:
                 "WHERE period_type = ? AND period_key = ?",
                 (period_type, period_key),
             )
+        day = d.isoformat()
+        conn.execute(
+            "UPDATE rollups SET stale = 1 WHERE period_type = 'range' "
+            "AND substr(period_key, 1, 10) <= ? AND substr(period_key, 13, 10) >= ?",
+            (day, day),
+        )
+
+
+def range_rollups_overlapping(
+    conn: sqlite3.Connection, date_from: date | None = None, date_to: date | None = None
+) -> list[sqlite3.Row]:
+    """Digests of spans of days that share at least one day with this range, by when they start."""
+    # keys are ISO dates, so they compare as strings
+    return list(
+        conn.execute(
+            "SELECT * FROM rollups WHERE period_type = 'range' "
+            "AND (? IS NULL OR substr(period_key, 13, 10) >= ?) "
+            "AND (? IS NULL OR substr(period_key, 1, 10) <= ?) ORDER BY period_key",
+            (
+                date_from and date_from.isoformat(), date_from and date_from.isoformat(),
+                date_to and date_to.isoformat(), date_to and date_to.isoformat(),
+            ),
+        ).fetchall()
+    )
 
 
 def upsert_rollup(

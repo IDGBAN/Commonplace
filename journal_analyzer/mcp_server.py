@@ -94,13 +94,16 @@ def _number(args: Json, key: str, default: int, lo: int, hi: int) -> int:
         raise ToolError(f"'{key}' must be a whole number, not '{value}'.") from None
 
 
-def _period(args: Json, key: str) -> tuple[str, str, date, date]:
+def _period(args: Json, key: str, ranges: bool = False) -> tuple[str, str, date, date]:
     period = _text_arg(args, key)
     try:
-        return store.parse_period(period)
-    except ValueError:
+        return store.parse_period(period, ranges=ranges)
+    except ValueError as exc:
+        if ranges and ".." in period:
+            raise ToolError(f"{exc}.") from None
         raise ToolError(
-            f"'{period}' isn't a period. Use a year (2024), a month (2024-03) or a week (2024-W10)."
+            f"'{period}' isn't a period. Use a year (2024), a month (2024-03) or a week (2024-W10)"
+            + (", or a span of days (2024-03-02..2024-03-11)." if ranges else ".")
         ) from None
 
 
@@ -209,7 +212,8 @@ TOOLS: list[Json] = [
     },
     {
         "name": "digest",
-        "description": "The written digest of a year (2024), month (2024-03) or ISO week (2024-W10).",
+        "description": "The written digest of a year (2024), month (2024-03), ISO week (2024-W10) "
+        "or span of days someone asked for (2024-03-02..2024-03-11).",
         "inputSchema": {
             "type": "object", "properties": {"period": {"type": "string"}}, "required": ["period"],
         },
@@ -449,7 +453,7 @@ class Server:
         return {"scale": self.config.indexing.mood_scale_max, "months": [dict(r) for r in rows]}
 
     def _tool_digest(self, conn: sqlite3.Connection, args: Json) -> object:
-        kind, key, start, end = _period(args, "period")
+        kind, key, start, end = _period(args, "period", ranges=True)
         row = store.get_rollup(conn, kind, key)
         members = store.entries_in_range(conn, start, end)
         return {

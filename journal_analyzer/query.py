@@ -34,6 +34,8 @@ WEEK_DIGEST_MIN_DAYS = 10
 MAX_WEEK_DIGESTS = 9
 # more months than this and we send year digests instead
 MAX_MONTH_DIGESTS = 14
+# digests of spans of days, like a trip, that share the most days with the question
+MAX_RANGE_DIGESTS = 3
 # the reranker can only reorder what retrieval found, so fetch extra
 RERANK_CANDIDATE_POOL = 25
 # 60 is the k from the original RRF paper
@@ -714,7 +716,27 @@ def _learned_names(conn: sqlite3.Connection, notes: list[sqlite3.Row]) -> dict[i
     return {note_id: [r["name"] for r in rows] for note_id, rows in found.items()}
 
 
+def _range_digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
+    if not (plan.date_from and plan.date_to):
+        return []
+    lo, hi = plan.date_from, plan.date_to
+
+    def shared(row: sqlite3.Row) -> int:
+        start, end = store.period_bounds("range", row["period_key"])
+        return (min(end, hi) - max(start, lo)).days + 1
+
+    rows = sorted(store.range_rollups_overlapping(conn, lo, hi), key=lambda r: (-shared(r), r["period_key"]))
+    return [
+        f"- [{store.period_title('range', r['period_key'])}] {r['summary']}"
+        for r in rows[:MAX_RANGE_DIGESTS]
+    ]
+
+
 def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
+    return _range_digest_lines(plan, conn) + _period_digest_lines(plan, conn)
+
+
+def _period_digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
     # An unbounded narrative question covers the whole journal.
     if plan.intent != "narrative" and not (plan.date_from and plan.date_to):
         return []

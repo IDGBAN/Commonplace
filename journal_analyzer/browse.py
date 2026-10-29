@@ -286,6 +286,12 @@ def entry(req: Request, entry_id: str) -> Json:
              "stale": bool(rollup["stale"]) if rollup else False,
              "summary": rollup["summary"] if rollup else None}
         )
+    # spans of days only exist once someone asks for one
+    digests.extend(
+        {"type": "range", "key": r["period_key"], "exists": True, "stale": bool(r["stale"]),
+         "summary": r["summary"]}
+        for r in store.range_rollups_overlapping(conn, day, day)
+    )
     frontmatter = store.file_frontmatter(conn, row["file_path"])
     reading = store.entry_reading(conn, row["id"])
     own_mood = fields.frontmatter_mood(frontmatter, req.config)
@@ -451,7 +457,7 @@ def tag(req: Request, name: str) -> Json:
 
 
 def digests(req: Request) -> Json:
-    grouped: dict[str, list[Json]] = {"year": [], "month": [], "week": []}
+    grouped: dict[str, list[Json]] = {"year": [], "month": [], "week": [], "range": []}
     for row in store.all_rollups(req.conn):
         grouped.setdefault(row["period_type"], []).append(serialize.rollup_json(row))
     notes = [
@@ -619,7 +625,7 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/tags"), tags),
     (re.compile(r"/api/tags/(.+)"), tag),
     (re.compile(r"/api/digests"), digests),
-    (re.compile(r"/api/digests/(week|month|year)/([^/]+)"), digest),
+    (re.compile(r"/api/digests/(week|month|year|range)/([^/]+)"), digest),
     (re.compile(r"/api/files"), files),
     (re.compile(r"/api/profile"), profile_page),
     (re.compile(r"/api/search"), search),

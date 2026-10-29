@@ -626,7 +626,7 @@ def rollup(
     ] = None,
     only: Annotated[
         str | None,
-        typer.Option("--only", help="Comma list of profile, month, year, note, week. Default all."),
+        typer.Option("--only", help="Comma list of profile, month, year, note, week, range. Default all."),
     ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="List what would be written, without Ollama.")
@@ -649,18 +649,22 @@ def rollup(
     console.print(
         f"Generated {counts['week']} week, {counts['month']} month, "
         f"{counts['year']} year and {counts['note']} relationship rollups."
+        + (f" Rewrote {_count(counts['range'], 'span digest')}." if counts["range"] else "")
         + (" Your profile was rewritten." if counts["profile"] else "")
     )
 
 
-def _parse_period(value: str) -> tuple[str, str, date, date]:
+def _parse_period(value: str, ranges: bool = False) -> tuple[str, str, date, date]:
+    """With `ranges`, a span of days like 2024-03-02..2024-03-11 too."""
     try:
-        return store.parse_period(value)
-    except ValueError:
-        pass
+        return store.parse_period(value, ranges=ranges)
+    except ValueError as exc:
+        if ranges and ".." in value:
+            _fail(f"{str(exc)[0].upper()}{str(exc)[1:]}.")
     _fail(
-        f"'{value}' isn't a period. Use a year (2024), a month (2024-03) "
-        "or an ISO week (2024-W10)."
+        f"'{value}' isn't a period. Use a year (2024), a month (2024-03)"
+        + (", an ISO week (2024-W10) or a span of days (2024-03-02..2024-03-11)." if ranges
+           else " or an ISO week (2024-W10).")
     )
 
 
@@ -678,7 +682,7 @@ def digest_cmd(
     period: Annotated[
         str,
         typer.Argument(
-            help="A year (2024), month (2024-03) or ISO week (2024-W10).",
+            help="A year (2024), month (2024-03), ISO week (2024-W10) or span of days (2024-03-02..2024-03-11).",
             autocompletion=completion.periods,
         ),
     ],
@@ -690,16 +694,24 @@ def digest_cmd(
     as_json: JsonOpt = False,
     no_memo: NoMemoOpt = False,
 ) -> None:
-    """Show the digest for one week, month or year."""
+    """Show the digest for one week, month, year or span of days."""
     OUT.as_json = as_json
-    kind, key, start, end = _parse_period(period)
+    kind, key, start, end = _parse_period(period, ranges=True)
     title = store.period_title(kind, key)
     with _guard(), _open(config) as (cfg, conn):
         members = store.entries_in_range(conn, start, end)
         row = store.get_rollup(conn, kind, key)
         if not members and row is None:
             _fail(f"No entries in {title} ({start} to {end}).", red=False)
-        if refresh:
+        if refresh and kind == "range":
+            with redirect_stdout(sys.stderr) if as_json else nullcontext():
+                if row is not None and not row["stale"]:
+                    console.print("[dim]Already up to date.[/dim]")
+                else:
+                    console.print("[dim]Writing 1 digest...[/dim]")
+                    rollups.write_range(cfg, conn, OllamaClient(_memo(cfg, no_memo)), key)
+            row = store.get_rollup(conn, kind, key)
+        elif refresh:
             kinds = ("month", "year") if kind == "year" else (kind,)
             plan = rollups.plan_rollups(cfg, conn, kinds, True, start, end)
             # progress goes to stderr when stdout is the JSON
