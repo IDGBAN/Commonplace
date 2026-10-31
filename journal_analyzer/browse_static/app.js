@@ -130,6 +130,8 @@ const href = {
   tag: (name) => `#/tag/${encodeURIComponent(name)}`,
   digests: (type) => `#/digests/${type || "month"}`,
   digest: (type, key) => `#/digest/${type}/${encodeURIComponent(key)}`,
+  compare: (first, second) => `#/compare/${encodeURIComponent(first)}${second ? `/${encodeURIComponent(second)}` : ""}`,
+  review: (key) => `#/review/${encodeURIComponent(key)}`,
   files: (params) => `#/files${query(params)}`,
   search: (q) => `#/search${query({ q })}`,
   ask: (q, scope) => `#/ask${query({ q, ...scope })}`,
@@ -684,6 +686,7 @@ async function calendarView([yearParam], params) {
     pageHead({
       eyebrow: "Calendar", title: year,
       lede: amount ? amount.lede : "Every day you wrote, coloured by the mood the app gave that entry. Dashed squares are entries without a mood score.",
+      meta: [h("a", { href: href.review(year) }, `${year} in review`), h("a", { href: href.compare(year) }, `${year} against ${Number(year) - 1}`)],
     }),
     h("nav", { class: "year-tabs", "aria-label": "Years" }, years.map((y) =>
       h("a", { class: y === year ? "chip active" : "chip", href: href.calendar(y, by), "aria-current": y === year ? "page" : null },
@@ -1255,7 +1258,11 @@ async function digestView([type, key]) {
         button("← Earlier", prev && href.digest(type, prev), { disabled: !prev, key: "k" }),
         button("Later →", next && href.digest(type, next), { disabled: !next, key: "j" }),
       ],
-      meta: [h("span", {}, periodRange(type, d.start, d.end))],
+      meta: [
+        h("span", {}, periodRange(type, d.start, d.end)),
+        type !== "range" && d.entries.length ? h("a", { href: href.review(key) }, "Review") : null,
+        type !== "range" ? h("a", { href: href.compare(key) }, `Compare with the ${type} before`) : null,
+      ],
     }),
     h("div", { class: "folio" },
       h("article", {},
@@ -1372,6 +1379,154 @@ async function searchView(_, params) {
     h("div", { class: "search-box", role: "search" }, input, go),
     status,
     results);
+}
+
+// ---------------------------------------------------------------- compare and review
+
+const PERIOD_HINT = "2024, 2024-03 or 2024-W10";
+
+function share(n, of) {
+  return n ? `${fmtNum(n)} (${Math.round(of * 100)}%)` : "–";
+}
+
+function changeTable(title, rows, label, cat, periods, { note } = {}) {
+  if (!rows.length) return null;
+  const notes = new Map(cat.notes.map((n) => [n.title, n]));
+  const name = (c) => {
+    if (label === "tag") return h("a", { href: href.tag(c.name) }, c.name);
+    const found = notes.get(c.name);
+    return found ? h("a", { href: href.note(found.id), title: kindLabel(found.kind) }, c.name) : c.name;
+  };
+  return section(title, h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, h("th", {}, label === "tag" ? "Tag" : "Note"),
+      h("th", { class: "num" }, periods[0].title), h("th", { class: "num" }, periods[1].title))),
+    h("tbody", {}, rows.map((c) => h("tr", {},
+      h("td", {}, name(c)),
+      h("td", { class: "num" }, share(c.a, c.a_share)),
+      h("td", { class: "num" }, share(c.b, c.b_share))))))), { note });
+}
+
+async function compareView([first, second]) {
+  const inA = h("input", { type: "text", value: first, placeholder: PERIOD_HINT, "aria-label": "First period", spellcheck: "false" });
+  const inB = h("input", { type: "text", value: second || "", placeholder: "the one before", "aria-label": "Second period", spellcheck: "false" });
+  const form = h("form", { class: "filters", role: "search" },
+    field("Compare", inA), field("with", inB), h("button", { class: "button", type: "submit" }, "Compare"));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    if (inA.value.trim()) location.hash = href.compare(inA.value.trim(), inB.value.trim());
+  });
+  let d;
+  let cat;
+  let known;
+  try {
+    [d, cat, known] = await Promise.all([
+      api("compare", { first, second }), getCatalog(), api("metrics").then((m) => m.metrics).catch(() => []),
+    ]);
+  } catch (err) {
+    // a period that isn't one, or one with nothing in it; the form is how to fix it
+    if (!(err instanceof ApiError) || ![400, 404].includes(err.status)) throw err;
+    document.title = "Side by side · Commonplace";
+    return h("div", {}, pageHead({ eyebrow: "Side by side", title: "Compare two periods" }), form,
+      h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't compare"), h("span", {}, err.message)));
+  }
+  const yesNo = new Set(known.filter((m) => m.yes_no).map((m) => m.key));
+  const scale = d.mood_scale;
+  const sides = [d.a, d.b];
+  const titles = sides.map((side) => d.periods[side.label]);
+  document.title = `${titles[0].title} and ${titles[1].title} · Commonplace`;
+
+  const head = (t) => h("th", { class: "num" }, h("a", { href: href.review(t.key) }, t.title));
+  const row = (label, a, b) => h("tr", {}, h("td", {}, label), h("td", { class: "num" }, a), h("td", { class: "num" }, b));
+  const metricKeys = [...new Set([...Object.keys(d.a.metrics), ...Object.keys(d.b.metrics)])].sort();
+  const numbers = h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, h("th", {}, ""), head(titles[0]), head(titles[1]))),
+    h("tbody", {},
+      row("Entries", fmtNum(d.a.writing.entries), fmtNum(d.b.writing.entries)),
+      row("Days written", fmtNum(d.a.writing.days_written), fmtNum(d.b.writing.days_written)),
+      row("Words", fmtNum(d.a.writing.words), fmtNum(d.b.writing.words)),
+      row("Average mood", moodChip(d.a.mood, scale), moodChip(d.b.mood, scale)),
+      row("Longest streak", plural(d.a.writing.longest_streak, "day"), plural(d.b.writing.longest_streak, "day")),
+      metricKeys.map((k) => row(h("a", { href: href.metric(k) }, k),
+        d.a.metrics[k] ? fmtValue(d.a.metrics[k][0], yesNo.has(k)) : "–", d.b.metrics[k] ? fmtValue(d.b.metrics[k][0], yesNo.has(k)) : "–")))));
+
+  const shareNote = `share of each period's entries; ${d.min_count} or more to count`;
+  const changes = [
+    changeTable("Tags you wrote more", d.tags_up, "tag", cat, titles, { note: shareNote }),
+    changeTable("Tags you wrote less", d.tags_down, "tag", cat, titles, { note: shareNote }),
+    changeTable("Notes you linked more", d.notes_up, "note", cat, titles, { note: shareNote }),
+    changeTable("Notes you linked less", d.notes_down, "note", cat, titles, { note: shareNote }),
+    changeTable(`New in ${titles[1].title}`, d.notes_new, "note", cat, titles, { note: `not linked at all in ${titles[0].title}` }),
+    changeTable(`Gone in ${titles[1].title}`, d.notes_gone, "note", cat, titles, { note: `not linked at all in ${titles[1].title}` }),
+  ].filter(Boolean);
+
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.digests(titles[1].kind) }, "Side by side"),
+      title: `${titles[0].title} and ${titles[1].title}`,
+      lede: "Two periods from what's already stored. Tags and notes are compared by the share of each period's entries they're on, since a busy month would otherwise seem to have more of everything.",
+    }),
+    form,
+    section("In numbers", numbers),
+    changes.length ? changes : empty("No tag or note rose or fell by enough to show."));
+}
+
+async function reviewView([period]) {
+  const r = await api(`review/${encodeURIComponent(period)}`);
+  const scale = r.mood_scale;
+  const before = `the ${r.kind} before`;
+  const w = r.writing;
+  document.title = `${r.title} in review · Commonplace`;
+
+  const digest = r.digest
+    ? [h("div", { class: "raw" }, r.digest.summary),
+      r.digest.stale && h("p", { class: "turn-meta" }, h("span", { class: "status pending" }, "out of date"),
+        " Some entries changed after this was written. ", h("code", {}, `journal digest ${r.key} --refresh`), " rewrites it.")]
+    : empty(`There's no ${r.kind} digest yet. `, h("code", {}, `journal digest ${r.key} --refresh`), " writes one.");
+
+  const facts = h("div", { class: "facts" },
+    fact(fmtNum(w.entries), `entries on ${plural(w.days_written, "day")}`, href.entries({ from: r.start, to: r.end })),
+    fact(fmtNum(w.words), "words"),
+    fact(plural(w.longest_streak, "day"), w.longest_streak_end ? `longest streak, to ${mediumDate(w.longest_streak_end)}` : "longest streak"),
+    fact(fmtMood(r.mood.average), r.mood.previous != null ? `average mood, ${fmtMood(r.mood.previous)} ${before}` : "average mood"));
+
+  const partName = r.kind === "year" ? "month" : "week";
+  const parts = r.parts.length ? section(`Mood by ${partName}`, h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, h("th", {}, partName === "month" ? "Month" : "Week"), h("th", {}, "Mood"), h("th", { class: "num" }, "Entries"))),
+    h("tbody", {}, r.parts.map((p) => h("tr", {},
+      h("td", {}, p.entries
+        ? h("a", { href: partName === "month" ? href.review(p.start.slice(0, 7)) : href.entries({ from: p.start, to: p.end }) }, p.label)
+        : p.label),
+      h("td", {}, p.entries ? moodChip(p.mood, scale) : h("span", { class: "quiet" }, "nothing written")),
+      h("td", { class: "num" }, fmtNum(p.entries)))))))) : null;
+
+  const noteChips = (rows, count) => h("div", { class: "chips" }, rows.map((n) =>
+    h("a", { class: "chip", href: href.note(n.id), title: kindLabel(n.kind) }, n.title, h("span", { class: "n" }, count(n)))));
+
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.digest(r.kind, r.key) }, `${KIND_LABELS[r.kind]} digest`),
+      title: `${r.title} in review`,
+      actions: [button(`← ${periodTitle(r.kind, r.previous.key)}`, href.review(r.previous.key), { title: `The review of ${before}` })],
+      meta: [h("span", {}, periodRange(r.kind, r.start, r.end)), h("a", { href: href.compare(r.key) }, `Compare with ${before}`)],
+    }),
+    section("Digest", digest),
+    facts,
+    parts,
+    r.days.length ? section("Day by day", entryLines(r.days, scale)) : null,
+    r.best.length ? section("Best days", entryLines(r.best, scale)) : null,
+    r.hardest.length ? section("Hardest days", entryLines(r.hardest, scale)) : null,
+    r.notes.length ? section("Who and what came up most", noteChips(r.notes, (n) => fmtNum(n.entries)), { note: "entries that link each" }) : null,
+    r.new_notes.length && r.has_earlier ? section(`New this ${r.kind}`, noteChips(r.new_notes, (n) => `from ${mediumDate(n.first)}`)) : null,
+    r.tags.length ? section("Tags", h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Tag"), h("th", { class: "num" }, "Entries"), r.has_earlier ? h("th", { class: "num" }, `${before[0].toUpperCase()}${before.slice(1)}`) : null)),
+      h("tbody", {}, r.tags.map((t) => h("tr", {},
+        h("td", {}, h("a", { href: href.tag(t.name) }, t.name)),
+        h("td", { class: "num" }, fmtNum(t.entries)),
+        r.has_earlier ? h("td", { class: "num" }, t.previous ? fmtNum(t.previous) : "–") : null)))))) : null,
+    r.fell_away.length ? section("Fell away", h("ul", { class: "plain" }, r.fell_away.map((t) =>
+      h("li", {}, h("a", { href: href.tag(t.name) }, t.name), `: ${plural(t.entries, "entry", "entries")}, down from ${fmtNum(t.previous)}`)))) : null,
+    r.about_you.length ? section("New about you", h("ul", { class: "plain" }, r.about_you.map((f) =>
+      h("li", {}, f.fact, " ", h("a", { href: href.entries({ from: f.date, to: f.date }), class: "quiet" }, mediumDate(f.date)))))) : null);
 }
 
 // ---------------------------------------------------------------- numbers
@@ -1855,6 +2010,8 @@ const routes = [
   [/^\/metric\/(.+)$/, metricView, "metrics"],
   [/^\/digests(?:\/(year|month|week|range|notes))?$/, digestsView, "digests"],
   [/^\/digest\/(year|month|week|range)\/([^/]+)$/, digestView, "digests"],
+  [/^\/compare\/([^/]+)(?:\/([^/]+))?$/, compareView, "digests"],
+  [/^\/review\/([^/]+)$/, reviewView, "digests"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],

@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import (
+    compare,
     db,
     fields,
     insights,
@@ -32,6 +33,7 @@ from . import (
     parser,
     profile,
     query,
+    review,
     serialize,
     store,
     unlinked,
@@ -554,6 +556,54 @@ def metric(req: Request, key: str) -> Json:
     }
 
 
+def _period_param(req: Request, key: str) -> tuple[str, str, date, date]:
+    raw = req.params.get(key, "").strip()
+    try:
+        return store.parse_period(raw)
+    except ValueError:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"'{raw}' isn't a period. Use a year (2024), a month (2024-03) or an ISO week (2024-W10).",
+        ) from None
+
+
+def comparison(req: Request) -> Json:
+    """?first= and, optionally, ?second=; without it, the period just before the first."""
+    kind, key, start, end = _period_param(req, "first")
+    if req.params.get("second", "").strip():
+        _, other, other_start, other_end = _period_param(req, "second")
+        periods = ((key, start, end), (other, other_start, other_end))
+    else:
+        periods = (compare.previous(kind, start), (key, start, end))
+    result = compare.compare(req.conn, *periods)
+    if not result.a.writing.entries and not result.b.writing.entries:
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No entries in {result.a.label} or {result.b.label}.")
+    titles = {}
+    for label in (result.a.label, result.b.label):
+        k, normal, _, _ = store.parse_period(label)
+        titles[label] = {"kind": k, "key": normal, "title": store.period_title(k, normal)}
+    return {
+        **asdict(result),
+        "periods": titles,
+        "mood_scale": req.config.indexing.mood_scale_max,
+        "min_count": compare.MIN_COUNT,
+    }
+
+
+def review_page(req: Request, period: str) -> Json:
+    try:
+        kind, key, _, _ = store.parse_period(period)
+    except ValueError:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"'{period}' isn't a period. Use a year (2024), a month (2024-03) or an ISO week (2024-W10).",
+        ) from None
+    built = review.build(req.config, req.conn, key)
+    if built is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No entries in {store.period_title(kind, key)}.")
+    return {**review.to_json(req.conn, built), "mood_scale": req.config.indexing.mood_scale_max}
+
+
 def profile_page(req: Request) -> Json:
     conn, cfg = req.conn, req.config
     found = profile.current(conn)
@@ -687,6 +737,8 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/files"), files),
     (re.compile(r"/api/profile"), profile_page),
     (re.compile(r"/api/metrics"), metrics),
+    (re.compile(r"/api/compare"), comparison),
+    (re.compile(r"/api/review/([^/]+)"), review_page),
     (re.compile(r"/api/metrics/(.+)"), metric),
     (re.compile(r"/api/search"), search),
 ]
