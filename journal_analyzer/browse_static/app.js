@@ -76,6 +76,9 @@ function stamp(isoTimestamp) {
 }
 
 const fmtMood = (m) => (m == null ? "–" : String(Math.round(m * 10) / 10));
+const valueFmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+// a yes/no number is stored as 1 or 0, so its average is the share of days with it
+const fmtValue = (v, yesNo) => (v == null ? "–" : yesNo ? `${Math.round(v * 100)}%` : valueFmt.format(v));
 
 function moodClass(mood, scale) {
   if (mood == null) return null;
@@ -116,12 +119,14 @@ const kindLabel = (kind) => kind.replace(/[-_]+/g, " ").replace(/^./, (c) => c.t
 
 const href = {
   overview: () => "#/",
-  calendar: (year) => (year ? `#/calendar/${year}` : "#/calendar"),
+  calendar: (year, by) => `${year ? `#/calendar/${year}` : "#/calendar"}${query({ by })}`,
   entries: (params) => `#/entries${query(params)}`,
   entry: (id, params) => `#/entry/${id}${query(params)}`,
   notes: (params) => `#/notes${query(params)}`,
   note: (id, params) => `#/note/${id}${query(params)}`,
   tags: () => "#/tags",
+  metrics: () => "#/metrics",
+  metric: (key) => `#/metric/${encodeURIComponent(key)}`,
   tag: (name) => `#/tag/${encodeURIComponent(name)}`,
   digests: (type) => `#/digests/${type || "month"}`,
   digest: (type, key) => `#/digest/${type}/${encodeURIComponent(key)}`,
@@ -227,18 +232,19 @@ const noteChip = (note, cls = "chip") =>
   h("a", { class: cls, href: href.note(note.id), title: kindLabel(note.kind) }, note.title,
     h("span", { class: "n" }, kindLabel(note.kind)));
 
-function entryLines(entries, scale, { emptyText } = {}) {
+// `aside` replaces the tags under each line, like a number's value on its page
+function entryLines(entries, scale, { emptyText, aside } = {}) {
   if (!entries.length) return empty(emptyText || "No entries.");
   // search results say which part of a many-headed entry matched, and open there
-  return h("ol", { class: "lines" }, entries.map((e) =>
-    h("li", {},
+  return h("ol", { class: "lines" }, entries.map((e) => {
+    const under = aside ? aside(e) : [e.section && `in “${e.section}”`, ...(e.tags || [])].filter(Boolean).join(" · ");
+    return h("li", {},
       h("a", { class: "line", href: href.entry(e.id, e.section ? { at: e.section } : null) },
         h("span", { class: "line-date" }, mediumDate(e.date)),
         swatch(e.mood, scale),
         h("span", { class: e.summary ? "line-summary" : "line-summary none" }, e.summary || "No summary stored"),
-        (e.section || (e.tags && e.tags.length))
-          ? h("span", { class: "line-tags" }, [e.section && `in “${e.section}”`, ...(e.tags || [])].filter(Boolean).join(" · "))
-          : null))));
+        under ? h("span", { class: "line-tags" }, under) : null));
+  }));
 }
 
 // The stored text, with the part a link's #heading or #^block points at marked.
@@ -302,17 +308,27 @@ function field(label, control, grow = false) {
 
 // ---------------------------------------------------------------- charts
 
-function monthlyMoodChart(months, baseline, scale) {
-  const scored = months.filter((m) => m.avg_mood != null);
-  if (!scored.length) return empty("No entry has a mood score yet.");
-  // every month from the first to the last, so gaps in writing show as gaps
+// every month from the first to the last, so gaps in writing show as gaps
+function monthSpan(months) {
   const first = toDate(`${months[0].month}-01`);
   const last = toDate(`${months[months.length - 1].month}-01`);
-  const byKey = new Map(months.map((m) => [m.month, m]));
   const keys = [];
   for (let d = first; d <= last; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))) {
     keys.push(d.toISOString().slice(0, 7));
   }
+  return keys;
+}
+
+const lastDayOf = (month) => {
+  const [yy, mm] = month.split("-").map(Number);
+  return new Date(Date.UTC(yy, mm, 0)).toISOString().slice(0, 10);
+};
+
+function monthlyMoodChart(months, baseline, scale) {
+  const scored = months.filter((m) => m.avg_mood != null);
+  if (!scored.length) return empty("No entry has a mood score yet.");
+  const byKey = new Map(months.map((m) => [m.month, m]));
+  const keys = monthSpan(months);
   const slot = 14;
   const width = Math.max(keys.length * slot, 320);
   const height = 170;
@@ -357,6 +373,53 @@ function monthlyMoodChart(months, baseline, scale) {
   return h("div", { class: "chart-wrap" }, chart);
 }
 
+// a number's average by month, laid out like monthlyMoodChart so the two line up
+function metricChart(months, key, yesNo) {
+  if (!months.length) return empty(`No entry records ${key}.`);
+  const byKey = new Map(months.map((m) => [m.month, m]));
+  const keys = monthSpan(months);
+  const values = months.map((m) => m.avg);
+  // bars start at zero, so a month with half the value looks half as tall
+  const lo = yesNo ? 0 : Math.min(0, ...values);
+  const hi = yesNo ? 1 : Math.max(0, ...values);
+  const slot = 14;
+  const width = Math.max(keys.length * slot, 320);
+  const height = 170;
+  const top = 12;
+  const bottom = 24;
+  const plot = height - top - bottom;
+  const y = (v) => top + plot - ((v - lo) / (hi - lo || 1)) * plot;
+
+  const chart = svg("svg", {
+    class: "chart", viewBox: `0 0 ${width + 20} ${height}`, role: "img",
+    "aria-label": `${yesNo ? `Share of days with ${key}` : `Average ${key}`} by month, ${keys.length} months`,
+  });
+  chart.style.maxWidth = `${(width + 20) * 1.4}px`;
+  chart.style.minWidth = `${Math.min(width + 20, 640)}px`;
+  for (const v of [...new Set([lo, (lo + hi) / 2, hi])]) {
+    chart.append(svg("line", { class: v === 0 && lo < 0 ? "zero" : "grid", x1: 0, x2: width, y1: y(v), y2: y(v) }),
+      svg("text", { class: "axis", x: width + 4, y: y(v) + 4 }, fmtValue(v, yesNo)));
+  }
+  keys.forEach((month, i) => {
+    const x = i * slot;
+    const m = byKey.get(month);
+    if (month.endsWith("-01") || i === 0) {
+      chart.append(svg("text", { class: "axis", x: x + 1, y: height - 6 }, month.slice(0, 4)));
+    }
+    if (!m) return;
+    const from = y(0);
+    const to = y(m.avg);
+    const what = yesNo ? `${key} on ${fmtValue(m.avg, true)} of days` : `${key} ${fmtValue(m.avg)}`;
+    chart.append(svg("a", { href: href.entries({ from: `${month}-01`, to: lastDayOf(month) }) },
+      svg("title", {}, `${fmtMonth.format(toDate(`${month}-01`))}: ${what}, ${plural(m.n, "entry", "entries")}`),
+      svg("rect", {
+        class: "bar metric", x: x + 2, y: Math.min(from, to),
+        width: slot - 4, height: Math.max(2, Math.abs(to - from)), rx: 1.5,
+      })));
+  });
+  return h("div", { class: "chart-wrap" }, chart);
+}
+
 function yearStrips(entries, scale) {
   const byYear = new Map();
   for (const e of entries) {
@@ -390,6 +453,16 @@ function yearStrips(entries, scale) {
   });
   return h("div", { class: "strips" }, rows, moodLegend(scale));
 }
+
+// for colouring by amount: seven steps of one blue, from `lo` to `hi`
+function amountLegend(lo, hi) {
+  return h("div", { class: "strip-scale" },
+    lo,
+    h("span", { class: "legend", "aria-hidden": "true" }, [0, 1, 2, 3, 4, 5, 6].map((i) => h("span", { class: `q${i}` }))),
+    hi);
+}
+
+const amountStep = (v, lo, hi) => `q${Math.round(Math.min(1, Math.max(0, (v - lo) / (hi - lo || 1))) * 6)}`;
 
 function moodLegend(scale) {
   return h("div", { class: "strip-scale" },
@@ -482,8 +555,39 @@ function fact(value, label, link) {
     h("div", { class: "fact-value" }, value), h("div", { class: "fact-label" }, label));
 }
 
-async function calendarView([yearParam]) {
-  const cat = await getCatalog();
+// past this share of days, a heavy day doesn't stretch the colours for everything else
+const WORDS_TOP_QUANTILE = 0.95;
+
+// How the calendar colours a day other than by mood: words written, or a number
+// you keep. Null when `by` names nothing there is.
+async function calendarAmount(by, byDate, metrics) {
+  if (by === "words") {
+    const totals = new Map([...byDate].map(([iso, list]) => [iso, list.reduce((n, e) => n + (e.words || 0), 0)]));
+    const sorted = [...totals.values()].sort((a, b) => a - b);
+    const hi = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * WORDS_TOP_QUANTILE))] || 1;
+    return {
+      label: "words", value: (iso) => totals.get(iso) ?? null, lo: 0, hi,
+      fmt: (v) => plural(v, "word"),
+      legend: amountLegend("fewer words", `${fmtNum(hi)} or more`),
+      lede: "Every day you wrote, coloured by how many words: lighter is fewer, darker is more.",
+    };
+  }
+  const m = metrics.find((x) => x.key === by);
+  if (!m) return null;
+  const d = await api(`metrics/${encodeURIComponent(m.key)}`);
+  const values = new Map(d.days.map((x) => [x.date, x.value]));
+  const lo = d.yes_no ? 0 : d.lo;
+  const hi = d.yes_no ? 1 : d.hi;
+  return {
+    label: m.key, value: (iso) => values.get(iso) ?? null, lo, hi,
+    fmt: (v) => (d.yes_no ? (v >= 0.5 ? `${m.key}: yes` : `${m.key}: no`) : `${m.key} ${fmtValue(v)}`),
+    legend: d.yes_no ? amountLegend("no", "yes") : amountLegend(fmtValue(lo), `${fmtValue(hi)} ${m.key}`),
+    lede: `Every day you wrote, coloured by your ${m.key}: lighter is ${d.yes_no ? "no" : "less"}, darker is ${d.yes_no ? "yes" : "more"}. Dashed squares are days you wrote without recording it.`,
+  };
+}
+
+async function calendarView([yearParam], params) {
+  const [cat, metrics] = await Promise.all([getCatalog(), api("metrics").then((d) => d.metrics).catch(() => [])]);
   const scale = cat.mood_scale;
   document.title = "Calendar · Commonplace";
   const byDate = new Map();
@@ -498,12 +602,17 @@ async function calendarView([yearParam]) {
   const year = years.includes(yearParam) ? yearParam : years[years.length - 1];
   const inYear = cat.entries.filter((e) => e.date.startsWith(year));
   const todayIso = localToday();
+  const wanted = params.get("by") || "";
+  const amount = wanted ? await calendarAmount(wanted, byDate, metrics) : null;
+  const by = amount ? wanted : "";
 
   const preview = h("aside", { class: "preview", "aria-live": "polite" });
   const showPreview = (iso) => {
     const list = byDate.get(iso) || [];
+    const value = amount ? amount.value(iso) : null;
     fill(preview,
       h("div", { class: "preview-date" }, longDate(iso)),
+      amount && list.length && h("div", { class: "meta-line" }, value == null ? `No ${amount.label} recorded` : amount.fmt(value)),
       list.length
         ? list.map((e) => h("div", {},
           h("div", { class: "meta-line" }, moodChip(e.mood, scale), plural(e.words, "word")),
@@ -535,13 +644,22 @@ async function calendarView([yearParam]) {
       grid.append(h("span", { class: iso === todayIso ? "cell today" : "cell", title: longDate(iso) }));
       continue;
     }
-    const mood = list.reduce((sum, e) => sum + (e.mood ?? 0), 0) / (list.filter((e) => e.mood != null).length || 1);
-    const hasMood = list.some((e) => e.mood != null);
-    const cls = hasMood ? `cell has ${moodClass(mood, scale)}` : "cell has nomood";
+    let cls;
+    let label;
+    if (amount) {
+      const value = amount.value(iso);
+      cls = value == null ? "cell has nomood" : `cell has ${amountStep(value, amount.lo, amount.hi)}`;
+      label = `${longDate(iso)}, ${value == null ? `no ${amount.label} recorded` : amount.fmt(value)}`;
+    } else {
+      const mood = list.reduce((sum, e) => sum + (e.mood ?? 0), 0) / (list.filter((e) => e.mood != null).length || 1);
+      const hasMood = list.some((e) => e.mood != null);
+      cls = hasMood ? `cell has ${moodClass(mood, scale)}` : "cell has nomood";
+      label = `${longDate(iso)}, mood ${hasMood ? fmtMood(mood) : "none"}`;
+    }
     const cell = h("a", {
       class: iso === todayIso ? `${cls} today` : cls,
       href: href.entry(list[0].id),
-      "aria-label": `${longDate(iso)}, mood ${hasMood ? fmtMood(mood) : "none"}`,
+      "aria-label": label,
       onmouseenter: () => showPreview(iso),
       onfocus: () => showPreview(iso),
     });
@@ -556,16 +674,24 @@ async function calendarView([yearParam]) {
     h("div", { class: "cal-days", "aria-hidden": "true" }, ["Mon", "", "Wed", "", "Fri", "", "Sun"].map((d) => h("span", {}, d))),
     grid);
 
+  const choose = h("select", {},
+    h("option", { value: "", selected: !by }, "Mood"),
+    h("option", { value: "words", selected: by === "words" }, "Words written"),
+    metrics.map((m) => h("option", { value: m.key, selected: by === m.key }, m.key)));
+  choose.addEventListener("change", () => { location.hash = href.calendar(year, choose.value); });
+
   return h("div", {},
     pageHead({
       eyebrow: "Calendar", title: year,
-      lede: "Every day you wrote, coloured by the mood the app gave that entry. Dashed squares are entries without a mood score.",
+      lede: amount ? amount.lede : "Every day you wrote, coloured by the mood the app gave that entry. Dashed squares are entries without a mood score.",
     }),
     h("nav", { class: "year-tabs", "aria-label": "Years" }, years.map((y) =>
-      h("a", { class: y === year ? "chip active" : "chip", href: href.calendar(y), "aria-current": y === year ? "page" : null },
+      h("a", { class: y === year ? "chip active" : "chip", href: href.calendar(y, by), "aria-current": y === year ? "page" : null },
         y, h("span", { class: "n" }, fmtNum(cat.entries.filter((e) => e.date.startsWith(y)).length))))),
+    h("div", { class: "colour-by" }, field("Colour by", choose),
+      wanted && !amount ? h("span", { class: "quiet" }, `No entry records ${wanted}, so this is by mood.`) : null),
     h("div", { class: "cal-scroll" }, cal),
-    moodLegend(scale),
+    amount ? amount.legend : moodLegend(scale),
     preview,
     section(`Entries in ${year}`, entryLines([...inYear].reverse(), scale), {
       note: h("a", { href: href.entries({ from: `${year}-01-01`, to: `${year}-12-31` }) }, "filter these"),
@@ -693,7 +819,7 @@ async function entryView([id], params) {
       e.tags.length ? h("div", { class: "chips" }, e.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t), title: fmTags.has(t) ? "From the frontmatter" : null }, t))) : h("span", { class: "quiet" }, "No tags"),
       e.tags.some((t) => fmTags.has(t)) && h("div", { class: "quiet" }, "Includes the tags in the file's frontmatter.")),
     Object.keys(e.metrics || {}).length > 0 && gloss("Your numbers",
-      h("dl", { class: "props numbers" }, Object.entries(e.metrics).map(([k, v]) => [h("dt", {}, k), h("dd", {}, fmtMood(v))])),
+      h("dl", { class: "props numbers" }, Object.entries(e.metrics).map(([k, v]) => [h("dt", {}, h("a", { href: href.metric(k) }, k)), h("dd", {}, fmtMood(v))])),
       h("div", { class: "quiet" }, "From the file's frontmatter")),
     gloss("Mentions",
       e.notes.length ? h("div", { class: "chips" }, e.notes.map((n) => [
@@ -1248,6 +1374,90 @@ async function searchView(_, params) {
     results);
 }
 
+// ---------------------------------------------------------------- numbers
+
+async function metricsView() {
+  const data = await api("metrics");
+  document.title = "Numbers · Commonplace";
+  const head = pageHead({
+    eyebrow: "From your frontmatter",
+    title: "Numbers",
+    lede: "Numbers you keep in your entries' frontmatter, like sleep: 7 or exercise: true. No model reads them; they're kept as you wrote them, and true and false count as 1 and 0.",
+  });
+  if (!data.metrics.length) {
+    return h("div", {}, head, empty("None yet. Add a line like ", h("code", {}, "sleep: 7"), " to a daily note's frontmatter and run ", h("code", {}, "journal index"), "."));
+  }
+  return h("div", {}, head,
+    h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Number"), h("th", { class: "num" }, "Entries"), h("th", { class: "num" }, "Average"),
+        h("th", { class: "num" }, "Lowest"), h("th", { class: "num" }, "Highest"), h("th", { class: "num" }, "First"), h("th", { class: "num" }, "Last"))),
+      h("tbody", {}, data.metrics.map((m) => h("tr", {},
+        h("td", {}, h("a", { href: href.metric(m.key) }, m.key), m.yes_no ? h("span", { class: "quiet" }, " yes or no") : null),
+        h("td", { class: "num" }, fmtNum(m.n)),
+        h("td", { class: "num" }, m.yes_no ? `${fmtValue(m.avg, true)} of days` : fmtValue(m.avg)),
+        h("td", { class: "num" }, m.yes_no ? "–" : fmtValue(m.lo)),
+        h("td", { class: "num" }, m.yes_no ? "–" : fmtValue(m.hi)),
+        h("td", { class: "num" }, mediumDate(m.first)),
+        h("td", { class: "num" }, mediumDate(m.last))))))));
+}
+
+function splitText(d, scale) {
+  const s = d.split;
+  if (!s) return empty(`Every entry records the same ${d.key}, so there's nothing to set side by side.`);
+  const days = (n) => plural(n, "day");
+  const lines = s.yes_no
+    ? [
+      h("p", { class: "split-line" }, `On the ${days(s.high.days)} with ${d.key}, your mood averaged `, moodChip(s.high.mood, scale), "."),
+      h("p", { class: "split-line" }, `On the ${days(s.low.days)} without it, `, moodChip(s.low.mood, scale), "."),
+    ]
+    : [
+      h("p", { class: "split-line" }, `On the ${days(s.high.days)} your ${d.key} was ${fmtValue(s.median)} or more (its median), your mood averaged `, moodChip(s.high.mood, scale), "."),
+      h("p", { class: "split-line" }, `On the ${days(s.low.days)} it was less, `, moodChip(s.low.mood, scale), "."),
+    ];
+  return [lines, h("p", { class: "section-note" }, s.enough
+    ? "The two go together on these days; that doesn't mean one causes the other."
+    : "There are too few scored days on one side to say much yet.")];
+}
+
+async function metricView([key]) {
+  const d = await api(`metrics/${encodeURIComponent(key)}`);
+  const scale = d.mood_scale;
+  const yesNo = d.yes_no;
+  document.title = `${d.key} · Commonplace`;
+  const onCalendar = href.calendar(d.last.slice(0, 4), d.key);
+  const facts = h("div", { class: "facts" },
+    fact(fmtValue(d.avg, yesNo), yesNo ? "of the entries that record it say yes" : "average"),
+    fact(fmtNum(d.n), "entries record it"),
+    yesNo ? null : fact(`${fmtValue(d.lo)} to ${fmtValue(d.hi)}`, "lowest to highest"),
+    fact(mediumDate(d.last), `last recorded, first on ${mediumDate(d.first)}`, onCalendar));
+  const moodBy = new Map(d.mood_months.map((m) => [m.month, m.avg_mood]));
+  const table = h("details", { class: "turn-read" },
+    h("summary", {}, "As a table"),
+    h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Month"), h("th", { class: "num" }, yesNo ? "Share of days" : "Average"),
+        h("th", { class: "num" }, "Entries"), h("th", {}, "Mood those days"))),
+      h("tbody", {}, d.months.map((m) => h("tr", {},
+        h("td", {}, h("a", { href: href.entries({ from: `${m.month}-01`, to: lastDayOf(m.month) }) }, fmtMonth.format(toDate(`${m.month}-01`)))),
+        h("td", { class: "num" }, fmtValue(m.avg, yesNo)),
+        h("td", { class: "num" }, fmtNum(m.n)),
+        h("td", {}, moodChip(moodBy.get(m.month) ?? null, scale))))))));
+  const aside = (e) => `${d.key} ${fmtValue(e.value)}`;
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.metrics() }, "Numbers"),
+      title: d.key,
+      meta: [h("a", { href: onCalendar }, "See it on the calendar")],
+    }),
+    facts,
+    section("By month", h("div", { class: "chart-pair" },
+      h("div", {}, h("h3", {}, yesNo ? `Share of days with ${d.key}` : `Average ${d.key}`), metricChart(d.months, d.key, yesNo)),
+      h("div", {}, h("h3", {}, "Mood on those days"), monthlyMoodChart(d.mood_months, d.baseline_mood, scale)),
+      table), { note: "two charts, one month to a column" }),
+    section(yesNo ? `Mood with and without ${d.key}` : "Mood either side of the median", splitText(d, scale)),
+    yesNo ? null : section(`Highest ${d.key}`, entryLines(d.highest, scale, { aside })),
+    yesNo ? null : section(`Lowest ${d.key}`, entryLines(d.lowest, scale, { aside })));
+}
+
 // ---------------------------------------------------------------- ask
 
 const STAGE_LABELS = {
@@ -1641,6 +1851,8 @@ const routes = [
   [/^\/note\/(\d+)$/, noteView, "notes"],
   [/^\/tags$/, tagsView, "tags"],
   [/^\/tag\/(.+)$/, tagView, "tags"],
+  [/^\/metrics$/, metricsView, "metrics"],
+  [/^\/metric\/(.+)$/, metricView, "metrics"],
   [/^\/digests(?:\/(year|month|week|range|notes))?$/, digestsView, "digests"],
   [/^\/digest\/(year|month|week|range)\/([^/]+)$/, digestView, "digests"],
   [/^\/files$/, filesView, "files"],

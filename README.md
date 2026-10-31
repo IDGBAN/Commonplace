@@ -215,7 +215,7 @@ journal browse              # opens http://127.0.0.1:8765 in your browser
 journal browse --port 9000 --no-open
 ```
 
-`journal browse` shows everything in the cache as a local web page, so you can see exactly what the app knows. Each entry page puts your stored text next to what the models took from it: mood, summary, tags, the notes and days it links to (and the part of each that a `#heading` link points at, which opens with that part marked), links that don't resolve to a note yet, which model read it and when, whether it has a vector, the entries closest to it in meaning, and the digests that cover it. There are also pages for notes (aliases, properties, backlinks, mentions by year), tags (with average mood against your usual), digests, a mood calendar, and every tracked file with its index status and errors. Type `/` to jump to a date, note or tag, and `j`/`k` to step through entries.
+`journal browse` shows everything in the cache as a local web page, so you can see exactly what the app knows. Each entry page puts your stored text next to what the models took from it: mood, summary, tags, the notes and days it links to (and the part of each that a `#heading` link points at, which opens with that part marked), links that don't resolve to a note yet, which model read it and when, whether it has a vector, the entries closest to it in meaning, and the digests that cover it. There are also pages for notes (aliases, properties, backlinks, mentions by year), tags (with average mood against your usual), the numbers you keep in frontmatter (see [Metrics](#metrics)), digests, a calendar coloured by mood, words or one of those numbers, and every tracked file with its index status and errors. Type `/` to jump to a date, note or tag, and `j`/`k` to step through entries.
 
 The Ask page answers questions the same way `journal ask` does. You see each step while it works and the answer as it's written, then its sources linked to their entry and note pages, and a list of everything the model read. Follow-ups build on earlier answers like `journal chat`, and the conversation stays put while you open the pages it cites. Asking needs Ollama; Cancel stops waiting for an answer. From the jump box, type a question and pick "Ask".
 
@@ -284,6 +284,8 @@ Numbers in your entries' frontmatter are stored with each entry without any mode
 - a question that names one, like "how did I sleep in March?", gets its monthly averages when it's answered from statistics, and the entries an answer reads list their numbers
 - week and month digests see each day's numbers next to its mood
 - `journal show`, `journal export` and the entry pages in `journal browse` show them
+- the browser's Numbers page lists them, and each has a page of its own: its average by month above your mood by month on the same days (two charts lined up month by month, with a table under them), your mood on either side of its median, or with and without a yes/no one, as `journal insights` works it out, and the days with the highest and lowest values
+- the Calendar's Colour by picker shades each day by one of them, or by words written, in one blue from light (less) to dark (more), and a dashed square is a day you wrote without recording it
 
 Changing `[metrics]` takes effect on the next `journal index` with no model calls.
 

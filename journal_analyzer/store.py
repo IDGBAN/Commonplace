@@ -602,6 +602,52 @@ def monthly_metric(
     )
 
 
+def metric_is_yes_no(conn: sqlite3.Connection, key: str) -> bool:
+    """Whether every value is 0 or 1, as a true/false property is stored."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, SUM(value NOT IN (0, 1)) AS other FROM entry_metrics WHERE key = ?", (key,)
+    ).fetchone()
+    return bool(row["n"]) and not row["other"]
+
+
+def metric_days(conn: sqlite3.Connection, key: str) -> list[sqlite3.Row]:
+    """Each day's value, averaged over its entries when it has several."""
+    return list(
+        conn.execute(
+            """SELECT e.entry_date AS date, AVG(m.value) AS value, MIN(e.id) AS id
+               FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+               WHERE m.key = ? GROUP BY e.entry_date ORDER BY e.entry_date""",
+            (key,),
+        ).fetchall()
+    )
+
+
+def entries_by_metric(conn: sqlite3.Connection, key: str, limit: int, highest: bool) -> list[sqlite3.Row]:
+    """Entries with the highest or lowest values, with the value as `value`."""
+    direction = "DESC" if highest else "ASC"
+    return list(
+        conn.execute(
+            f"""SELECT e.*, m.value AS value
+                FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+                WHERE m.key = ? ORDER BY m.value {direction}, e.entry_date LIMIT ?""",
+            (key, limit),
+        ).fetchall()
+    )
+
+
+def monthly_mood_with_metric(conn: sqlite3.Connection, key: str) -> list[sqlite3.Row]:
+    """Mood by month over just the entries that record the metric, shaped like monthly_mood."""
+    return list(
+        conn.execute(
+            """SELECT substr(e.entry_date, 1, 7) AS month,
+                      ROUND(AVG(e.mood_score), 2) AS avg_mood, COUNT(*) AS entry_count
+               FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+               WHERE m.key = ? GROUP BY month ORDER BY month""",
+            (key,),
+        ).fetchall()
+    )
+
+
 def metric_mood_pairs(
     conn: sqlite3.Connection, key: str, date_from: date | None, date_to: date | None
 ) -> list[tuple[float, float]]:

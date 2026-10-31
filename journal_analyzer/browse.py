@@ -24,7 +24,18 @@ from importlib import resources
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import db, fields, links, parser, profile, query, serialize, store, unlinked
+from . import (
+    db,
+    fields,
+    insights,
+    links,
+    parser,
+    profile,
+    query,
+    serialize,
+    store,
+    unlinked,
+)
 from .config import Config
 from .models import JournalError
 from .ollama_client import OllamaClient
@@ -45,6 +56,8 @@ COOCCURRING_LIMIT = 12
 LINKED_WITH_LIMIT = 12
 GROUP_VALUES_LIMIT = 30
 PROFILE_FACTS_LIMIT = 300
+# highest and lowest days shown on a metric's page
+METRIC_DAYS_SHOWN = 5
 _MAX_ROWID = 2**63 - 1
 _OTHER_SITES = frozenset({"cross-site", "same-site"})
 _NO_ENTRY = "There is no indexed entry with that id."
@@ -496,6 +509,51 @@ def digest(req: Request, period_type: str, period_key: str) -> Json:
     }
 
 
+def _mean(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 2) if values else None
+
+
+def metrics(req: Request) -> Json:
+    rows = store.metric_keys(req.conn)
+    return {
+        "metrics": [{**dict(r), "yes_no": store.metric_is_yes_no(req.conn, r["key"])} for r in rows],
+    }
+
+
+def metric(req: Request, key: str) -> Json:
+    conn, cfg = req.conn, req.config
+    name = key.strip().casefold()
+    found = next((r for r in store.metric_keys(conn) if r["key"] == name), None)
+    if found is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No entry records '{name}'.")
+    split = insights.mood_split(store.metric_mood_pairs(conn, name, None, None))
+    least = cfg.insights.min_sample_size
+    highest = store.entries_by_metric(conn, name, METRIC_DAYS_SHOWN, highest=True)
+    lowest = store.entries_by_metric(conn, name, METRIC_DAYS_SHOWN, highest=False)
+    return {
+        **dict(found),
+        "yes_no": store.metric_is_yes_no(conn, name),
+        "mood_scale": cfg.indexing.mood_scale_max,
+        "baseline_mood": store.overall_mood(conn, None, None)[0],
+        "months": [dict(r) for r in store.monthly_metric(conn, name, None, None)],
+        "mood_months": [dict(r) for r in store.monthly_mood_with_metric(conn, name)],
+        # too few days on a side and the averages say little, as in journal insights
+        "split": {
+            "yes_no": split.yes_no, "median": split.median,
+            "low": {"mood": _mean(split.low), "days": len(split.low)},
+            "high": {"mood": _mean(split.high), "days": len(split.high)},
+            "enough": len(split.low) >= least and len(split.high) >= least,
+        } if split else None,
+        "highest": [
+            {**b, "value": r["value"]} for b, r in zip(serialize.entry_briefs(conn, highest), highest, strict=True)
+        ],
+        "lowest": [
+            {**b, "value": r["value"]} for b, r in zip(serialize.entry_briefs(conn, lowest), lowest, strict=True)
+        ],
+        "days": [{"date": r["date"], "id": r["id"], "value": r["value"]} for r in store.metric_days(conn, name)],
+    }
+
+
 def profile_page(req: Request) -> Json:
     conn, cfg = req.conn, req.config
     found = profile.current(conn)
@@ -628,6 +686,8 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/digests/(week|month|year|range)/([^/]+)"), digest),
     (re.compile(r"/api/files"), files),
     (re.compile(r"/api/profile"), profile_page),
+    (re.compile(r"/api/metrics"), metrics),
+    (re.compile(r"/api/metrics/(.+)"), metric),
     (re.compile(r"/api/search"), search),
 ]
 
