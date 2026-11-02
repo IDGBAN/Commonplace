@@ -234,6 +234,24 @@ class NotesConfig(BaseModel):
         return [name for name in (" ".join(n.casefold().split()) for n in v) if name]
 
 
+class HistoryConfig(BaseModel):
+    # keep your questions and their answers; off unless you turn it on
+    enabled: bool = False
+    # empty means next to the cache, e.g. journal-history.db
+    path: Path | None = None
+    # the newest questions kept; older ones are deleted
+    keep: int = Field(default=500, ge=1)
+    # questions older than this many days are deleted; 0 leaves it to `keep`
+    forget_after_days: int = Field(default=0, ge=0)
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _path(cls, v: object) -> Path | None:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return _expand(Path(str(v)))
+
+
 class McpConfig(BaseModel):
     # entry and note text; false leaves summaries, digests and numbers
     raw_text: bool = True
@@ -273,6 +291,14 @@ class Config(BaseModel):
     metrics: MetricsConfig = MetricsConfig()
     profile: ProfileConfig = ProfileConfig()
     mcp: McpConfig = McpConfig()
+    history: HistoryConfig = HistoryConfig()
+
+    @model_validator(mode="after")
+    def _history_outside_vault(self) -> Config:
+        # nothing is ever written to the vault
+        if self.history.path and self.history.path.is_relative_to(self.vault.path):
+            raise ValueError("[history] path has to be outside the vault")
+        return self
 
 
 def load_config(path: Path | str | None = None) -> Config:

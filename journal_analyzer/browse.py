@@ -28,6 +28,7 @@ from . import (
     compare,
     db,
     fields,
+    history,
     insights,
     links,
     parser,
@@ -604,6 +605,37 @@ def review_page(req: Request, period: str) -> Json:
     return {**review.to_json(req.conn, built), "mood_scale": req.config.indexing.mood_scale_max}
 
 
+HISTORY_LISTED = 30
+
+
+def history_list(req: Request) -> Json:
+    return {
+        "enabled": req.config.history.enabled,
+        "items": [
+            {k: v for k, v in kept.as_json().items() if k not in ("answer", "sources")}
+            for kept in history.recent(req.config, HISTORY_LISTED)
+        ],
+    }
+
+
+def history_item(req: Request, kept_id: str) -> Json:
+    missing = "There's no question with that number in your history."
+    found = history.get(req.config, _row_id(kept_id, missing))
+    if found is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, missing)
+    # ids change when files are indexed again, so they're looked up now
+    dates = []
+    for d in found.sources.get("dates", []):
+        day = date.fromisoformat(d["date"])
+        rows = store.entries_in_range(req.conn, day, day)
+        dates.append({**d, "id": rows[0]["id"] if rows else None})
+    notes = []
+    for title in found.sources.get("notes", []):
+        matches = store.find_notes(req.conn, title)
+        notes.append({"title": title, "id": matches[0]["id"] if matches else None})
+    return {**found.as_json(), "sources": {"dates": dates, "notes": notes}}
+
+
 def profile_page(req: Request) -> Json:
     conn, cfg = req.conn, req.config
     found = profile.current(conn)
@@ -738,6 +770,8 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/profile"), profile_page),
     (re.compile(r"/api/metrics"), metrics),
     (re.compile(r"/api/compare"), comparison),
+    (re.compile(r"/api/history"), history_list),
+    (re.compile(r"/api/history/(\d+)"), history_item),
     (re.compile(r"/api/review/([^/]+)"), review_page),
     (re.compile(r"/api/metrics/(.+)"), metric),
     (re.compile(r"/api/search"), search),
@@ -819,9 +853,10 @@ class _Handler(BaseHTTPRequestHandler):
         params = {k: v[-1] for k, v in parse_qs(query_string).items()}
         config = self.server.config
         try:
-            question, history = _ask_params(params)
+            question, turns = _ask_params(params)
             with closing(db.connect_readonly(config)) as conn:
                 only, since, until = _ask_scope(Request(config, conn, params, self.server.make_client))
+                scope = history.scope_text(conn, only, since, until)
         except ApiError as exc:
             self._send_json(exc.status, {"error": str(exc)})
             return
@@ -847,10 +882,10 @@ class _Handler(BaseHTTPRequestHandler):
                 with closing(db.connect_readonly(config)) as conn:
                     client = self.server.make_client(config)
                     standalone = question
-                    if history:
+                    if turns:
                         send("stage", {"text": "Resolving your follow-up..."})
                         standalone = query.contextualize_question(
-                            question, history, config, client, profile.names(conn, config)
+                            question, turns, config, client, profile.names(conn, config)
                         )
                         if standalone != question:
                             send("rewritten", {"question": standalone})
@@ -860,7 +895,15 @@ class _Handler(BaseHTTPRequestHandler):
                         since=since, until=until, only=only,
                         on_text=lambda text: send("text", {"text": text}),
                     )
-                    send("answer", {"question": standalone, **serialize.answer_json(conn, result)})
+                    asked = params.get("conversation", "")
+                    kept = history.record(
+                        config, question, result, "browse",
+                        asked if history.valid_conversation(asked) else history.new_conversation(),
+                        standalone, scope,
+                    )
+                    send("answer", {
+                        "question": standalone, **serialize.answer_json(conn, result), "history_id": kept,
+                    })
             except JournalError as exc:
                 send("problem", {"error": str(exc)})
             except sqlite3.Error as exc:

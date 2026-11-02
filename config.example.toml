@@ -148,3 +148,12 @@ raw_text = true                   # entry and note text; false leaves summaries,
 exclude_tags = []                 # e.g. ["therapy", "health"]
 exclude_kinds = []                # kinds of note (their folder) to leave out, e.g. ["health"]
 tools = []                        # only these tools, e.g. ["search", "day", "mood"]; empty means all
+
+[history]
+# Keep your questions and their answers so you can read them again and pick a
+# chat back up. Off unless you turn it on. They go in a file of their own,
+# and `journal history --clear` deletes it.
+enabled = false
+path = ""                         # empty puts journal-history.db next to the cache; never inside the vault
+keep = 500                        # the newest questions kept; older ones are deleted
+forget_after_days = 0             # also delete questions older than this; 0 leaves it to keep

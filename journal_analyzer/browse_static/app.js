@@ -135,6 +135,7 @@ const href = {
   files: (params) => `#/files${query(params)}`,
   search: (q) => `#/search${query({ q })}`,
   ask: (q, scope) => `#/ask${query({ q, ...scope })}`,
+  history: (id) => `#/history/${id}`,
 };
 
 function query(params) {
@@ -1630,7 +1631,7 @@ const SCOPE_KEYS = ["note", "tag", "group", "from", "to"];
 
 // Kept outside the view so a question keeps running, and the conversation
 // stays, while you look at the entries it cites.
-const ask = { turns: loadTurns(), scope: loadScope(), controller: null, redraw: null };
+const ask = { turns: loadTurns(), scope: loadScope(), conversation: loadConversation(), controller: null, redraw: null };
 
 function loadTurns() {
   try {
@@ -1640,6 +1641,20 @@ function loadTurns() {
   } catch {
     return [];
   }
+}
+
+// so the question history, when it's on, keeps a conversation's turns together
+function loadConversation() {
+  try {
+    return sessionStorage.getItem("ask-conversation") || newConversation();
+  } catch {
+    return newConversation();
+  }
+}
+
+function newConversation() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function loadScope() {
@@ -1654,6 +1669,7 @@ function saveTurns() {
   try {
     sessionStorage.setItem("ask-turns", JSON.stringify(ask.turns));
     sessionStorage.setItem("ask-scope", JSON.stringify(ask.scope));
+    sessionStorage.setItem("ask-conversation", ask.conversation);
   } catch {
     // storage can be full or refused; the conversation still works for this visit
   }
@@ -1741,7 +1757,10 @@ async function askQuestion(question) {
   ask.controller = controller;
   changed();
   try {
-    const params = { q: question, history: history.length ? JSON.stringify(history) : "", ...scopeParams(turn.scope) };
+    const params = {
+      q: question, history: history.length ? JSON.stringify(history) : "", conversation: ask.conversation,
+      ...scopeParams(turn.scope),
+    };
     const response = await fetch(`/api/ask${query(params)}`, {
       headers: { Accept: "text/event-stream" }, signal: controller.signal,
     });
@@ -1885,6 +1904,7 @@ async function askView(_, params) {
   });
   reset.addEventListener("click", () => {
     ask.turns = [];
+    ask.conversation = newConversation();
     changed();
     input.focus();
   });
@@ -1902,7 +1922,44 @@ async function askView(_, params) {
       eyebrow: "Questions about your journal", title: "Ask",
       lede: "Ask in plain words. The answer cites the days and notes it drew on, and you can open each one.",
     }),
-    thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset));
+    thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset), earlierQuestions());
+}
+
+// filled in once the list arrives, so the Ask page doesn't wait on it
+function earlierQuestions() {
+  const slot = h("div", {});
+  api("history").then((data) => {
+    if (!data.items.length) return;
+    fill(slot, section("Earlier questions", [
+      h("ol", { class: "lines" }, data.items.map((k) => h("li", {},
+        h("a", { class: "line", href: href.history(k.id) },
+          h("span", { class: "line-date" }, stamp(k.asked_at)),
+          h("span", { "aria-hidden": "true" }),
+          h("span", { class: "line-summary" }, k.question),
+          k.scope ? h("span", { class: "line-tags" }, `only ${k.scope}`) : null)))),
+      h("p", { class: "section-note" }, data.enabled
+        ? ["Kept because [history] is on in config.toml. ", h("code", {}, "journal history --delete N"), " forgets one, and ", h("code", {}, "journal history --clear"), " deletes them all for good."]
+        : ["History is off, so nothing new is kept, but these still are. ", h("code", {}, "journal history --clear"), " deletes them for good."]),
+    ], { note: plural(data.items.length, "question") }));
+  }).catch(() => {});
+  return slot;
+}
+
+async function historyView([id]) {
+  const k = await api(`history/${id}`);
+  document.title = `${k.question} · Commonplace`;
+  const where = { ask: "journal ask", chat: "journal chat", browse: "this browser" }[k.source] || k.source;
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: "#/ask" }, "Earlier question"),
+      title: k.question,
+      meta: [h("span", {}, `asked ${stamp(k.asked_at)} in ${where}`), k.scope ? h("span", {}, `only ${k.scope}`) : null],
+    }),
+    k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
+    h("div", { class: "turn-answer" }, k.answer.replace(/\n\nSources: .*$/s, "")),
+    sourceChips(k),
+    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}. The days and notes it cited may have changed since.`),
+    h("p", { class: "section-note" }, h("code", {}, `journal history --delete ${k.id}`), " forgets this one for good."));
 }
 
 // ---------------------------------------------------------------- you
@@ -2015,6 +2072,7 @@ const routes = [
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],
+  [/^\/history\/(\d+)$/, historyView, "ask"],
   [/^\/you$/, youView, "you"],
 ];
 

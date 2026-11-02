@@ -101,6 +101,7 @@ journal watch             # keeps running and indexes notes as you save them (an
 
 # reflection
 journal chat              # Q&A that remembers the last few turns
+journal history           # earlier questions and answers, with [history] enabled = true
 journal insights          # mood, tag and timing patterns you didn't ask about
 journal prompt            # ideas for what to write next, from threads left open
 journal review 2025       # the year in review, as Markdown (or a month, 2025-03, or a week, 2025-W10)
@@ -238,6 +239,24 @@ The browser has the same review as a page, `#/review/2025-03` and so on, linked 
 `journal compare 2024 2025` puts two periods side by side: entries, days written, words, average mood, the longest streak and the average of each number you keep in frontmatter, then the tags you wrote more and less of, the notes you linked more and less, and the notes that are new or no longer linked. Periods are years, months (`2025-03`) or ISO weeks (`2025-W10`), and with one period it compares it with the one just before, so `journal compare 2025-03` is February against March. Tags and notes are compared by the share of each period's entries they're on, since a busy month would otherwise seem to have more of everything, and one needs at least 2 entries in a period to count as rising, falling, new or gone. It makes no model calls, and takes `--json`.
 
 `journal prompt` looks back over recent entries (14 days by default, or `--days N`) and suggests open-ended writing prompts that pick up loose threads, like a project you named, a person who keeps coming up, or a feeling you left unresolved. `--count N` sets how many. It only reads the cache and never touches your notes.
+
+## Question history
+
+Answers aren't kept anywhere unless you ask for that, since they're made of your journal. Set `[history] enabled = true` and every question you ask with `journal ask`, `journal chat` or the browser's Ask page is kept with its answer, so you can read it again:
+
+```sh
+journal history               # the questions you asked, newest first
+journal history 12            # question 12 and its answer again
+journal history --delete 12   # forget that one for good
+journal history --clear       # delete the whole history file (asks first; --yes doesn't)
+journal chat --resume         # pick your last chat back up where it stopped
+```
+
+They go in a file of their own, `journal-history.db` next to the cache (`[history] path` moves it, but never into the vault), so rebuilding the cache leaves them alone and deleting that file deletes all of them. It's made the first time a question is kept, with the same private permissions as the cache, and listing it never creates it. Only what you need to read an answer again goes in: the question, how a follow-up was read, what it was kept to (`--about`, dates and so on), the answer with its Sources line, and which days and notes it cited. Not the entries it read, and not the sentences quoted from them.
+
+Deleting really deletes: rows are overwritten rather than left in the file's free space, and the file keeps no `-wal` journal holding older copies. `keep` (500) is how many questions it holds before the oldest go, and `forget_after_days` (0, off) also drops the ones older than that. If you turn history off again, nothing new is kept, but the file stays until you run `journal history --clear`; `journal history` and `journal stats` remind you it's there. Questions asked through `journal mcp` are never kept, since the app on the other end keeps its own.
+
+With it on, the browser's Ask page lists your earlier questions, and each opens on a page of its own with its answer and sources. The browser doesn't delete them, since it only ever reads; use `journal history`.
 
 ## Longer summaries
 

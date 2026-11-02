@@ -29,6 +29,7 @@ from . import (
     embedder,
     export,
     fields,
+    history,
     ingester,
     insights,
     links,
@@ -570,8 +571,12 @@ def ask(
                 question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status),
                 since=date_from, until=date_to, only=only, on_text=stream,
             )
+        kept = history.record(
+            cfg, question, result, "ask", history.new_conversation(),
+            scope=history.scope_text(conn, only, date_from, date_to),
+        )
         if as_json:
-            _emit({"question": question, **serialize.answer_json(conn, result)})
+            _emit({"question": question, **serialize.answer_json(conn, result), "history_id": kept})
             return
         assert stream is not None
         _print_answer(conn, result, "answered by stage", streamed=stream.started)
@@ -760,11 +765,16 @@ def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     with _guard(), _open(config) as (cfg, conn):
         s = store.stats(conn)
         kept = memo.stats(cfg)
+        asked = history.stats(cfg)
         if as_json:
             _emit({
                 **asdict(s),
                 "memo": None if kept is None else {
                     "path": str(memo.memo_path(cfg)), "results": kept[0], "bytes": kept[1],
+                },
+                "history": None if asked is None else {
+                    "path": str(history.history_path(cfg)), "questions": asked[0], "bytes": asked[1],
+                    "enabled": cfg.history.enabled,
                 },
                 "db_path": str(cfg.db.path),
                 "db_bytes": cfg.db.path.stat().st_size if cfg.db.path.exists() else 0,
@@ -795,6 +805,12 @@ def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             )
         elif not cfg.db.memo:
             console.print("Model memo      : off")
+        if asked is not None:
+            console.print(
+                f"Question history: {_count(asked[0], 'question')}, {asked[1] / BYTES_PER_MB:.2f} MB "
+                f"({escape(str(history.history_path(cfg)))})"
+                + ("" if cfg.history.enabled else ", and history is off: 'journal history --clear' deletes it")
+            )
         for row in store.errored_files(conn):
             console.print(
                 f"  [red]error[/red] {escape(row['path'])}: "
@@ -1972,6 +1988,107 @@ def review_cmd(
         console.print(f"Wrote the {built.title} review to {escape(str(written))}")
 
 
+_HISTORY_OFF = (
+    "History is off, so no questions are kept. Set [history] enabled = true in "
+    "config.toml to keep them."
+)
+
+
+@app.command(name="history")
+def history_cmd(
+    kept_id: Annotated[
+        int | None, typer.Argument(help="Show this question and its answer again.", show_default=False)
+    ] = None,
+    config: ConfigOpt = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="How many questions to list.")] = 20,
+    delete: Annotated[
+        int | None, typer.Option("--delete", help="Forget this question and its answer for good.", show_default=False)
+    ] = None,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Delete the whole history file, and everything in it, for good.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Don't ask before --clear.")] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Your earlier questions and answers, kept with [history] enabled = true."""
+    OUT.as_json = as_json
+    with _guard():
+        cfg = load_config(config)
+        path = history.history_path(cfg)
+        if clear:
+            if not path.is_file():
+                if as_json:
+                    _emit({"cleared": 0, "path": str(path)})
+                else:
+                    console.print("There's no history file, so there's nothing to delete.")
+                return
+            if not yes:
+                if as_json:
+                    _fail("--clear with --json needs --yes, since there's no one to ask.")
+                if not typer.confirm(f"Delete {path} and every question in it, for good?"):
+                    raise typer.Exit(1)
+            try:
+                held = history.clear(cfg)
+            except OSError as exc:
+                _fail(f"Couldn't delete {path}: {exc}. Is 'journal browse' or 'journal chat' still running?")
+            if as_json:
+                _emit({"cleared": held, "path": str(path)})
+            else:
+                what = "" if held is None else f", and the {_count(held, 'question')} in it"
+                console.print(f"Deleted {path}{what}.")
+            return
+        if delete is not None:
+            if not history.delete(cfg, delete):
+                _fail(f"There's no question {delete} in your history.", red=False)
+            if as_json:
+                _emit({"deleted": delete})
+            else:
+                console.print(f"Forgot question {delete} and its answer.")
+            return
+        if kept_id is not None:
+            found = history.get(cfg, kept_id)
+            if found is None:
+                _fail(f"There's no question {kept_id} in your history.", red=False)
+            if as_json:
+                _emit(found.as_json())
+                return
+            console.print(f"[bold cyan]{escape(found.question)}[/bold cyan]")
+            details = [f"asked {_when(found.asked_at)} in journal {found.source}"]
+            if found.scope:
+                details.append(f"only {found.scope}")
+            console.print(f"[dim]{escape('; '.join(details))}[/dim]")
+            if found.standalone:
+                console.print(f"[dim]read as: {escape(found.standalone)}[/dim]")
+            console.print()
+            console.print(escape(found.answer))
+            console.print(f"[dim](answered by stage: {found.stage})[/dim]")
+            return
+        rows = history.recent(cfg, limit)
+        if as_json:
+            _emit({
+                "enabled": cfg.history.enabled, "path": str(path),
+                "questions": [r.as_json() for r in rows],
+            })
+            return
+        if not rows:
+            console.print(_HISTORY_OFF if not cfg.history.enabled else "No questions kept yet.")
+            return
+        table = Table(title="Questions you asked, newest first")
+        table.add_column("#", justify="right", style="cyan")
+        table.add_column("When", no_wrap=True)
+        table.add_column("Question")
+        table.add_column("From")
+        for r in rows:
+            table.add_row(str(r.id), _when(r.asked_at), escape(r.question), r.source)
+        console.print(table)
+        console.print("[dim]'journal history N' shows one again; --delete N forgets one, --clear all of them.[/dim]")
+        if not cfg.history.enabled:
+            console.print(
+                "[yellow]History is off, so nothing new is kept, but these still are. "
+                "'journal history --clear' deletes them.[/yellow]"
+            )
+
+
 @app.command(name="insights")
 def insights_cmd(
     config: ConfigOpt = None,
@@ -1999,12 +2116,23 @@ def chat(
     about: AboutOpt = None,
     tag: TagOpt = None,
     group: GroupOpt = None,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", help="Pick up your last chat from the history ([history] enabled = true)."),
+    ] = False,
 ) -> None:
     """Ask questions with follow-ups. The filters apply to every question."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag, group)
-        _chat_loop(cfg, conn, OllamaClient(cfg), date_from, date_to, only)
+        earlier: list[history.Kept] = []
+        if resume:
+            if not cfg.history.enabled:
+                _fail(_HISTORY_OFF, red=False)
+            earlier = history.last_conversation(cfg, "chat")
+            if not earlier:
+                console.print("[dim]There's no earlier chat in your history, so this starts fresh.[/dim]")
+        _chat_loop(cfg, conn, OllamaClient(cfg), date_from, date_to, only, earlier)
 
 
 def _chat_loop(
@@ -2014,12 +2142,21 @@ def _chat_loop(
     since: date | None = None,
     until: date | None = None,
     only: store.EntryFilter | None = None,
+    earlier: list[history.Kept] | None = None,
 ) -> None:
     console.print(
         "Follow-ups like 'what about the month after that?' work. Type 'sources' to "
         "see what the last answer read, and 'exit' or Ctrl-D to quit."
     )
-    history: list[tuple[str, str]] = []
+    turns: list[tuple[str, str]] = [(k.standalone or k.question, k.answer) for k in earlier or []]
+    del turns[: -query.CHAT_HISTORY_TURNS]
+    conversation = earlier[-1].conversation if earlier else history.new_conversation()
+    if earlier:
+        console.print(
+            f"[dim]Picking up from {_when(earlier[-1].asked_at)}, after "
+            f"\"{escape(earlier[-1].question)}\".[/dim]"
+        )
+    scope = history.scope_text(conn, only, since, until)
     last: Answer | None = None
     while True:
         try:
@@ -2040,10 +2177,10 @@ def _chat_loop(
             continue
         stream: _Streamed | None = None
         try:
-            with _working("Resolving your follow-up..." if history else "Thinking...") as status:
+            with _working("Resolving your follow-up..." if turns else "Thinking...") as status:
                 stream = _Streamed(status)
                 standalone = query.contextualize_question(
-                    question, history, cfg, client, profile.names(conn, cfg)
+                    question, turns, cfg, client, profile.names(conn, cfg)
                 )
                 result = query.answer(
                     standalone, cfg, conn, client, on_stage=_show_stage(status),
@@ -2062,9 +2199,10 @@ def _chat_loop(
             continue
         _print_answer(conn, result, "stage", streamed=stream.started)
         last = result
+        history.record(cfg, question, result, "chat", conversation, standalone, scope)
         # keep the rewritten question so the next follow-up can build on it
-        history.append((standalone, result.text))
-        del history[: -query.CHAT_HISTORY_TURNS]
+        turns.append((standalone, result.text))
+        del turns[: -query.CHAT_HISTORY_TURNS]
 
 
 @app.command()
