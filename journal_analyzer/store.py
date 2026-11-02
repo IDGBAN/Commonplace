@@ -1339,6 +1339,45 @@ def notes_linked_with(
     )
 
 
+def note_graph(
+    conn: sqlite3.Connection,
+    limit: int,
+    min_shared: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    kind: str | None = None,
+) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+    """The `limit` notes linked from the most entries, and the pairs of them
+    linked from at least `min_shared` of the same entries, as (nodes, edges).
+    Nodes have id, title, kind and n; edges a, b (note ids, a < b) and n."""
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    if kind:
+        clauses.append("n.kind = ?")
+        params.append(kind.casefold())
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    # one pass over the links in range, shared by both queries
+    linked = f"""SELECT DISTINCT ee.entry_id, ee.entity_id FROM entry_entities ee
+                 JOIN entries e ON e.id = ee.entry_id JOIN notes n ON n.id = ee.entity_id {where}"""
+    nodes = conn.execute(
+        f"""WITH linked AS ({linked})
+            SELECT n.id, n.title, n.kind, COUNT(*) AS n
+            FROM linked l JOIN notes n ON n.id = l.entity_id
+            GROUP BY n.id ORDER BY n DESC, n.title COLLATE NOCASE LIMIT ?""",
+        [*params, limit],
+    ).fetchall()
+    ids = _json_list([r["id"] for r in nodes])
+    edges = conn.execute(
+        f"""WITH linked AS ({linked}),
+                 shown AS (SELECT * FROM linked WHERE entity_id IN ({_JSON_VALUES}))
+            SELECT a.entity_id AS a, b.entity_id AS b, COUNT(*) AS n
+            FROM shown a JOIN shown b ON b.entry_id = a.entry_id AND b.entity_id > a.entity_id
+            GROUP BY a.entity_id, b.entity_id HAVING COUNT(*) >= ?
+            ORDER BY n DESC, a, b""",
+        [*params, ids, min_shared],
+    ).fetchall()
+    return list(nodes), list(edges)
+
+
 def note_outlinks(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(

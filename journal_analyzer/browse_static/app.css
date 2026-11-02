@@ -41,6 +41,12 @@
   --q6: #013886;
   --metric: #345ea1;
 
+  /* the note map's kinds: three slots that stay apart in every pair, and gray for the rest */
+  --k1: #2a78d6;
+  --k2: #eb6834;
+  --k3: #1baf7a;
+  --k-other: #9a9d99;
+
   --read: "Sitka Text", "Iowan Old Style", Charter, "Bitstream Charter", Cambria, Georgia, serif;
   --display: "Sitka Heading", "Sitka Display", "Iowan Old Style", Charter, Cambria, Georgia, serif;
   --gloss: "Bahnschrift SemiCondensed", Bahnschrift, "DIN Alternate", "Avenir Next Condensed",
@@ -86,6 +92,10 @@
     --q5: #85abe5;
     --q6: #96bffe;
     --metric: #5b86cb;
+    --k1: #3987e5;
+    --k2: #d95926;
+    --k3: #199e70;
+    --k-other: #6b7076;
     color-scheme: dark;
   }
 }
@@ -122,6 +132,10 @@
   --q5: #85abe5;
   --q6: #96bffe;
   --metric: #5b86cb;
+  --k1: #3987e5;
+  --k2: #d95926;
+  --k3: #199e70;
+  --k-other: #6b7076;
   color-scheme: dark;
 }
 
@@ -669,3 +683,21 @@ code { font: 0.88em var(--mono); background: var(--paper-sunk); padding: 0.05rem
 .chart-pair { display: grid; gap: 1.2rem; }
 .chart-pair h3 { margin: 0 0 0.3rem; font: 600 0.8rem/1.3 var(--gloss); color: var(--ink-faint); letter-spacing: 0.02em; }
 ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.45rem; max-width: var(--measure); line-height: 1.5; }
+
+.map-wrap .note-map { display: block; width: 100%; min-width: 640px; height: auto; }
+.note-map .map-edge { stroke: var(--ink-faint); stroke-opacity: 0.45; stroke-linecap: round; }
+.note-map circle { stroke: var(--paper); stroke-width: 2; }
+.note-map .k1, .map-swatch.k1 { fill: var(--k1); background: var(--k1); }
+.note-map .k2, .map-swatch.k2 { fill: var(--k2); background: var(--k2); }
+.note-map .k3, .map-swatch.k3 { fill: var(--k3); background: var(--k3); }
+.note-map .k-other, .map-swatch.k-other { fill: var(--k-other); background: var(--k-other); }
+.note-map text { fill: var(--ink); font: 12px var(--gloss); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; display: none; pointer-events: none; }
+.note-map .labelled text, .note-map .map-node:hover text, .note-map .map-node:focus text { display: inline; }
+.note-map .map-node:focus { outline: none; }
+.note-map .map-node:focus circle, .note-map .map-node:hover circle { stroke: var(--ink); }
+.note-map.focusing .map-node:not(.near), .note-map.focusing .map-edge:not(.near) { opacity: 0.18; }
+.note-map.focusing .map-node.near text { display: inline; }
+.note-map.focusing .map-edge.near { stroke-opacity: 0.9; }
+.map-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; align-items: center; margin: 0 0 0.6rem; font-size: 0.86rem; color: var(--ink-soft); }
+.map-legend > span { display: inline-flex; align-items: center; gap: 0.4rem; }
+.map-swatch { width: 0.75rem; height: 0.75rem; border-radius: 50%; display: inline-block; }

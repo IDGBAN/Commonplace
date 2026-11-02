@@ -61,6 +61,11 @@ GROUP_VALUES_LIMIT = 30
 PROFILE_FACTS_LIMIT = 300
 # highest and lowest days shown on a metric's page
 METRIC_DAYS_SHOWN = 5
+# the note map: how many notes by default and at most, and how many entries
+# two of them have to share to be joined
+MAP_NOTES = 40
+MAP_NOTES_MAX = 150
+MAP_MIN_SHARED = 2
 _MAX_ROWID = 2**63 - 1
 _OTHER_SITES = frozenset({"cross-site", "same-site"})
 _NO_ENTRY = "There is no indexed entry with that id."
@@ -605,6 +610,24 @@ def review_page(req: Request, period: str) -> Json:
     return {**review.to_json(req.conn, built), "mood_scale": req.config.indexing.mood_scale_max}
 
 
+def graph(req: Request) -> Json:
+    """The notes linked most, and which of them turn up in the same entries."""
+    date_from, date_to = req.day("from"), req.day("to")
+    kind = req.params.get("kind", "").strip() or None
+    nodes, edges = store.note_graph(
+        req.conn,
+        req.number("limit", MAP_NOTES, 1, MAP_NOTES_MAX),
+        req.number("min", MAP_MIN_SHARED, 1, 1000),
+        date_from, date_to, kind,
+    )
+    return {
+        "nodes": [dict(r) for r in nodes],
+        "edges": [dict(r) for r in edges],
+        "kinds": [dict(r) for r in store.notes_by_kind(req.conn)],
+        "min_shared": req.number("min", MAP_MIN_SHARED, 1, 1000),
+    }
+
+
 HISTORY_LISTED = 30
 
 
@@ -770,6 +793,7 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/profile"), profile_page),
     (re.compile(r"/api/metrics"), metrics),
     (re.compile(r"/api/compare"), comparison),
+    (re.compile(r"/api/graph"), graph),
     (re.compile(r"/api/history"), history_list),
     (re.compile(r"/api/history/(\d+)"), history_item),
     (re.compile(r"/api/review/([^/]+)"), review_page),

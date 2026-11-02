@@ -123,6 +123,7 @@ const href = {
   entries: (params) => `#/entries${query(params)}`,
   entry: (id, params) => `#/entry/${id}${query(params)}`,
   notes: (params) => `#/notes${query(params)}`,
+  map: (params) => `#/map${query(params)}`,
   note: (id, params) => `#/note/${id}${query(params)}`,
   tags: () => "#/tags",
   metrics: () => "#/metrics",
@@ -995,6 +996,7 @@ async function notesView(_, params) {
       eyebrow: "Reference notes",
       title: "Notes",
       lede: "The undated notes about people, places and topics. A note's kind is the folder it sits in. Mentions come only from links in your entries.",
+      meta: [h("a", { href: href.map() }, "See them as a map")],
     }),
     h("div", { class: "filters", role: "search" }, field("Filter", filter, true), h("div", { class: "field" }, h("span", {}, "Kind"), kinds)),
     body,
@@ -1380,6 +1382,198 @@ async function searchView(_, params) {
     h("div", { class: "search-box", role: "search" }, input, go),
     status,
     results);
+}
+
+// ---------------------------------------------------------------- note map
+
+// A graph puts any two kinds side by side, and only three colours stay
+// distinct for everyone in every pair, so the rest share one gray.
+const MAP_KIND_SLOTS = 3;
+const MAP_LABELLED = 12;
+const MAP_STEPS = 300;
+const MAP_WIDTH = 900;
+const MAP_HEIGHT = 560;
+const MAP_SIZES = [25, 40, 80, 150];
+
+// Fruchterman-Reingold, started from a circle in order of size so the same
+// notes always land in the same places
+function mapLayout(nodes, edges) {
+  const n = nodes.length;
+  const cx = MAP_WIDTH / 2;
+  const cy = MAP_HEIGHT / 2;
+  const pos = nodes.map((_, i) => {
+    const a = (i / Math.max(1, n)) * 2 * Math.PI;
+    return { x: cx + Math.cos(a) * MAP_WIDTH * 0.32, y: cy + Math.sin(a) * MAP_HEIGHT * 0.32 };
+  });
+  if (n < 2) return pos.map(() => ({ x: cx, y: cy }));
+  const at = new Map(nodes.map((node, i) => [node.id, i]));
+  const most = Math.max(...edges.map((e) => e.n), 1);
+  const k = Math.sqrt((MAP_WIDTH * MAP_HEIGHT) / n) * 0.55;
+  for (let step = 0; step < MAP_STEPS; step++) {
+    const heat = (MAP_WIDTH / 12) * (1 - step / MAP_STEPS) + 0.5;
+    const move = pos.map(() => ({ x: 0, y: 0 }));
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = pos[i].x - pos[j].x;
+        const dy = pos[i].y - pos[j].y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        const push = (k * k) / d;
+        move[i].x += (dx / d) * push; move[i].y += (dy / d) * push;
+        move[j].x -= (dx / d) * push; move[j].y -= (dy / d) * push;
+      }
+    }
+    for (const e of edges) {
+      const i = at.get(e.a);
+      const j = at.get(e.b);
+      const dx = pos[i].x - pos[j].x;
+      const dy = pos[i].y - pos[j].y;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      const pull = ((d * d) / k) * (0.3 + 0.7 * (e.n / most));
+      move[i].x -= (dx / d) * pull; move[i].y -= (dy / d) * pull;
+      move[j].x += (dx / d) * pull; move[j].y += (dy / d) * pull;
+    }
+    pos.forEach((p, i) => {
+      // a little gravity keeps notes with no pairs from drifting off
+      move[i].x += (cx - p.x) * 0.05 * k / 40;
+      move[i].y += (cy - p.y) * 0.05 * k / 40;
+      const len = Math.max(1, Math.hypot(move[i].x, move[i].y));
+      p.x = Math.min(MAP_WIDTH - 40, Math.max(40, p.x + (move[i].x / len) * Math.min(len, heat)));
+      p.y = Math.min(MAP_HEIGHT - 24, Math.max(24, p.y + (move[i].y / len) * Math.min(len, heat)));
+    });
+  }
+  return pos;
+}
+
+function noteMap(data) {
+  const { nodes, edges } = data;
+  const counts = new Map();
+  for (const node of nodes) counts.set(node.kind, (counts.get(node.kind) || 0) + 1);
+  const slotted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, MAP_KIND_SLOTS).map(([k]) => k);
+  const kindClass = (kind) => (slotted.includes(kind) ? `k${slotted.indexOf(kind) + 1}` : "k-other");
+  const pos = mapLayout(nodes, edges);
+  const most = Math.max(...nodes.map((x) => x.n), 1);
+  const radius = (x) => 4 + 12 * Math.sqrt(x.n / most);
+  const mostShared = Math.max(...edges.map((e) => e.n), 1);
+  const at = new Map(nodes.map((x, i) => [x.id, i]));
+  const labelled = new Set(nodes.slice(0, MAP_LABELLED).map((x) => x.id));
+  const neighbours = new Map(nodes.map((x) => [x.id, new Set([x.id])]));
+  for (const e of edges) {
+    neighbours.get(e.a).add(e.b);
+    neighbours.get(e.b).add(e.a);
+  }
+
+  const chart = svg("svg", {
+    class: "note-map", viewBox: `0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`, role: "group",
+    "aria-label": `${plural(nodes.length, "note")} and the ${plural(edges.length, "pair")} of them linked from the same entries`,
+  });
+  const lines = edges.map((e) => {
+    const a = pos[at.get(e.a)];
+    const b = pos[at.get(e.b)];
+    return svg("line", {
+      class: "map-edge", x1: a.x, y1: a.y, x2: b.x, y2: b.y, "data-a": e.a, "data-b": e.b,
+      "stroke-width": 1 + 3 * ((e.n - data.min_shared) / Math.max(1, mostShared - data.min_shared)),
+    });
+  });
+  chart.append(svg("g", { "aria-hidden": "true" }, lines));
+
+  const marks = nodes.map((x, i) => {
+    const p = pos[i];
+    const r = radius(x);
+    const left = p.x > MAP_WIDTH - 140;
+    const mark = svg("a", {
+      class: labelled.has(x.id) ? "map-node labelled" : "map-node", href: href.note(x.id), "data-id": x.id,
+      "aria-label": `${x.title}, ${kindLabel(x.kind)}, linked from ${plural(x.n, "entry", "entries")}`,
+    },
+      svg("title", {}, `${x.title} (${kindLabel(x.kind)}): ${plural(x.n, "entry", "entries")}`),
+      svg("circle", { class: kindClass(x.kind), cx: p.x, cy: p.y, r }),
+      svg("text", { x: left ? p.x - r - 4 : p.x + r + 4, y: p.y + 4, "text-anchor": left ? "end" : "start" }, x.title));
+    const near = () => {
+      chart.classList.add("focusing");
+      const close = neighbours.get(x.id);
+      for (const m of marks) m.classList.toggle("near", close.has(Number(m.dataset.id)));
+      for (const line of lines) line.classList.toggle("near", Number(line.dataset.a) === x.id || Number(line.dataset.b) === x.id);
+    };
+    const away = () => chart.classList.remove("focusing");
+    mark.addEventListener("mouseenter", near);
+    mark.addEventListener("focus", near);
+    mark.addEventListener("mouseleave", away);
+    mark.addEventListener("blur", away);
+    return mark;
+  });
+  // biggest last, so they're drawn on top
+  chart.append(svg("g", {}, [...marks].reverse()));
+
+  const others = [...counts.keys()].filter((k) => !slotted.includes(k));
+  const legend = h("div", { class: "map-legend" },
+    slotted.map((k) => h("span", {}, h("span", { class: `map-swatch ${kindClass(k)}`, "aria-hidden": "true" }), `${kindLabel(k)} (${fmtNum(counts.get(k))})`)),
+    others.length ? h("span", {}, h("span", { class: "map-swatch k-other", "aria-hidden": "true" }),
+      `${others.map(kindLabel).join(", ")} (${fmtNum(others.reduce((sum, k) => sum + counts.get(k), 0))})`) : null,
+    h("span", { class: "quiet" }, "Bigger dots are linked from more entries; thicker lines join notes that share more."));
+
+  const byId = new Map(nodes.map((x) => [x.id, x]));
+  const table = h("details", { class: "turn-read" },
+    h("summary", {}, "As a table"),
+    edges.length
+      ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, h("th", {}, "Note"), h("th", {}, "and"), h("th", { class: "num" }, "Shared entries"))),
+        h("tbody", {}, edges.map((e) => h("tr", {},
+          h("td", {}, h("a", { href: href.note(e.a) }, byId.get(e.a).title)),
+          h("td", {}, h("a", { href: href.note(e.b) }, byId.get(e.b).title)),
+          h("td", { class: "num" }, fmtNum(e.n)))))))
+      : empty("No two of these notes share an entry."));
+  return [legend, h("div", { class: "chart-wrap map-wrap" }, chart), table];
+}
+
+async function mapView(_, params) {
+  const cat = await getCatalog();
+  document.title = "Note map · Commonplace";
+  const state = {
+    kind: params.get("kind") || "", year: params.get("year") || "",
+    limit: MAP_SIZES.includes(Number(params.get("limit"))) ? Number(params.get("limit")) : 40,
+  };
+  const years = [...new Set(cat.entries.map((e) => e.date.slice(0, 4)))].sort().reverse();
+  const kinds = [...new Set(cat.notes.map((n) => n.kind))].sort();
+  const kindSelect = h("select", {}, h("option", { value: "" }, "Every kind"),
+    kinds.map((k) => h("option", { value: k, selected: k === state.kind }, kindLabel(k))));
+  const yearSelect = h("select", {}, h("option", { value: "" }, "All years"),
+    years.map((y) => h("option", { value: y, selected: y === state.year }, y)));
+  const sizeSelect = h("select", {}, MAP_SIZES.map((n) => h("option", { value: n, selected: n === state.limit }, `${n} notes`)));
+  const body = h("div", {});
+  let token = 0;
+
+  async function load() {
+    const mine = ++token;
+    replaceParams("/map", { kind: state.kind, year: state.year, limit: state.limit === 40 ? "" : state.limit });
+    fill(body, h("p", { class: "search-status", role: "status" }, "Laying out the notes…"));
+    const data = await api("graph", {
+      kind: state.kind, limit: state.limit,
+      from: state.year && `${state.year}-01-01`, to: state.year && `${state.year}-12-31`,
+    }).catch((err) => ({ error: err }));
+    if (mine !== token) return;
+    if (data.error) {
+      fill(body, h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't draw the map"), data.error.message));
+      return;
+    }
+    if (!data.nodes.length) {
+      fill(body, empty(state.kind || state.year ? "No entry links a note like that in this range." : "No entry links a note yet. Notes come from the folders in notes.paths."));
+      return;
+    }
+    fill(body, noteMap(data));
+  }
+
+  const change = (key, el, number = false) => () => { state[key] = number ? Number(el.value) : el.value; load(); };
+  kindSelect.addEventListener("change", change("kind", kindSelect));
+  yearSelect.addEventListener("change", change("year", yearSelect));
+  sizeSelect.addEventListener("change", change("limit", sizeSelect, true));
+  load();
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.notes() }, "Notes"),
+      title: "Note map",
+      lede: "The notes you link most, joined when the same entries link both. Point at one to see who and what it turns up with, or open it.",
+    }),
+    h("div", { class: "filters", role: "search" }, field("Kind", kindSelect), field("Years", yearSelect), field("Show", sizeSelect)),
+    body);
 }
 
 // ---------------------------------------------------------------- compare and review
@@ -2060,6 +2254,7 @@ const routes = [
   [/^\/entries$/, entriesView, "entries"],
   [/^\/entry\/(\d+)$/, entryView, "entries"],
   [/^\/notes$/, notesView, "notes"],
+  [/^\/map$/, mapView, "notes"],
   [/^\/note\/(\d+)$/, noteView, "notes"],
   [/^\/tags$/, tagsView, "tags"],
   [/^\/tag\/(.+)$/, tagView, "tags"],
