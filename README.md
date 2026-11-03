@@ -103,6 +103,8 @@ journal watch             # keeps running and indexes notes as you save them (an
 journal chat              # Q&A that remembers the last few turns
 journal history           # earlier questions and answers, with [history] enabled = true
 journal insights          # mood, tag and timing patterns you didn't ask about
+journal themes --refresh  # group your entries into the threads that run through them
+journal themes            # those themes, biggest first; 'journal themes 3' shows one
 journal prompt            # ideas for what to write next, from threads left open
 journal review 2025       # the year in review, as Markdown (or a month, 2025-03, or a week, 2025-W10)
 journal compare 2024 2025 # two periods side by side; one period compares it with the one before
@@ -239,6 +241,16 @@ The browser has the same review as a page, `#/review/2025-03` and so on, linked 
 `journal compare 2024 2025` puts two periods side by side: entries, days written, words, average mood, the longest streak and the average of each number you keep in frontmatter, then the tags you wrote more and less of, the notes you linked more and less, and the notes that are new or no longer linked. Periods are years, months (`2025-03`) or ISO weeks (`2025-W10`), and with one period it compares it with the one just before, so `journal compare 2025-03` is February against March. Tags and notes are compared by the share of each period's entries they're on, since a busy month would otherwise seem to have more of everything, and one needs at least 2 entries in a period to count as rising, falling, new or gone. It makes no model calls, and takes `--json`.
 
 `journal prompt` looks back over recent entries (14 days by default, or `--days N`) and suggests open-ended writing prompts that pick up loose threads, like a project you named, a person who keeps coming up, or a feeling you left unresolved. `--count N` sets how many. It only reads the cache and never touches your notes.
+
+## Themes
+
+Tags depend on what the model picked for each entry, and notes on what you linked, so a thread you never named, like a year of job hunting or a run of bad sleep, may show up in neither. `journal themes --refresh` finds those threads from what the entries are about: it groups their stored vectors with k-means, seeded so the same entries always give the same themes, then has the fast model name each group from the 8 entries nearest its middle (and the tags and notes they share most). Grouping needs no model and takes a second or two for a few thousand entries; naming is one call per theme, kept in the memo, so a theme that comes out the same isn't named twice. If Ollama is down, the themes are kept without names and labelled by what their entries share until the next refresh.
+
+`journal themes` lists them, biggest first, with how many entries each has, when it ran and its average mood, and `journal themes 3` shows one: what it's about, its entries by year, its tags and notes and the entries closest to its middle. Both take `--json`. The browser's Themes page puts every theme on one time axis, each month shaded by the share of that month's entries in it, and each theme has a page with its entries month by month. A narrative question, or one about four weeks or more, also gets the themes with the most entries in its dates.
+
+An entry written after the last refresh goes with the nearest theme when the themes are read, without anything being written, so they keep up between refreshes. Once a fifth of the entries came that way (`[themes] stale_share`), the list says it's time to refresh. `[themes] count` sets how many to look for (0, the default, picks about the square root of a quarter of your entries, between 3 and 15), and a theme with fewer than `min_entries` entries (5) is folded into the others. Themes are numbered again at each refresh, so `journal themes 3` can be a different one afterwards.
+
+With `exclude_tags` or `exclude_kinds` set under `[mcp]`, a theme named from an entry that's left out keeps its entries but loses its name and description, which were written from that entry.
 
 ## Question history
 

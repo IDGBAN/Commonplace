@@ -42,6 +42,7 @@ class Withheld:
     digests: int = 0
     note_digests: int = 0
     profile: bool = False
+    themes: int = 0
 
 
 def _tags_of_entries(conn: sqlite3.Connection, wanted: set[str]) -> set[int]:
@@ -166,6 +167,13 @@ def _withhold(config: Config, conn: sqlite3.Connection) -> Withheld:
         for r in conn.execute(f"SELECT file_path FROM notes WHERE id IN ({values})", _ids(notes))
     )
     drop_profile = me_withheld or any(r["folded"] for r in facts)
+    present = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    # a theme's name was written from its central entries
+    named_from = entries | linking_notes
+    themes = [
+        r["id"] for r in conn.execute("SELECT id, named_from FROM themes")
+        if set(json.loads(r["named_from"])) & named_from
+    ] if "themes" in present else []
     files = [
         r["file_path"] for r in conn.execute(
             f"SELECT DISTINCT file_path FROM entries WHERE id IN ({values}) "
@@ -193,13 +201,17 @@ def _withhold(config: Config, conn: sqlite3.Connection) -> Withheld:
         if drop_profile:
             conn.execute(f"DELETE FROM meta WHERE key IN ({values})", (json.dumps(profile.TEXT_KEYS),))
         conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM entry_tags)")
-        present = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if themes:
+            # the grouping stays; only what the model wrote from those entries goes
+            conn.execute(
+                f"UPDATE themes SET name = NULL, about = NULL WHERE id IN ({values})", (json.dumps(themes),)
+            )
         for table, column, owner in _VECTOR_TABLES:
             if table in present:
                 conn.execute(f"DELETE FROM {table} WHERE {column} NOT IN (SELECT id FROM {owner})")
     # names learned only from what's gone shouldn't name anyone
     nicknames.refresh(config, conn)
-    return Withheld(len(entries), len(notes), len(digests), note_digests, drop_profile)
+    return Withheld(len(entries), len(notes), len(digests), note_digests, drop_profile, len(themes))
 
 
 def _fingerprint(path: Path) -> tuple[tuple[int, int] | None, ...]:

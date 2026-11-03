@@ -194,6 +194,15 @@ class MetricsConfig(BaseModel):
         return [k.strip().casefold() for k in v if k.strip()]
 
 
+class ThemesConfig(BaseModel):
+    # how many themes `journal themes --refresh` looks for; 0 picks from how much you've written
+    count: int = Field(default=0, ge=0, le=40)
+    # a theme with fewer entries than this is folded into the others
+    min_entries: int = Field(default=5, ge=2)
+    # entries written since the last refresh, as a share of all, before themes say they're out of date
+    stale_share: float = Field(default=0.2, ge=0, le=1)
+
+
 class ProfileConfig(BaseModel):
     enabled: bool = True
     # a note about yourself, from the vault root; it overrides what's inferred
@@ -292,6 +301,7 @@ class Config(BaseModel):
     profile: ProfileConfig = ProfileConfig()
     mcp: McpConfig = McpConfig()
     history: HistoryConfig = HistoryConfig()
+    themes: ThemesConfig = ThemesConfig()
 
     @model_validator(mode="after")
     def _history_outside_vault(self) -> Config:

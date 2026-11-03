@@ -37,6 +37,7 @@ from . import (
     review,
     serialize,
     store,
+    themes,
     unlinked,
 )
 from .config import Config
@@ -628,6 +629,37 @@ def graph(req: Request) -> Json:
     }
 
 
+def themes_page(req: Request) -> Json:
+    placed = themes.membership(req.conn)
+    listed = themes.overview(req.conn, placed)
+    # entries each month, so a theme's month can be shown as its share of it
+    totals: dict[str, int] = {}
+    for r in store.entry_days(req.conn):
+        totals[r["entry_date"][:7]] = totals.get(r["entry_date"][:7], 0) + 1
+    return {
+        "status": themes.status_json(themes.status(req.conn, req.config)),
+        "themes": [themes.theme_json(t) for t in listed],
+        "month_totals": dict(sorted(totals.items())),
+        "mood_scale": req.config.indexing.mood_scale_max,
+    }
+
+
+def theme_page(req: Request, theme_id: str) -> Json:
+    missing = "There's no theme with that number. Themes are numbered again at each refresh."
+    shown = themes.detail(req.conn, _row_id(theme_id, missing))
+    if shown is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, missing)
+    return {
+        **themes.theme_json(shown.theme),
+        "central": serialize.entry_briefs(req.conn, shown.central),
+        "newest": serialize.entry_briefs(req.conn, shown.newest),
+        "tags": [{"name": n, "entries": c} for n, c in shown.tags],
+        "notes": [{"id": i, "title": t, "kind": k, "entries": c} for i, t, k, c in shown.notes],
+        "baseline_mood": store.overall_mood(req.conn, None, None)[0],
+        "mood_scale": req.config.indexing.mood_scale_max,
+    }
+
+
 HISTORY_LISTED = 30
 
 
@@ -794,6 +826,8 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/metrics"), metrics),
     (re.compile(r"/api/compare"), comparison),
     (re.compile(r"/api/graph"), graph),
+    (re.compile(r"/api/themes"), themes_page),
+    (re.compile(r"/api/themes/(\d+)"), theme_page),
     (re.compile(r"/api/history"), history_list),
     (re.compile(r"/api/history/(\d+)"), history_item),
     (re.compile(r"/api/review/([^/]+)"), review_page),

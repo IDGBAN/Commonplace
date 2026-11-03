@@ -701,3 +701,15 @@ ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.45rem;
 .map-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; align-items: center; margin: 0 0 0.6rem; font-size: 0.86rem; color: var(--ink-soft); }
 .map-legend > span { display: inline-flex; align-items: center; gap: 0.4rem; }
 .map-swatch { width: 0.75rem; height: 0.75rem; border-radius: 50%; display: inline-block; }
+
+.theme-rows { display: grid; gap: 0.55rem; margin-bottom: 0.8rem; }
+.theme-row { display: grid; grid-template-columns: minmax(9rem, 15rem) 1fr; gap: 0.9rem; align-items: center; }
+.theme-name { min-width: 0; overflow-wrap: anywhere; line-height: 1.35; }
+.theme-name .quiet { font-size: 0.8rem; display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }
+.theme-strip { height: 22px; }
+.theme-years { display: flex; color: var(--ink-faint); font: 0.75rem var(--gloss); }
+.theme-years span { flex-basis: 0; min-width: 0; overflow: hidden; }
+@media (max-width: 760px) {
+  .theme-row { grid-template-columns: 1fr; gap: 0.3rem; }
+  .theme-rows > .theme-row:first-child > div:first-child { display: none; }
+}

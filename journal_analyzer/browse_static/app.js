@@ -124,6 +124,8 @@ const href = {
   entry: (id, params) => `#/entry/${id}${query(params)}`,
   notes: (params) => `#/notes${query(params)}`,
   map: (params) => `#/map${query(params)}`,
+  themes: () => "#/themes",
+  theme: (id) => `#/theme/${id}`,
   note: (id, params) => `#/note/${id}${query(params)}`,
   tags: () => "#/tags",
   metrics: () => "#/metrics",
@@ -378,7 +380,7 @@ function monthlyMoodChart(months, baseline, scale) {
 }
 
 // a number's average by month, laid out like monthlyMoodChart so the two line up
-function metricChart(months, key, yesNo) {
+function metricChart(months, key, yesNo, tip) {
   if (!months.length) return empty(`No entry records ${key}.`);
   const byKey = new Map(months.map((m) => [m.month, m]));
   const keys = monthSpan(months);
@@ -415,7 +417,7 @@ function metricChart(months, key, yesNo) {
     const to = y(m.avg);
     const what = yesNo ? `${key} on ${fmtValue(m.avg, true)} of days` : `${key} ${fmtValue(m.avg)}`;
     chart.append(svg("a", { href: href.entries({ from: `${month}-01`, to: lastDayOf(month) }) },
-      svg("title", {}, `${fmtMonth.format(toDate(`${month}-01`))}: ${what}, ${plural(m.n, "entry", "entries")}`),
+      svg("title", {}, tip ? tip(m) : `${fmtMonth.format(toDate(`${month}-01`))}: ${what}, ${plural(m.n, "entry", "entries")}`),
       svg("rect", {
         class: "bar metric", x: x + 2, y: Math.min(from, to),
         width: slot - 4, height: Math.max(2, Math.abs(to - from)), rx: 1.5,
@@ -1384,6 +1386,98 @@ async function searchView(_, params) {
     results);
 }
 
+// ---------------------------------------------------------------- themes
+
+const THEME_NEWEST = 30;
+
+function themeStatus(st) {
+  if (!st.made_at) return null;
+  const since = st.placed ? `; ${plural(st.placed, "entry", "entries")} written since go with the nearest theme` : "";
+  return h("p", { class: "section-note" }, `Worked out ${stamp(st.made_at)} from ${plural(st.grouped, "entry", "entries")}${since}.`,
+    st.stale ? [" That's a lot since; ", h("code", {}, "journal themes --refresh"), " groups them again."] : null);
+}
+
+// each month a cell, shaded by the share of that month's entries in the theme
+function themeStrip(theme, months, totals) {
+  const strip = svg("svg", {
+    class: "strip theme-strip", viewBox: `0 0 ${months.length} 1`, preserveAspectRatio: "none", role: "img",
+    "aria-label": `${theme.label}: ${plural(theme.entries, "entry", "entries")}, ${theme.first ? `${mediumDate(theme.first)} to ${mediumDate(theme.last)}` : ""}`,
+  });
+  months.forEach((month, i) => {
+    if (month.endsWith("-01") && i > 0) {
+      strip.append(svg("line", { class: "month", x1: i, x2: i, y1: 0, y2: 1, "vector-effect": "non-scaling-stroke" }));
+    }
+    const n = theme.months[month] || 0;
+    if (!n) return;
+    const share = n / (totals[month] || n);
+    strip.append(svg("a", { href: href.entries({ from: `${month}-01`, to: lastDayOf(month) }) },
+      svg("title", {}, `${fmtMonth.format(toDate(`${month}-01`))}: ${n} of ${plural(totals[month] || n, "entry", "entries")}`),
+      svg("rect", { class: `day ${amountStep(share, 0, 1)}`, x: i, y: 0, width: 1, height: 1 })));
+  });
+  return strip;
+}
+
+async function themesView() {
+  const data = await api("themes");
+  const scale = data.mood_scale;
+  document.title = "Themes · Commonplace";
+  const head = pageHead({
+    eyebrow: "Found from what your entries are about",
+    title: "Themes",
+    lede: "Threads that run through the journal, found by grouping entries close in meaning, whether or not you tagged or linked them. The fast model names each from the entries nearest its middle.",
+  });
+  if (!data.themes.length) {
+    return h("div", {}, head, empty("No themes yet. ", h("code", {}, "journal themes --refresh"),
+      " groups your entries (no model needed for that) and names each group with one call to the fast model."));
+  }
+  const months = Object.keys(data.month_totals);
+  const years = new Map();
+  for (const month of months) years.set(month.slice(0, 4), (years.get(month.slice(0, 4)) || 0) + 1);
+  const axis = h("div", { class: "theme-years", "aria-hidden": "true" }, [...years].map(([year, n]) => {
+    const label = h("span", {}, year);
+    label.style.flexGrow = String(n);
+    return label;
+  }));
+  const rows = data.themes.map((t) => h("div", { class: "theme-row" },
+    h("div", { class: "theme-name" },
+      h("a", { href: href.theme(t.id) }, t.label),
+      h("div", { class: "quiet" }, plural(t.entries, "entry", "entries"), " · ", moodChip(t.mood, scale))),
+    themeStrip(t, months, data.month_totals)));
+  return h("div", {}, head,
+    themeStatus(data.status),
+    h("div", { class: "theme-rows" }, h("div", { class: "theme-row" }, h("div", {}), axis), rows),
+    amountLegend("a small share of that month", "most of it"));
+}
+
+async function themeView([id]) {
+  const t = await api(`themes/${id}`);
+  const scale = t.mood_scale;
+  document.title = `${t.label} · Commonplace`;
+  const months = Object.entries(t.months).map(([month, n]) => ({ month, avg: n, n }));
+  const tip = (m) => `${fmtMonth.format(toDate(`${m.month}-01`))}: ${plural(m.n, "entry", "entries")}`;
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.themes() }, "Theme"),
+      title: t.label,
+      lede: t.about,
+      meta: [
+        h("span", {}, plural(t.entries, "entry", "entries")),
+        t.first && h("span", {}, `${mediumDate(t.first)} to ${mediumDate(t.last)}`),
+        t.mood != null && h("span", {}, "average mood ", moodChip(t.mood, scale), " ", delta(t.mood, t.baseline_mood)),
+      ],
+    }),
+    section("Entries a month", metricChart(months, "entries", false, tip)),
+    section("Closest to its middle", entryLines(t.central, scale), { note: t.name ? "what it was named from" : null }),
+    t.tags.length ? section("Tags", h("div", { class: "chips" }, t.tags.map((g) => tagChip(g.name, g.entries)))) : null,
+    t.notes.length ? section("Notes", h("div", { class: "chips" }, t.notes.map((n) =>
+      h("a", { class: "chip", href: href.note(n.id), title: kindLabel(n.kind) }, n.title, h("span", { class: "n" }, fmtNum(n.entries))))), {
+      note: "entries that link each",
+    }) : null,
+    section("Newest entries", entryLines(t.newest, scale), {
+      note: t.entries > t.newest.length ? `newest ${t.newest.length} of ${fmtNum(t.entries)}` : null,
+    }));
+}
+
 // ---------------------------------------------------------------- note map
 
 // A graph puts any two kinds side by side, and only three colours stay
@@ -2255,6 +2349,8 @@ const routes = [
   [/^\/entry\/(\d+)$/, entryView, "entries"],
   [/^\/notes$/, notesView, "notes"],
   [/^\/map$/, mapView, "notes"],
+  [/^\/themes$/, themesView, "themes"],
+  [/^\/theme\/(\d+)$/, themeView, "themes"],
   [/^\/note\/(\d+)$/, noteView, "notes"],
   [/^\/tags$/, tagsView, "tags"],
   [/^\/tag\/(.+)$/, tagView, "tags"],

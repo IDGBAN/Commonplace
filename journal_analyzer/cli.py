@@ -44,6 +44,7 @@ from . import (
     rollups,
     serialize,
     store,
+    themes,
     unlinked,
 )
 from .config import Config, load_config
@@ -1986,6 +1987,115 @@ def review_cmd(
     written = _write_out(cfg, out, review.to_markdown(built))
     if written is not None:
         console.print(f"Wrote the {built.title} review to {escape(str(written))}")
+
+
+def _themes_note(found: themes.Status) -> str:
+    made = f"Worked out {_when(found.made_at)} from {_count(found.grouped, 'entry', 'entries')}"
+    if found.placed:
+        made += f"; {_count(found.placed, 'entry', 'entries')} written since go with the nearest theme"
+    return made + "."
+
+
+@app.command(name="themes")
+def themes_cmd(
+    theme_id: Annotated[
+        int | None, typer.Argument(help="Show this theme: what it's about, when, and its entries.", show_default=False)
+    ] = None,
+    config: ConfigOpt = None,
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Group the entries again and name the groups (one fast-model call each).")
+    ] = False,
+    count: Annotated[
+        int | None,
+        typer.Option("--count", min=2, max=40, help="How many themes to look for with --refresh. Default: [themes] count.", show_default=False),
+    ] = None,
+    as_json: JsonOpt = False,
+    no_memo: NoMemoOpt = False,
+) -> None:
+    """Threads that run through the journal, found from what the entries are about."""
+    OUT.as_json = as_json
+    if count is not None and not refresh:
+        _fail("--count only goes with --refresh.")
+    with _guard(), _open(config) as (cfg, conn):
+        if refresh:
+            try:
+                with redirect_stdout(sys.stderr) if as_json else nullcontext(), _working("Grouping your entries...") as status:
+                    done = themes.refresh(
+                        cfg, conn, OllamaClient(_memo(cfg, no_memo)), count, on_step=_show_stage(status),
+                    )
+            except themes.ThemesError as exc:
+                _fail(str(exc), red=False)
+            with redirect_stdout(sys.stderr) if as_json else nullcontext():
+                console.print(f"Found {_count(done.themes, 'theme')} in {_count(done.entries, 'entry', 'entries')}.")
+                if done.naming_error:
+                    console.print(
+                        f"[yellow]Named {done.named} of them before the model stopped answering "
+                        f"({escape(done.naming_error)}). 'journal themes --refresh' names the rest "
+                        "once Ollama is back; the ones named already come from the memo.[/yellow]"
+                    )
+        found = themes.status(conn, cfg)
+        if theme_id is not None:
+            shown = themes.detail(conn, theme_id)
+            if shown is None:
+                _fail(f"There's no theme {theme_id}. 'journal themes' lists them.", red=False)
+            if as_json:
+                _emit({
+                    **themes.theme_json(shown.theme),
+                    "central": serialize.entry_briefs(conn, shown.central),
+                    "newest": serialize.entry_briefs(conn, shown.newest),
+                    "tags": [{"name": n, "entries": c} for n, c in shown.tags],
+                    "notes": [{"id": i, "title": t, "kind": k, "entries": c} for i, t, k, c in shown.notes],
+                    "status": themes.status_json(found),
+                })
+                return
+            t = shown.theme
+            console.print(f"[bold cyan]{escape(t.label)}[/bold cyan]")
+            if t.about:
+                console.print(escape(t.about))
+            console.print(
+                f"[dim]{_count(t.entries, 'entry', 'entries')}, {t.first} .. {t.last}, "
+                f"average mood {_mood_str(t.mood)}[/dim]"
+            )
+            years: dict[str, int] = {}
+            for month, n in t.months.items():
+                years[month[:4]] = years.get(month[:4], 0) + n
+            top = max(years.values(), default=1)
+            for year, n in years.items():
+                console.print(f"  {year}  [cyan]{'█' * max(1, round(n / top * MOOD_BAR_WIDTH))}[/cyan] {n}")
+            if shown.tags:
+                console.print(f"\n[bold]Tags[/bold]  {escape(', '.join(f'{n} ({c})' for n, c in shown.tags))}")
+            if shown.notes:
+                console.print(f"[bold]Notes[/bold] {escape(', '.join(f'{t} ({c})' for _, t, _, c in shown.notes))}")
+            console.print()
+            console.print(_entry_table(conn, shown.central, title="Closest to its middle"))
+            return
+        listed = themes.overview(conn)
+        if as_json:
+            _emit({"status": themes.status_json(found), "themes": [themes.theme_json(t) for t in listed]})
+            return
+        if not listed:
+            console.print(
+                "No themes yet. 'journal themes --refresh' groups your entries by what they're about "
+                "(no model needed for that) and names each group with one call to the fast model."
+            )
+            return
+        table = Table(title="Themes, biggest first")
+        table.add_column("#", justify="right", style="cyan")
+        table.add_column("Theme")
+        table.add_column("Entries", justify="right")
+        table.add_column("First .. last", no_wrap=True)
+        table.add_column("Busiest month", no_wrap=True)
+        table.add_column("Mood", justify="right")
+        for t in listed:
+            busiest = max(t.months.items(), key=lambda kv: (kv[1], kv[0]), default=None)
+            table.add_row(
+                str(t.id), escape(t.label), str(t.entries), f"{t.first} .. {t.last}",
+                f"{busiest[0]} ({busiest[1]})" if busiest else "-", _mood_str(t.mood),
+            )
+        console.print(table)
+        console.print(f"[dim]{escape(_themes_note(found))} 'journal themes N' shows one.[/dim]")
+        if found.stale:
+            console.print("[yellow]That's a lot written since; 'journal themes --refresh' groups them again.[/yellow]")
 
 
 _HISTORY_OFF = (

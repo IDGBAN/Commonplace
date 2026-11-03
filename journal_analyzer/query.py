@@ -17,7 +17,7 @@ from typing import Any
 
 from rich.console import Console
 
-from . import context, db, embedder, parser, profile, quotes, store
+from . import context, db, embedder, parser, profile, quotes, store, themes
 from .config import Config
 from .models import Answer, AnswerStage, QueryPlan
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
@@ -36,6 +36,9 @@ MAX_WEEK_DIGESTS = 9
 MAX_MONTH_DIGESTS = 14
 # digests of spans of days, like a trip, that share the most days with the question
 MAX_RANGE_DIGESTS = 3
+# themes with the most entries in a narrative question's dates, or a range this long
+MAX_THEME_LINES = 5
+THEME_MIN_DAYS = 28
 # the reranker can only reorder what retrieval found, so fetch extra
 RERANK_CANDIDATE_POOL = 25
 # 60 is the k from the original RRF paper
@@ -732,8 +735,18 @@ def _range_digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
     ]
 
 
+def _theme_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
+    spans = bool(plan.date_from and plan.date_to and (plan.date_to - plan.date_from).days >= THEME_MIN_DAYS)
+    if plan.intent != "narrative" and not spans:
+        return []
+    return [
+        f"- [theme] {t.name}: {t.about or 'no description'} ({n} of its {t.entries} entries fall here)"
+        for t, n in themes.in_range(conn, plan.date_from, plan.date_to, MAX_THEME_LINES)
+    ]
+
+
 def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
-    return _range_digest_lines(plan, conn) + _period_digest_lines(plan, conn)
+    return _range_digest_lines(plan, conn) + _period_digest_lines(plan, conn) + _theme_lines(plan, conn)
 
 
 def _period_digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:

@@ -106,6 +106,12 @@ known_in_prompt = 40              # most used tags shown to the model when it ta
 keys = []
 ignore = []
 
+[themes]
+# `journal themes --refresh` groups entries close in meaning into themes.
+count = 0                         # how many to look for; 0 picks about sqrt(entries / 4), 3 to 15
+min_entries = 5                   # a theme with fewer entries is folded into the others
+stale_share = 0.2                 # once this share of entries came after the last refresh, it says so
+
 [profile]
 # A short profile of you, kept from your entries and given to answers, digests,
 # insights and writing prompts (never to the step that reads single entries).

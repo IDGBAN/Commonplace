@@ -363,6 +363,7 @@ class Server:
                 _count(w.notes, "note", "notes"),
                 _count(w.digests, "digest", "digests"),
                 _count(w.note_digests, "relationship digest", "relationship digests"),
+                *([_count(w.themes, "theme name", "theme names")] if w.themes else []),
             ]
             kept.append(", ".join(parts) + (" and your profile" if w.profile else ""))
         if not mcp.raw_text:
