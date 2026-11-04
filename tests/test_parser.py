@@ -13,7 +13,7 @@ def test_filename_date_and_cleaning(tmp_path):
     assert len(entries) == 1
     e = entries[0]
     assert e.entry_date == date(2024, 1, 15)
-    assert "Sara" in e.raw_text and "[[" not in e.raw_text
+    assert "John" in e.raw_text and "[[" not in e.raw_text
     assert "Bear Mountain" in e.raw_text
     assert "- [x]" not in e.raw_text and "- [ ]" not in e.raw_text
     assert "- pack lunch" in e.raw_text
@@ -71,6 +71,42 @@ def test_unparsable_date_raises_typed_error(tmp_path):
         parser.parse_file(bad, cfg)
 
 
+def test_entries_keep_their_files_frontmatter(tmp_path):
+    cfg = make_config(tmp_path, split_heading_regex=r"^## \d{4}-\d{2}-\d{2}")
+    path = tmp_path / "vault" / "log.md"
+    path.write_text(
+        "---\nmood: 6\ntags: [log]\n---\n## 2024-02-01\nOne.\n## 2024-02-02\nTwo.\n",
+        encoding="utf-8",
+    )
+    entries = parser.parse_file(path, cfg)
+    assert [e.frontmatter for e in entries] == [{"mood": "6", "tags": ["log"]}] * 2
+
+
+@pytest.mark.parametrize(
+    ("fields", "tags"),
+    [
+        ({"tags": ["Work", "#travel"]}, ["work", "travel"]),
+        ({"tags": "work, travel"}, ["work", "travel"]),
+        ({"Tags": "work travel"}, ["work", "travel"]),
+        ({"tag": "solo"}, ["solo"]),
+        ({"tags": []}, []),
+        ({"mood": "6"}, []),
+    ],
+)
+def test_frontmatter_tags(fields, tags):
+    assert parser.frontmatter_tags(fields) == tags
+
+
+def test_frontmatter_values_ignore_key_case():
+    assert parser.frontmatter_value({"Mood": "7"}, "mood") == "7"
+    assert parser.frontmatter_value({"Mood": "7"}, "energy") is None
+
+
+def test_read_frontmatter_from_bytes():
+    assert parser.read_frontmatter(b"---\nsleep: 7\n---\nBody") == {"sleep": "7"}
+    assert parser.read_frontmatter(b"No frontmatter") == {}
+
+
 def test_extract_literal_tags():
     tags = parser.extract_literal_tags("Went out #Hiking with friends #hiking #work/deep")
     assert tags == ["hiking", "work/deep"]
@@ -91,8 +127,8 @@ def test_task_marker_without_trailing_text_loses_the_checkbox():
 
 
 def test_wikilink_aliases_keep_the_display_text():
-    cleaned = parser.clean_text("Met [[people/Sara Miller|Sara]] at [[Bear Mountain]].")
-    assert cleaned == "Met Sara at Bear Mountain."
+    cleaned = parser.clean_text("Met [[people/John Doe|John]] at [[Bear Mountain]].")
+    assert cleaned == "Met John at Bear Mountain."
 
 
 def test_text_before_the_first_split_heading_is_not_dropped(tmp_path):
@@ -145,15 +181,15 @@ def test_frontmatter_date_falls_back_to_an_embedded_iso_date(tmp_path):
 def test_entry_links_come_from_its_wikilinks(tmp_path):
     cfg = make_config(tmp_path)
     [entry] = parser.parse_file(FIXTURES / "2024-01-15.md", cfg)
-    assert entry.links == ["sara miller", "bear mountain", "garden-project"]
+    assert entry.links == ["john doe", "bear mountain", "garden-project"]
 
 
 def test_link_keys_resolve_the_way_obsidian_does():
-    assert parser.link_key("Sara Miller") == "sara miller"
-    assert parser.link_key("Links/People/Sara Miller|Sara") == "sara miller"
-    assert parser.link_key("Sara Miller#Childhood") == "sara miller"
-    assert parser.link_key("Sara Miller^block-1") == "sara miller"
-    assert parser.link_key("Sara Miller.md") == "sara miller"
+    assert parser.link_key("John Doe") == "john doe"
+    assert parser.link_key("Links/People/John Doe|John") == "john doe"
+    assert parser.link_key("John Doe#Childhood") == "john doe"
+    assert parser.link_key("John Doe^block-1") == "john doe"
+    assert parser.link_key("John Doe.md") == "john doe"
     assert parser.link_key("Dr. Smith") == "dr. smith"
     assert parser.link_key("summit.JPG") is None
     assert parser.link_key("#Only a heading") is None
@@ -170,11 +206,11 @@ def test_attachments_are_dropped_unless_a_plain_link_gives_them_words():
 
 def test_link_offsets_point_into_the_cleaned_text():
     cleaned, links = parser.clean_with_links(
-        "  Met [[Sara Miller|Sara]] at [[Bear Mountain#Summit]]."
+        "  Met [[John Doe|John]] at [[Bear Mountain#Summit]]."
     )
-    assert cleaned == "Met Sara at Bear Mountain."
+    assert cleaned == "Met John at Bear Mountain > Summit."
     assert [(cleaned[pos:pos + 4], key) for pos, key in links] == [
-        ("Sara", "sara miller"),
+        ("John", "john doe"),
         ("Bear", "bear mountain"),
     ]
 
@@ -183,30 +219,30 @@ def test_split_sections_keep_their_own_links(tmp_path):
     cfg = make_config(tmp_path, split_heading_regex=r"^## \d{4}-\d{2}-\d{2}")
     note = tmp_path / "vault" / "2024-02.md"
     note.write_text(
-        "Week with [[Mum]].\n\n## 2024-02-01\n\nSaw [[Sara]].\n\n"
-        "## 2024-02-02\n\nSaw [[Tomas]] and [[Sara]].\n",
+        "Week with [[Mum]].\n\n## 2024-02-01\n\nSaw [[John]].\n\n"
+        "## 2024-02-02\n\nSaw [[Tomas]] and [[John]].\n",
         encoding="utf-8",
     )
     first, second = parser.parse_file(note, cfg)
-    assert first.links == ["mum", "sara"]
-    assert second.links == ["tomas", "sara"]
+    assert first.links == ["mum", "john"]
+    assert second.links == ["tomas", "john"]
 
 
 def test_frontmatter_links_count_for_the_entry(tmp_path):
     cfg = make_config(tmp_path)
     note = tmp_path / "vault" / "2024-05-01.md"
-    note.write_text('---\nwith: "[[Sara Miller]]"\n---\nA day out.\n', encoding="utf-8")
+    note.write_text('---\nwith: "[[John Doe]]"\n---\nA day out.\n', encoding="utf-8")
     [entry] = parser.parse_file(note, cfg)
-    assert entry.links == ["sara miller"]
+    assert entry.links == ["john doe"]
 
 
 def test_frontmatter_block_lists_inline_lists_and_quoted_links():
     fields, body = parser._parse_frontmatter(
-        '---\naliases:\n  - Sara\n  - "S. M."\ntags: [a, b]\n'
+        '---\naliases:\n  - John\n  - "S. M."\ntags: [a, b]\n'
         'Relationship: "[[Friend]]"\nempty:\n---\nBody\n'
     )
     assert fields == {
-        "aliases": ["Sara", "S. M."],
+        "aliases": ["John", "S. M."],
         "tags": ["a", "b"],
         "Relationship": "[[Friend]]",
         "empty": [],
@@ -217,7 +253,7 @@ def test_frontmatter_block_lists_inline_lists_and_quoted_links():
 def test_note_kind_is_the_folder_below_a_notes_path(tmp_path):
     cfg = make_config(tmp_path, notes_paths=["Links", "Lyrics.md"])
     vault = cfg.vault.path
-    assert parser.note_kind(vault / "Links" / "People" / "Sara.md", cfg) == "people"
+    assert parser.note_kind(vault / "Links" / "People" / "John.md", cfg) == "people"
     assert parser.note_kind(vault / "links" / "Topics-Things" / "Go.md", cfg) == "topics-things"
     assert parser.note_kind(vault / "Links" / "!Files" / "deep" / "x.md", cfg) == "files"
     assert parser.note_kind(vault / "Links" / "Loose.md", cfg) == "note"
@@ -229,31 +265,43 @@ def test_note_kind_is_the_folder_below_a_notes_path(tmp_path):
 
 def test_without_notes_paths_every_file_is_an_entry(tmp_path):
     cfg = make_config(tmp_path)
-    assert parser.note_kind(cfg.vault.path / "Links" / "People" / "Sara.md", cfg) is None
+    assert parser.note_kind(cfg.vault.path / "Links" / "People" / "John.md", cfg) is None
 
 
 def test_parse_note_reads_aliases_properties_and_links(tmp_path):
     cfg = make_config(tmp_path, notes_paths=["Links"])
-    path = cfg.vault.path / "Links" / "People" / "Sara Miller.md"
+    path = cfg.vault.path / "Links" / "People" / "John Doe.md"
     path.parent.mkdir(parents=True)
     path.write_text(
-        "---\naliases:\n  - Sara\n  - sara miller\nRelationship: \"[[Friend]]\"\n"
+        "---\naliases:\n  - John\n  - john doe\nRelationship: \"[[Friend]]\"\n"
         "tags: [people]\n---\n"
-        "Climbs with me. Runs the [[garden-project]]; see [[Sara Miller#Notes]]. "
+        "Climbs with me. Runs the [[garden-project]]; see [[John Doe#Notes]]. "
         "![[face.jpg]]\n",
         encoding="utf-8",
     )
     note = parser.parse_note(path, "people", cfg)
-    assert (note.title, note.kind) == ("Sara Miller", "people")
-    assert note.rel_path == "Links/People/Sara Miller.md"
-    assert note.aliases == ["Sara"]
+    assert (note.title, note.kind) == ("John Doe", "people")
+    assert note.rel_path == "Links/People/John Doe.md"
+    assert note.aliases == ["John"]
     assert note.properties == {"Relationship": "Friend"}
     assert note.links == ["friend", "garden-project"]
-    assert note.raw_text == "Climbs with me. Runs the garden-project; see Sara Miller."
+    assert note.raw_text == "Climbs with me. Runs the garden-project; see John Doe > Notes."
     assert note.header() == (
-        "Sara Miller (people)\nFile: Links/People/Sara Miller.md\n"
-        "Also called: Sara\nRelationship: Friend"
+        "John Doe (people)\nFile: Links/People/John Doe.md\n"
+        "Also called: John\nRelationship: Friend"
     )
+
+
+def test_property_names_are_read_ignoring_case(tmp_path):
+    cfg = make_config(tmp_path, date_source="frontmatter")
+    note_path = tmp_path / "John Doe.md"
+    note_path.write_text("---\nAliases: [Johnny]\nAlias: JD\n---\nFriend.", encoding="utf-8")
+    note = parser.parse_note(note_path, "people", cfg)
+    assert note.aliases == ["Johnny", "JD"]
+    assert note.properties == {}
+    entry_path = cfg.vault.path / "diary.md"
+    entry_path.write_text("---\nDate: 2024-03-05\n---\nWalked.", encoding="utf-8")
+    assert [e.entry_date for e in parser.parse_file(entry_path, cfg)] == [date(2024, 3, 5)]
 
 
 def test_an_empty_note_still_parses(tmp_path):

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Commonplace</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <button class="skip" type="button" id="skip">Skip to content</button>
+  <div class="shell">
+    <nav class="rail" aria-label="Sections">
+      <a class="brand" href="#/">
+        <span class="brand-name">Commonplace</span>
+        <span class="brand-sub">what the app knows</span>
+      </a>
+      <ul class="rail-list">
+        <li><a href="#/" data-nav="overview">Overview</a></li>
+        <li><a href="#/ask" data-nav="ask">Ask</a></li>
+        <li><a href="#/you" data-nav="you">You</a></li>
+        <li><a href="#/calendar" data-nav="calendar">Calendar</a></li>
+        <li><a href="#/entries" data-nav="entries">Entries <span class="count" data-count="entries"></span></a></li>
+        <li><a href="#/notes" data-nav="notes">Notes <span class="count" data-count="notes"></span></a></li>
+        <li><a href="#/tags" data-nav="tags">Tags <span class="count" data-count="tags"></span></a></li>
+        <li><a href="#/digests" data-nav="digests">Digests <span class="count" data-count="rollups"></span></a></li>
+        <li><a href="#/files" data-nav="files">Files <span class="count" data-count="files"></span></a></li>
+        <li><a href="#/search" data-nav="search">Search</a></li>
+      </ul>
+      <p class="rail-foot">Read-only. Nothing here changes your notes or the cache.</p>
+    </nav>
+
+    <header class="topbar">
+      <div class="jump">
+        <label class="visually-hidden" for="jump">Jump to a date, note or tag</label>
+        <input id="jump" type="search" placeholder="Jump to a date, note or tag" autocomplete="off"
+               spellcheck="false" role="combobox" aria-controls="jump-list" aria-expanded="false"
+               aria-autocomplete="list">
+        <kbd class="jump-key" aria-hidden="true">/</kbd>
+        <ul id="jump-list" class="jump-list" role="listbox" hidden></ul>
+      </div>
+      <button id="theme" class="theme" type="button"></button>
+    </header>
+
+    <main id="page" class="page" tabindex="-1"></main>
+  </div>
+</body>
+</html>

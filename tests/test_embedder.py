@@ -66,14 +66,14 @@ def test_empty_entries_are_never_sent(config, fake_client):
 
 def test_notes_are_embedded_with_their_header(config, fake_client):
     note = ParsedNote(
-        title="Sara Miller", kind="people", raw_text="Climbs.", source_path="x",
-        aliases=["Sara"], properties={"Relationship": "Friend"},
-        rel_path="Links/People/Sara Miller.md",
+        title="John Doe", kind="people", raw_text="Climbs.", source_path="x",
+        aliases=["John"], properties={"Relationship": "Friend"},
+        rel_path="Links/People/John Doe.md",
     )
     vector = embedder.note_vector(note, None, config, fake_client)
     assert fake_client.embed_calls[-1] == (
-        "Sara Miller (people)\nFile: Links/People/Sara Miller.md\n"
-        "Also called: Sara\nRelationship: Friend\n\nClimbs."
+        "John Doe (people)\nFile: Links/People/John Doe.md\n"
+        "Also called: John\nRelationship: Friend\n\nClimbs."
     )
     assert len(vector) == EMBED_DIM
 

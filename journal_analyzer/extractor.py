@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import TypeVar
 
 from .config import Config
-from .models import Extraction, NoteSummary, ParsedEntry, ParsedNote
-from .ollama_client import OllamaClient
+from .context import fit
+from .models import DetailedExtraction, Extraction, NoteSummary, ParsedEntry, ParsedNote
+from .ollama_client import (
+    CHARS_PER_TOKEN_ESTIMATE,
+    REPLY_TOKENS,
+    OllamaClient,
+    context_window,
+    prompt_tokens,
+)
 from .parser import extract_literal_tags
 
 SUMMARY_MAX_CHARS = 200
+# the longer summary for entries past detail_min_words, and past detail_long_words
+DETAIL_MEDIUM_CHARS = 450
+DETAIL_LONG_CHARS = 800
 NOTE_SUMMARY_MAX_CHARS = 400
-# keeps the prompt inside Ollama's default window so the model isn't reloaded
+# keeps the prompt inside the 4096-token default window so the model isn't reloaded
 NOTE_INPUT_MAX_CHARS = 8_000
 
 _SYSTEM_PROMPT = """You extract structured data from a personal journal entry.
@@ -31,6 +42,17 @@ outside. Write "Felt drained after work but the evening walk helped", not \
 author", "The user", "The writer" or "This entry".
 - tags: 3-6 lowercase theme tags. Keep them general and reusable \
 (e.g. "work", "health", "family"), not hyper-specific."""
+
+_LINKED_HEADER = (
+    "What this entry links to, as background on who and what the names are. "
+    "Summarize, score and tag the entry itself, not these:"
+)
+# the extraction retry adds the first reply and a correction to the prompt
+RETRY_HEADROOM_TOKENS = 400
+
+_KNOWN_TAGS = """
+- Tags already used in this journal, most used first: {tags}. Use these when \
+one fits the entry, and make up a new tag only when none of them does."""
 
 _NOTE_PROMPT = """You summarize one note from someone's personal knowledge base. \
 Its notes describe the people, places, groups, events, games and topics that \
@@ -57,7 +79,22 @@ _VOICE_CORRECTION = (
     '"this entry", "this note" or "this file".'
 )
 
+_DETAILS_RULE = """
+- details: this entry is long, so also write {sentences}, at most {chars} \
+characters, on what happened, who was there and how it felt, in the same \
+first-person voice as the summary. The summary itself stays one sentence."""
+
 _Summarized = TypeVar("_Summarized", Extraction, NoteSummary)
+
+
+def detail_tier(words: int, config: Config) -> tuple[str, int] | None:
+    """How long a longer summary an entry of this many words gets, if any."""
+    ix = config.indexing
+    if not ix.detail_min_words or words < ix.detail_min_words:
+        return None
+    if words >= ix.detail_long_words:
+        return "3 to 5 sentences", DETAIL_LONG_CHARS
+    return "2 or 3 sentences", DETAIL_MEDIUM_CHARS
 
 
 def _clip(text: str, limit: int) -> str:
@@ -70,48 +107,109 @@ def _clip(text: str, limit: int) -> str:
     return cut.rstrip(" ,;:-") + "…"
 
 
+def _clip_sentences(text: str, limit: int) -> str:
+    """Like _clip, but ends on the last whole sentence that fits when there is one."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", text[:limit])]
+    # a cut that keeps less than half would drop too much
+    if ends and ends[-1] >= limit // 2:
+        return text[: ends[-1]]
+    return _clip(text, limit)
+
+
 def _in_writers_voice(
     client: OllamaClient,
     model: str,
     messages: list[dict[str, str]],
     schema: type[_Summarized],
+    memo_messages: list[dict[str, str]] | None = None,
 ) -> _Summarized:
+    """`memo_messages` is what the memo keys on instead of `messages`, if given."""
     # One retry. If that's still off it's kept, not worth failing the file over.
-    result = client.chat_structured(model=model, messages=messages, schema=schema)
-    if not _DETACHED_OPENING_RE.match(result.summary):
+    result = client.chat_structured(
+        model=model, messages=messages, schema=schema, memo_key=memo_messages
+    )
+    details = getattr(result, "details", "")
+    if not _DETACHED_OPENING_RE.match(result.summary) and not _DETACHED_OPENING_RE.match(details):
         return result
-    retry = [
-        *messages,
+    tail: list[dict[str, str]] = [
         {"role": "assistant", "content": result.model_dump_json()},
         {"role": "user", "content": _VOICE_CORRECTION},
     ]
-    return client.chat_structured(model=model, messages=retry, schema=schema)
+    retry_key = memo_messages + tail if memo_messages is not None else None
+    return client.chat_structured(
+        model=model, messages=messages + tail, schema=schema, memo_key=retry_key
+    )
 
 
-def extract(entry: ParsedEntry, config: Config, client: OllamaClient) -> Extraction:
+def _room_for_links(config: Config, messages: list[dict[str, str]]) -> int:
+    """Characters left in the fast model's window once the entry and a reply fit."""
+    window = context_window(config, config.ollama.fast_model)
+    tokens = window - REPLY_TOKENS - RETRY_HEADROOM_TOKENS - prompt_tokens(messages)
+    return max(tokens, 0) * CHARS_PER_TOKEN_ESTIMATE
+
+
+def extract(
+    entry: ParsedEntry,
+    config: Config,
+    client: OllamaClient,
+    known_tags: Sequence[str] = (),
+    linked: Sequence[str] = (),
+    photos: str = "",
+) -> Extraction:
+    """`linked` is context.entry_links: what the entry's links point at. As much
+    of it as fits in the fast model's window goes along as background.
+    `photos` is photos.block, what a vision model saw in the entry's photos."""
     text = entry.raw_text.strip()
     literal_tags = extract_literal_tags(text)
 
-    if not text:
+    if not text and not photos:
         return Extraction(mood_score=None, summary="(empty entry)", tags=literal_tags)
+
+    base_system = _SYSTEM_PROMPT.format(
+        mood_max=config.indexing.mood_scale_max, summary_max=SUMMARY_MAX_CHARS
+    )
+    # Short entries keep exactly the prompt and schema they always had, so
+    # results already in the memo still match them.
+    tier = detail_tier(len(text.split()), config)
+    schema: type[Extraction] = Extraction
+    if tier is not None:
+        base_system += _DETAILS_RULE.format(sentences=tier[0], chars=tier[1])
+        schema = DetailedExtraction
+    system = base_system
+    if known_tags:
+        system += _KNOWN_TAGS.format(tags=", ".join(known_tags))
 
     heading = f"Journal entry dated {entry.entry_date.isoformat()}"
     if entry.rel_path:
         heading += f"\nFile: {entry.rel_path}"
+    user = f"{heading}\n\n{text}" if text else heading
+    if photos:
+        user += f"\n\n{photos}"
+    if linked:
+        room = _room_for_links(
+            config, [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        )
+        shown = fit(list(linked), room - len(_LINKED_HEADER))
+        if shown:
+            user += f"\n\n{_LINKED_HEADER}\n" + "\n".join(shown)
+    # The tag list grows while a journal is indexed, so a rebuild would show
+    # the model a different one; it's left out of the memo key so the rebuild
+    # can reuse what the model said the first time.
     result = _in_writers_voice(
         client,
         config.ollama.fast_model,
         [
-            {
-                "role": "system",
-                "content": _SYSTEM_PROMPT.format(
-                    mood_max=config.indexing.mood_scale_max,
-                    summary_max=SUMMARY_MAX_CHARS,
-                ),
-            },
-            {"role": "user", "content": f"{heading}\n\n{text}"},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ],
-        Extraction,
+        schema,
+        memo_messages=[
+            {"role": "system", "content": base_system},
+            {"role": "user", "content": user},
+        ],
     )
 
     # small models go out of range sometimes
@@ -120,6 +218,8 @@ def extract(entry: ParsedEntry, config: Config, client: OllamaClient) -> Extract
             max(result.mood_score, 1.0), float(config.indexing.mood_scale_max)
         )
     result.summary = _clip(result.summary, SUMMARY_MAX_CHARS)
+    if tier is not None and isinstance(result, DetailedExtraction):
+        result.details = _clip_sentences(result.details, tier[1])
 
     merged: dict[str, None] = {}
     for tag in [t.lower().strip() for t in result.tags] + literal_tags:

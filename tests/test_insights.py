@@ -10,14 +10,14 @@ def _add(conn, d, mood, tags, links=()):
 
 
 def _seed(conn):
-    # baseline 6.0, 'work' days low, days with Sara high
-    add_note(conn, "Sara")
+    # baseline 6.0, 'work' days low, days with John high
+    add_note(conn, "John")
     day = 1
     for _ in range(3):
         _add(conn, date(2024, 1, day), 3.0, ["work"])
         day += 1
     for _ in range(3):
-        _add(conn, date(2024, 1, day), 9.0, ["friends", "outdoors"], links=["Sara"])
+        _add(conn, date(2024, 1, day), 9.0, ["friends", "outdoors"], links=["John"])
         day += 1
     for _ in range(4):
         _add(conn, date(2024, 1, day), 6.0, ["misc"])
@@ -42,7 +42,7 @@ def test_linked_note_and_cooccurrence_findings(conn, config):
     assert "entity_mood" in kinds
     assert "cooccurrence" in kinds
     entity_line = next(f.text for f in result.findings if f.kind == "entity_mood")
-    assert "Sara" in entity_line and "people" in entity_line
+    assert "John" in entity_line and "people" in entity_line
 
 
 def test_below_min_sample_is_not_reported(conn, config):

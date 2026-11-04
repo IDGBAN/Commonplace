@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from .config import Config
 from .models import ParsedNote
 from .ollama_client import OllamaClient
+from .parser import Section
 
 # prose is nearer 4, 3 leaves some slack
 CHARS_PER_TOKEN_ESTIMATE = 3
@@ -62,6 +65,19 @@ def entry_vector(
     if not text:
         return None
     return _embed(config, client, text)
+
+
+def section_vectors(
+    sections: Sequence[Section], config: Config, client: OllamaClient
+) -> list[list[float] | None]:
+    """One vector for each part of an entry, its heading included."""
+    if not sections:
+        return []
+    max_chars = _window(config, client) * CHARS_PER_TOKEN_ESTIMATE
+    return [
+        _embed(config, client, text) if (text := _document_text(s.text, None, max_chars)) else None
+        for s in sections
+    ]
 
 
 def note_vector(

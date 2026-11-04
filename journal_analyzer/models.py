@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+FrontmatterValue = str | list[str]
+
 
 @dataclass
 class ParsedEntry:
@@ -14,6 +16,14 @@ class ParsedEntry:
     source_path: str
     links: list[str] = field(default_factory=list)  # casefolded note names
     rel_path: str = ""  # vault-relative, forward slashes
+    # the whole file's, so split sections share it
+    frontmatter: dict[str, FrontmatterValue] = field(default_factory=dict)
+    # how a link was shown when it differs from its target, e.g. "john doe" -> ["John"]
+    link_labels: dict[str, list[str]] = field(default_factory=dict)
+    # parser.link_anchors for its links, e.g. "2024-01-14" -> ["Work"]
+    link_anchors: dict[str, list[str]] = field(default_factory=dict)
+    # the image files it links or embeds, as written, e.g. "beach.jpg"
+    images: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -27,6 +37,9 @@ class ParsedNote:
     properties: dict[str, str] = field(default_factory=dict)
     links: list[str] = field(default_factory=list)
     rel_path: str = ""
+    private: bool = False  # marked private, so nothing from it is stored
+    # the same properties as lists, e.g. Relationship -> ["Friend", "School"]
+    property_values: dict[str, list[str]] = field(default_factory=dict)
 
     def header(self) -> str:
         lines = [f"{self.title} ({self.kind})"]
@@ -46,6 +59,12 @@ class Extraction(BaseModel):
     mood_score: float | None = None
     summary: str = ""
     tags: list[str] = Field(default_factory=list)
+
+
+class DetailedExtraction(Extraction):
+    """For long entries: the one-line summary plus a few sentences more."""
+
+    details: str = ""
 
 
 class NoteSummary(BaseModel):
@@ -69,10 +88,22 @@ class QueryPlan(BaseModel):
 
 
 class Answer(BaseModel):
-    text: str
+    text: str  # with the Sources line
     cited_dates: list[date] = Field(default_factory=list)
+    # ISO date -> the heading of the part of that day that matched, when one did
+    cited_parts: dict[str, str] = Field(default_factory=dict)
     cited_notes: list[str] = Field(default_factory=list)
     stage_used: AnswerStage
+    body: str = ""  # without it
+    # what the model was given, best first
+    read_entry_ids: list[int] = Field(default_factory=list)
+    read_note_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _body_defaults_to_text(self) -> Answer:
+        if not self.body:
+            self.body = self.text
+        return self
 
 
 class JournalError(Exception):

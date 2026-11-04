@@ -67,6 +67,30 @@ def test_out_of_range_numbers_are_rejected(tmp_path):
         load_config(path)
 
 
+def test_a_split_regex_that_does_not_compile_is_reported(tmp_path):
+    text = MINIMAL.format(vault=tmp_path) + "split_heading_regex = '^## ['\n"
+    with pytest.raises(ConfigError, match=r"vault\.split_heading_regex.*regular expression"):
+        load_config(_write(tmp_path, text))
+
+
+def test_frontmatter_mood_is_off_and_frontmatter_tags_on_by_default(tmp_path):
+    cfg = load_config(_write(tmp_path, MINIMAL.format(vault=tmp_path)))
+    assert cfg.vault.frontmatter_mood_key == ""
+    assert cfg.tags.from_frontmatter is True
+    assert cfg.tags.ignore == []
+
+
+def test_a_frontmatter_mood_range_must_go_up(tmp_path):
+    text = MINIMAL.format(vault=tmp_path) + "frontmatter_mood_min = 5\nfrontmatter_mood_max = 5\n"
+    with pytest.raises(ConfigError, match="frontmatter_mood_max"):
+        load_config(_write(tmp_path, text))
+
+
+def test_ignored_tags_are_normalized(tmp_path):
+    text = MINIMAL.format(vault=tmp_path) + "\n[tags]\nignore = ['#Daily', ' journal ', '']\n"
+    assert load_config(_write(tmp_path, text)).tags.ignore == ["daily", "journal"]
+
+
 def test_embed_defaults_target_qwen3_embedding(tmp_path):
     cfg = load_config(_write(tmp_path, MINIMAL.format(vault=tmp_path)))
     assert cfg.ollama.embed_model == "qwen3-embedding:0.6b"

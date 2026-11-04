@@ -8,11 +8,11 @@ TODAY = date(2024, 6, 15)
 
 
 def _seed_recent(conn):
-    add_note(conn, "Sara")
+    add_note(conn, "John")
     add_note(conn, "Garden", kind="topics")
     add_entry(
         conn, date(2024, 6, 10), summary="Started the garden project.",
-        tags=["garden"], links=["Sara", "Garden"],
+        tags=["garden"], links=["John", "Garden"],
     )
     add_entry(conn, date(2024, 6, 12), summary="Stressful day at work.", tags=["work"])
 
@@ -22,7 +22,7 @@ def test_prompts_parsed_and_capped(conn, config, fake_client):
     fake_client.chat_response = (
         "1. How is the garden project coming along?\n"
         "2. What made work stressful this week?\n"
-        "3. When will you next see Sara?\n"
+        "3. When will you next see John?\n"
         "4. What are you looking forward to?\n"
         "5. One extra prompt beyond the count."
     )
@@ -30,7 +30,7 @@ def test_prompts_parsed_and_capped(conn, config, fake_client):
     assert len(out) == 4
     assert out[0] == "How is the garden project coming along?"  # numbering stripped
     sent = fake_client.chat_calls[-1][1][-1]["content"]
-    assert "garden project" in sent.lower() and "who/what: Sara, Garden" in sent
+    assert "garden project" in sent.lower() and "who/what: John, Garden" in sent
 
 
 def test_no_recent_entries_returns_empty(conn, config, fake_client):

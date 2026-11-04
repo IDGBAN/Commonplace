@@ -11,6 +11,16 @@ split_heading_regex = ""          # set to split one file into several entries a
 # Folders and files to skip. Names without a "/" match anywhere in the tree,
 # patterns with a "/" match the path from the vault root. * and ? work.
 ignore_patterns = [".stversions", ".stfolder", ".smart-env", ".obsidian"]
+# Entries and notes tagged with this (#private), or with private: true in their
+# frontmatter, are never read by a model or stored. Empty turns the tag off.
+private_tag = "private"
+strip_comments = true             # leave out %% comments %%, which Obsidian hides
+# Use the mood you write in each entry's frontmatter instead of the model's
+# guess. Empty leaves mood to the model. min and max are the scale you write
+# it on; it's converted to 1..mood_scale_max. "7/10" style values work too.
+frontmatter_mood_key = ""         # e.g. "mood"
+frontmatter_mood_min = 1
+frontmatter_mood_max = 10
 
 [ollama]
 host = "http://localhost:11434"
@@ -18,22 +28,56 @@ fast_model = "llama3.2:3b"
 precise_model = "qwen3:14b"
 fast_model_think = false
 precise_model_think = true
+# The fast model always gets this window, so Ollama loads it once at that size
+# and there's room for the notes an entry links to. 0 means 4096, raised only
+# for prompts that need more; the context length set in the Ollama app isn't
+# used. 8192 costs a 3B model about 1 GB of memory; 16384 fits more notes and
+# is slower on a CPU.
+fast_num_ctx = 8192
+precise_num_ctx = 0
 embed_model = "qwen3-embedding:0.6b"
 embed_num_ctx = 8192
+# A model that reads images (gemma3, llava, qwen2.5vl...) to describe the photos
+# entries link or embed, so their days can be found by what's in them. Empty
+# turns it off. Each photo is described once; the memo keeps it.
+vision_model = ""
 request_timeout_seconds = 120
 
 [db]
 path = "~/.journal_analyzer/journal.db"
+# Keeps what the models returned, so a rebuild or `index --force` reuses it
+# instead of asking again. Empty memo_path puts it next to the cache.
+memo = true
+memo_path = ""
 
 [indexing]
 watch_debounce_seconds = 45
 mood_scale_max = 10               # mood_score goes from 1 to this
+linked_note_chars = 600           # of each linked note sent along when an entry is read; 0 sends none
+# Entries this long also get a longer summary (2-3 sentences), and from
+# detail_long_words a longer one (3-5). 0 turns it off.
+detail_min_words = 400
+detail_long_words = 1000
+# Entries with several top-level headings are also searched part by part,
+# each with its own vector, so a short part of a long day can be found and
+# cited as [[2024-03-04#Work]]. Parts shorter than section_min_chars join the
+# one before. Changing either needs no re-index, only vectors for the parts.
+sections = true
+section_min_chars = 200
+photos_per_entry = 4              # photos described for each entry, with [ollama] vision_model set
 
 [reranking]
-# Reorders search hits before answering, which gives better results. The model
-# is downloaded the first time it's used, so set enabled = false to stay offline.
+# Reorders search hits before answering, which gives better results.
 enabled = true
 model = "ms-marco-MiniLM-L-12-v2"
+
+[rollups]
+# Notes linked from at least this many entries get a relationship digest,
+# written by `journal rollup`. 0 turns them off.
+note_min_mentions = 8
+note_entries_per_year = 30         # entries per year that go into one; busier years are sampled
+linked_notes_chars = 6000          # room for linked notes in each digest's prompt; 0 sends none
+entry_details_chars = 8000         # room for long entries' longer summaries in each digest; the rest get one line
 
 [insights]
 # `journal insights` only reports a tag, person or weekly/seasonal pattern once
@@ -43,10 +87,48 @@ model = "ms-marco-MiniLM-L-12-v2"
 min_sample_size = 3
 mood_deviation_threshold = 0.8
 
+[tags]
+from_frontmatter = true           # tags: in an entry's frontmatter count like inline #tags
+ignore = []                       # dropped from every entry, e.g. ["daily", "journal"]
+# Tags that should count as another one, e.g. { friendship = "friends" }.
+# `journal tags --similar` suggests some.
+merge = {}
+known_in_prompt = 40              # most used tags shown to the model when it tags an entry; 0 turns it off
+
+[metrics]
+# Numbers in entry frontmatter, like sleep: 7 or exercise: true. Empty keys
+# means every numeric property; ignore leaves some out, e.g. ["week"].
+keys = []
+ignore = []
+
+[profile]
+# A short profile of you, kept from your entries and given to answers, digests,
+# insights and writing prompts (never to the step that reads single entries).
+enabled = true
+note = ""                         # a note about yourself, from the vault root, e.g. "Links/People/Me.md"
+scan_batch_entries = 8            # entries read per call when looking for facts about you
+max_words = 350                   # how long the profile may get; a quarter over and it's shortened
+watch_update_minutes = 30         # `journal watch` rewrites it at most this often
+
 [notes]
 # Folders (or single files) of undated notes about people, places, topics and
 # so on. An entry that [[links]] to one counts as mentioning it, and answers
 # can use the notes themselves. A note's kind is the folder right under one of
-# these paths, so Links/People/Sara.md is "people".
-paths = []                        # e.g. ["Links"]
+# these paths, so Links/People/John.md is "people".
+paths = []
+# Also treat every other Markdown file as a note: anything daily_note_glob
+# doesn't pick, outside hidden folders like .trash. Its kind is its top folder,
+# or "note" at the vault root. Only matters with a narrower daily_note_glob.
+other_files = false
+# A note that links a day, like an event note linking [[2024-03-05]], is
+# always shown on both pages. With this on it also counts as mentioned by
+# that day's entries, which changes the counts and moods for those notes.
+day_links_count = false
 summarize_over_chars = 280        # shorter notes are their own summary; 0 summarizes every note
+# Link text you use for one note, like Johnny in [[John Doe|Johnny]], counts as
+# a name for it once it shows up in this many entries. 0 turns it off.
+learned_alias_min = 2
+learned_alias_ignore = []         # link text that should never count as a name, e.g. ["home"]
+# Properties whose values group notes for `journal insights`, e.g.
+# ["relationship"]. Empty means every property two notes have in common.
+group_keys = []

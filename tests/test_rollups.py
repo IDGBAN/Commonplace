@@ -27,7 +27,7 @@ def test_generates_week_month_and_year_digests(conn, config, fake_client):
     _seed(conn)
     fake_client.chat_response = "A digest."
     counts = rollups.generate_rollups(config, conn, fake_client)
-    assert counts == {"week": 2, "month": 2, "year": 1}
+    assert counts == {"profile": 0, "week": 2, "month": 2, "year": 1, "note": 0}
     month = _rollup(conn, "month", "2024-01")
     assert month["summary"] == "A digest."
     assert month["entry_count"] == 2
@@ -52,16 +52,29 @@ def test_years_are_built_from_month_digests_not_entries(conn, config, fake_clien
     assert "day 2024-01-15" not in year_prompt
 
 
+def test_year_numbers_count_every_entry_equally(conn, config, fake_client):
+    for day in (1, 2, 3):
+        _add(conn, date(2024, 1, day), 2.0, ("work",))
+    _add(conn, date(2024, 2, 1), 8.0, ("rest",))
+    fake_client.chat_response = "A digest."
+    rollups.generate_rollups(config, conn, fake_client)
+    year = _rollup(conn, "year", "2024")
+    # the month averages are 2 and 8, but three of the four entries are January's
+    assert year["avg_mood"] == 3.5
+    assert year["entry_count"] == 4
+    assert json.loads(year["dominant_tags"]) == ["work", "rest"]
+
+
 def test_only_stale_skips_fresh_digests(conn, config, fake_client):
     _seed(conn)
     fake_client.chat_response = "A digest."
     rollups.generate_rollups(config, conn, fake_client)
     assert rollups.generate_rollups(config, conn, fake_client) == {
-        "week": 0, "month": 0, "year": 0
+        "profile": 0, "week": 0, "month": 0, "year": 0, "note": 0
     }
     store.mark_rollups_stale(conn, date(2024, 1, 15))
     counts = rollups.generate_rollups(config, conn, fake_client)
-    assert counts == {"week": 1, "month": 1, "year": 1}
+    assert counts == {"profile": 0, "week": 1, "month": 1, "year": 1, "note": 0}
 
 
 def test_rebuild_all_regenerates_everything(conn, config, fake_client):
@@ -69,7 +82,7 @@ def test_rebuild_all_regenerates_everything(conn, config, fake_client):
     fake_client.chat_response = "A digest."
     rollups.generate_rollups(config, conn, fake_client)
     counts = rollups.generate_rollups(config, conn, fake_client, only_stale=False)
-    assert counts == {"week": 2, "month": 2, "year": 1}
+    assert counts == {"profile": 0, "week": 2, "month": 2, "year": 1, "note": 0}
 
 
 def test_digests_for_emptied_periods_are_pruned(conn, config, fake_client):
@@ -101,14 +114,14 @@ def test_months_and_years_are_written_before_weeks(conn, config, fake_client):
 
 def test_no_entries_generates_nothing(conn, config, fake_client):
     assert rollups.generate_rollups(config, conn, fake_client) == {
-        "week": 0, "month": 0, "year": 0
+        "profile": 0, "week": 0, "month": 0, "year": 0, "note": 0
     }
     assert fake_client.chat_calls == []
 
 
 def test_period_digests_name_the_notes_entries_link_to(conn, config, fake_client):
-    add_note(conn, "Sara Miller")
-    _add(conn, date(2024, 1, 15), links=["Sara Miller"])
+    add_note(conn, "John Doe")
+    _add(conn, date(2024, 1, 15), links=["John Doe"])
     prompts = []
 
     def chat(model, messages):
@@ -117,4 +130,4 @@ def test_period_digests_name_the_notes_entries_link_to(conn, config, fake_client
 
     fake_client.chat_response = chat
     rollups.generate_rollups(config, conn, fake_client, period_types=("week",))
-    assert "(links: Sara Miller)" in prompts[0]
+    assert "(links: John Doe)" in prompts[0]

@@ -25,10 +25,34 @@ def test_a_factual_question_without_dates_gets_no_digests(conn):
     assert query._digest_lines(QueryPlan(intent="factual"), conn) == []
 
 
-def test_a_narrow_span_is_left_to_its_entries(conn):
-    _months(conn, 2024, 2)
-    plan = QueryPlan(intent="narrative", date_from=date(2024, 1, 1), date_to=date(2024, 2, 28))
+def test_a_span_of_a_few_days_is_left_to_its_entries(conn):
+    for day in (3, 5, 9):
+        add_entry(conn, date(2024, 1, day))
+    store.upsert_rollup(conn, "week", "2024-W01", "week one", "[]", None, 3)
+    plan = QueryPlan(intent="narrative", date_from=date(2024, 1, 1), date_to=date(2024, 1, 9))
     assert query._digest_lines(plan, conn) == []
+
+
+def test_a_span_of_a_few_weeks_reads_the_week_digests(conn):
+    _months(conn, 2024, 2)
+    for key in ("2024-W02", "2024-W04", "2024-W06", "2023-W50"):
+        store.upsert_rollup(conn, "week", key, f"week {key}", "[]", None, 1)
+    plan = QueryPlan(intent="narrative", date_from=date(2024, 1, 1), date_to=date(2024, 2, 28))
+    assert query._digest_lines(plan, conn) == [
+        "- [week 2024-W02] week 2024-W02",
+        "- [week 2024-W04] week 2024-W04",
+        "- [week 2024-W06] week 2024-W06",
+    ]
+
+
+def test_only_the_latest_weeks_are_used(conn):
+    add_entry(conn, date(2024, 1, 1))
+    add_entry(conn, date(2024, 3, 1))
+    for week in range(1, 10 + query.MAX_WEEK_DIGESTS):
+        store.upsert_rollup(conn, "week", f"2024-W{week:02d}", f"w{week}", "[]", None, 1)
+    lines = query._digest_lines(QueryPlan(intent="narrative"), conn)
+    assert len(lines) == query.MAX_WEEK_DIGESTS
+    assert lines[-1] == "- [week 2024-W09] w9"
 
 
 def test_the_span_is_measured_on_the_entries_not_the_question(conn):

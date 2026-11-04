@@ -39,6 +39,9 @@ journal = "journal_analyzer.cli:app"
 [tool.setuptools.packages.find]
 include = ["journal_analyzer*"]
 
+[tool.setuptools.package-data]
+journal_analyzer = ["browse_static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

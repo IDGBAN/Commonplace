@@ -7,10 +7,10 @@ from journal_analyzer import export
 
 
 def _seed(conn):
-    add_note(conn, "Sara")
+    add_note(conn, "John")
     add_entry(
         conn, date(2024, 1, 1), text="first day", mood=6.5, tags=["work"],
-        links=["Sara"], summary="summary for 2024-01-01",
+        links=["John"], summary="summary for 2024-01-01",
     )
     add_entry(
         conn, date(2024, 2, 1), text="second day", mood=6.5, tags=["rest", "family"],
@@ -23,7 +23,7 @@ def test_collect_entries_carries_tags_and_linked_notes(conn):
     entries = export.collect_entries(conn)
     assert [e["date"] for e in entries] == ["2024-01-01", "2024-02-01"]
     assert entries[0]["tags"] == ["work"]
-    assert entries[0]["entities"] == [{"name": "Sara", "type": "people"}]
+    assert entries[0]["entities"] == [{"name": "John", "type": "people"}]
     assert entries[1]["entities"] == []
     assert entries[1]["tags"] == ["family", "rest"]
 
@@ -53,7 +53,7 @@ def test_to_markdown_uses_wikilink_headings(conn):
     text = export.to_markdown(export.collect_entries(conn, include_raw=True))
     assert "## [[2024-01-01]]" in text
     assert "mood 6.5" in text
-    assert "mentions: Sara" in text
+    assert "mentions: John" in text
     assert "first day" in text
     assert text.endswith("\n")
 

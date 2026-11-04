@@ -40,13 +40,13 @@ def test_backfill_idempotent_and_incremental(tmp_path, fake_client):
     db_mod.init_schema(conn)
 
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 2, "skipped": 0, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 2, "private": 0, "skipped": 0, "error": 0, "dropped": 0}
     files1, entries1 = _snapshot(conn)
     assert len(entries1) == 2
 
     # second run skips everything
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 0, "skipped": 2, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 0, "private": 0, "skipped": 2, "error": 0, "dropped": 0}
     assert _snapshot(conn) == (files1, entries1)
 
     # change one file, only its rows should change
@@ -56,7 +56,7 @@ def test_backfill_idempotent_and_incremental(tmp_path, fake_client):
         encoding="utf-8",
     )
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 1, "skipped": 1, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 1, "private": 0, "skipped": 1, "error": 0, "dropped": 0}
     files2, entries2 = _snapshot(conn)
     changed_files = [f for f in files2 if f not in files1]
     assert [f[0] for f in changed_files] == [str(target)]
@@ -74,7 +74,7 @@ def test_malformed_file_is_marked_error_without_aborting(tmp_path, fake_client):
     db_mod.init_schema(conn)
 
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 1, "skipped": 0, "error": 1, "dropped": 0}
+    assert counts == {"indexed": 1, "private": 0, "skipped": 0, "error": 1, "dropped": 0}
     row = conn.execute(
         "SELECT status, error_message FROM files WHERE path = ?", (str(bad),)
     ).fetchone()
@@ -122,12 +122,12 @@ def test_ignore_patterns_skip_bare_name_anywhere(tmp_path):
         ignore_patterns=[".stversions", ".obsidian", "*.tmp.md"],
     )
     vault = cfg.vault.path
-    assert ingester._is_ignored(vault / ".obsidian" / "workspace.md", cfg)
-    assert ingester._is_ignored(
+    assert ingester.is_ignored(vault / ".obsidian" / "workspace.md", cfg)
+    assert ingester.is_ignored(
         vault / "sub" / ".stversions" / "2024-01-01.md", cfg
     )
-    assert ingester._is_ignored(vault / "2024-01-01.tmp.md", cfg)
-    assert not ingester._is_ignored(vault / "2024-01-01.md", cfg)
+    assert ingester.is_ignored(vault / "2024-01-01.tmp.md", cfg)
+    assert not ingester.is_ignored(vault / "2024-01-01.md", cfg)
     # matches_glob and the backfill walk both honor it
     assert not ingester._matches_glob(vault / ".obsidian" / "workspace.md", cfg)
 
@@ -146,7 +146,7 @@ def test_backfill_skips_ignored_folders(tmp_path, fake_client):
     conn = db_mod.connect(cfg)
     db_mod.init_schema(conn)
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 1, "skipped": 0, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 1, "private": 0, "skipped": 0, "error": 0, "dropped": 0}
     assert conn.execute("SELECT COUNT(*) c FROM entries").fetchone()["c"] == 1
 
 
@@ -176,7 +176,7 @@ def test_watch_and_backfill_agree_on_which_files_count(tmp_path):
     (vault / ".obsidian" / "2024-01-04.md").write_text("junk", encoding="utf-8")
     (vault / "notes.txt").write_text("not markdown", encoding="utf-8")
 
-    walked = set(ingester._vault_files(cfg))
+    walked = set(ingester.vault_files(cfg))
     watched = {
         p for p in vault.rglob("*") if p.is_file() and ingester._matches_glob(p, cfg)
     }
@@ -227,10 +227,10 @@ def _notes_vault(tmp_path):
 def test_reference_notes_are_indexed_and_become_the_entities(tmp_path, fake_client):
     cfg, conn = _notes_vault(tmp_path)
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 4, "skipped": 0, "error": 0, "dropped": 0}
+    assert counts == {"indexed": 4, "private": 0, "skipped": 0, "error": 0, "dropped": 0}
     kinds = {r["title"]: r["kind"] for r in conn.execute("SELECT title, kind FROM notes")}
     assert kinds == {
-        "Sara Miller": "people",
+        "John Doe": "people",
         "Bear Mountain": "locations",
         "garden-project": "topics-things",
     }
@@ -245,8 +245,8 @@ def test_short_notes_skip_the_model_and_long_ones_are_summarized(tmp_path, fake_
     cfg, conn = _notes_vault(tmp_path)
     ingester.run_backfill(cfg, conn, client=fake_client)
     rows = {r["title"]: r for r in conn.execute("SELECT * FROM notes")}
-    assert rows["Sara Miller"]["summary"] == "A canned note summary."
-    assert rows["Sara Miller"]["model_used"] == "fake-fast"
+    assert rows["John Doe"]["summary"] == "A canned note summary."
+    assert rows["John Doe"]["model_used"] == "fake-fast"
     assert rows["Bear Mountain"]["summary"] == (
         "State park an hour north with a steep summit trail."
     )
@@ -267,19 +267,19 @@ def test_notes_outside_the_daily_glob_are_still_found(tmp_path):
     cfg = make_config(tmp_path, notes_paths=["Links"], daily_note_glob="Journal/**/*.md")
     vault = cfg.vault.path
     copy_note_fixtures(vault)
-    assert "Sara Miller.md" in {p.name for p in ingester._vault_files(cfg)}
-    assert ingester._matches_glob(vault / "Links" / "People" / "Sara Miller.md", cfg)
+    assert "John Doe.md" in {p.name for p in ingester.vault_files(cfg)}
+    assert ingester._matches_glob(vault / "Links" / "People" / "John Doe.md", cfg)
     assert not ingester._matches_glob(vault / "Links" / "People" / "photo.jpg", cfg)
 
 
 def test_deleting_a_note_removes_it_from_the_entities(tmp_path, fake_client):
     cfg, conn = _notes_vault(tmp_path)
     ingester.run_backfill(cfg, conn, client=fake_client)
-    sara = cfg.vault.path / "Links" / "People" / "Sara Miller.md"
-    sara.unlink()
-    ingester._apply_event(str(sara), "delete", cfg, conn, fake_client)
+    john = cfg.vault.path / "Links" / "People" / "John Doe.md"
+    john.unlink()
+    ingester._apply_event(str(john), "delete", cfg, conn, fake_client)
     names = {r["name"] for r in store.top_entities(conn, None, None)}
-    assert "Sara Miller" not in names
+    assert "John Doe" not in names
     assert "Bear Mountain" in names
 
 
@@ -322,7 +322,7 @@ def test_backfill_forgets_files_deleted_while_nothing_watched(tmp_path, fake_cli
 
     gone.unlink()
     counts = ingester.run_backfill(cfg, conn, client=fake_client)
-    assert counts == {"indexed": 0, "skipped": 1, "error": 0, "dropped": 1}
+    assert counts == {"indexed": 0, "private": 0, "skipped": 1, "error": 0, "dropped": 1}
     assert store.tracked_paths(conn) == [str(kept)]
     assert [r["entry_date"] for r in conn.execute("SELECT entry_date FROM entries")] == [
         "2024-01-15"
@@ -435,8 +435,8 @@ def test_the_models_are_told_where_each_file_sits(tmp_path, fake_client):
         "Journal entry dated 2024-01-20\nFile: Trips/2024-01-20.md\n\nPacked for the coast."
         in prompts["Extraction"]
     )
-    [sara] = prompts["NoteSummary"]
-    assert sara.startswith("Sara Miller (people)\nFile: Links/People/Sara Miller.md\n")
+    [john] = prompts["NoteSummary"]
+    assert john.startswith("John Doe (people)\nFile: Links/People/John Doe.md\n")
     assert any(
         text.startswith("Bear Mountain (locations)\nFile: Links/Locations/Bear Mountain.md")
         for text in fake_client.embed_calls

@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
 
-from . import db, embedder, parser, store
+from . import context, db, embedder, parser, profile, store
 from .config import Config
 from .models import Answer, AnswerStage, QueryPlan
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
@@ -29,6 +29,9 @@ TOP_K = 8
 MAX_RAW_CONTEXT_CHARS = 96_000
 # ranges wider than this also get month digests
 BROAD_RANGE_DAYS = 62
+# ranges from this up to BROAD_RANGE_DAYS get week digests instead
+WEEK_DIGEST_MIN_DAYS = 10
+MAX_WEEK_DIGESTS = 9
 # more months than this and we send year digests instead
 MAX_MONTH_DIGESTS = 14
 # the reranker can only reorder what retrieval found, so fetch extra
@@ -37,10 +40,16 @@ RERANK_CANDIDATE_POOL = 25
 RRF_DAMPING = 60
 AGGREGATE_TOP_TAGS = 10
 NOTE_SEARCH_K = 3
-LINKED_NOTES_K = 3
-MAX_CONTEXT_NOTES = 8
+# notes the candidate entries link to, the most linked first
+LINKED_NOTES_K = 8
+MAX_CONTEXT_NOTES = 12
 # comes out of MAX_RAW_CONTEXT_CHARS
 MAX_NOTE_CONTEXT_CHARS = 16_000
+# extra room for long entries' longer summaries when answering from summaries
+ANSWER_DETAILS_CHARS = 6000
+# and for the part of a long, many-headed entry that matched, each and in all
+ANSWER_PART_CHARS = 700
+ANSWER_PARTS_CHARS = 4000
 # notes called "Go" or "Me" would match ordinary words all the time
 MIN_NAME_CHARS = 3
 
@@ -87,7 +96,9 @@ def contextualize_question(
     history: list[tuple[str, str]],
     config: Config,
     client: OllamaClient,
+    names: str = "",
 ) -> str:
+    """`names` is profile.names: who the writer and the people they mention are."""
     if not history:
         return question
     lines = []
@@ -98,7 +109,7 @@ def contextualize_question(
     rewritten = client.chat(
         model=config.ollama.fast_model,
         messages=[
-            {"role": "system", "content": _CONTEXTUALIZE_SYSTEM},
+            {"role": "system", "content": _CONTEXTUALIZE_SYSTEM + names},
             {
                 "role": "user",
                 "content": (
@@ -112,11 +123,13 @@ def contextualize_question(
     return rewritten or question
 
 
-def _plan(question: str, config: Config, client: OllamaClient, today: date) -> QueryPlan:
+def _plan(
+    question: str, config: Config, client: OllamaClient, today: date, names: str = ""
+) -> QueryPlan:
     return client.chat_structured(
         model=config.ollama.fast_model,
         messages=[
-            {"role": "system", "content": _ROUTER_SYSTEM.format(today=today.isoformat())},
+            {"role": "system", "content": _ROUTER_SYSTEM.format(today=today.isoformat()) + names},
             {"role": "user", "content": question},
         ],
         schema=QueryPlan,
@@ -194,7 +207,7 @@ def _day_in_year(
 def notes_named_in(question: str, conn: sqlite3.Connection) -> list[int]:
     """Notes whose title or alias appears in the question as whole words.
 
-    Longer names go first, so "Sara Miller" doesn't also match a note called "Sara".
+    Longer names go first, so "John Doe" doesn't also match a note called "John".
     """
     text = question.casefold()
     claimed: list[tuple[int, int, str]] = []
@@ -225,13 +238,16 @@ def _words(text: str) -> str:
 
 
 def _notes_used(
-    answer_text: str, notes: list[sqlite3.Row], about: list[int]
+    answer_text: str,
+    notes: list[sqlite3.Row],
+    about: list[int],
+    learned: dict[int, list[str]] | None = None,
 ) -> list[str]:
     # Background notes the answer never mentions would pad every Sources line.
     said = f" {_words(answer_text)} "
     cited: list[str] = []
     for row in notes:
-        names = [row["title"], *store.note_from_row(row).aliases]
+        names = [row["title"], *store.note_from_row(row).aliases, *(learned or {}).get(row["id"], [])]
         mentioned = any(
             (words := _words(name)) and f" {words} " in said for name in names
         )
@@ -245,21 +261,39 @@ def _finalize(
     stage: AnswerStage,
     cited_dates: Iterable[date] = (),
     cited_notes: Iterable[str] = (),
+    read_entries: Iterable[int] = (),
+    read_notes: Iterable[int] = (),
+    cited_parts: dict[str, str] | None = None,
 ) -> Answer:
+    """`cited_parts` is the heading of the part of a cited day that matched, by ISO date."""
     dates = sorted(set(cited_dates))
     notes = sorted(set(cited_notes), key=str.casefold)
-    links = [f"[[{d.isoformat()}]]" for d in dates] + [f"[[{n}]]" for n in notes]
+    parts = {d: h for d, h in (cited_parts or {}).items() if h and date.fromisoformat(d) in dates}
+    body = text.rstrip()
+    links = [
+        f"[[{d.isoformat()}#{parts[d.isoformat()]}]]" if d.isoformat() in parts else f"[[{d.isoformat()}]]"
+        for d in dates
+    ] + [f"[[{n}]]" for n in notes]
     if links:
-        text = f"{text.rstrip()}\n\nSources: {' '.join(links)}"
-    return Answer(text=text, cited_dates=dates, cited_notes=notes, stage_used=stage)
+        text = f"{body}\n\nSources: {' '.join(links)}"
+    return Answer(
+        text=text,
+        body=body,
+        cited_dates=dates,
+        cited_parts=parts,
+        cited_notes=notes,
+        stage_used=stage,
+        read_entry_ids=list(dict.fromkeys(read_entries)),
+        read_note_ids=list(dict.fromkeys(read_notes)),
+    )
 
 
 def _mention_facts(
     conn: sqlite3.Connection, plan: QueryPlan, named: list[int]
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[int]]:
     note_ids = _named_notes(conn, plan, named)[:MAX_CONTEXT_NOTES]
     if not note_ids:
-        return [], []
+        return [], [], []
     stats = store.mention_stats(conn, note_ids, plan.date_from, plan.date_to)
     facts: list[str] = []
     titles: list[str] = []
@@ -276,7 +310,35 @@ def _mention_facts(
             f"[[{title}]] ({kind}): linked from {mentions.count} entries, first "
             f"{mentions.first}, last {mentions.last}; by year {by_year}."
         )
-    return facts, titles
+    return facts, titles, note_ids
+
+
+def metrics_named_in(question: str, conn: sqlite3.Connection) -> list[str]:
+    """Metric keys the question uses as words, like "sleep" in "how did I sleep"."""
+    text = _words(question)
+    named = []
+    for row in store.metric_keys(conn):
+        words = _words(row["key"])
+        if words and f" {words} " in f" {text} ":
+            named.append(row["key"])
+    return named
+
+
+def _metric_text(metrics: dict[str, float]) -> str:
+    return ", ".join(f"{key} {value:g}" for key, value in metrics.items())
+
+
+def _filter_facts(conn: sqlite3.Connection, only: store.EntryFilter | None) -> list[str]:
+    facts = []
+    if only and only.note_ids:
+        titles = " or ".join(f"[[{r['title']}]]" for r in store.notes_by_ids(conn, list(only.note_ids)))
+        facts.append(f"Only entries that link {titles} are counted.")
+    if only and only.group:
+        key, value = only.group
+        facts.append(f"Only entries that link a note whose {key} is {value} are counted.")
+    if only and only.tag:
+        facts.append(f"Only entries tagged '{only.tag}' are counted.")
+    return facts
 
 
 def _answer_aggregate(
@@ -286,43 +348,58 @@ def _answer_aggregate(
     conn: sqlite3.Connection,
     client: OllamaClient,
     named: list[int],
+    only: store.EntryFilter | None = None,
+    on_text: TextSink | None = None,
+    writer: str = "",
 ) -> Answer:
-    mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to)
-    tag_rows = store.top_tags(conn, plan.date_from, plan.date_to, limit=AGGREGATE_TOP_TAGS)
-    lo, hi = store.date_bounds(conn, plan.date_from, plan.date_to)
+    mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
+    tag_rows = store.top_tags(
+        conn, plan.date_from, plan.date_to, limit=AGGREGATE_TOP_TAGS, only=only
+    )
+    lo, hi = store.date_bounds(conn, plan.date_from, plan.date_to, only)
     if not mood_rows:
         return Answer(
             text="No journal entries found in the requested range.",
             stage_used="aggregate",
         )
-    facts = [f"Monthly average mood (1-{config.indexing.mood_scale_max}) and entry counts:"]
+    facts = _filter_facts(conn, only)
+    facts.append(f"Monthly average mood (1-{config.indexing.mood_scale_max}) and entry counts:")
     for r in mood_rows:
         mood = f"{r['avg_mood']:g}" if r["avg_mood"] is not None else "n/a"
         facts.append(f"- {r['month']}: mood {mood}, {r['entry_count']} entries")
     if tag_rows:
         facts.append("Top tags: " + ", ".join(f"{r['name']} ({r['n']})" for r in tag_rows))
-    note_facts, cited_notes = _mention_facts(conn, plan, named)
+    note_facts, cited_notes, note_ids = _mention_facts(conn, plan, named)
     facts.extend(note_facts)
+    for key in metrics_named_in(question, conn):
+        months = store.monthly_metric(conn, key, plan.date_from, plan.date_to, only)
+        if months:
+            facts.append(f"Monthly average of '{key}', a number recorded in the entries:")
+            facts.extend(f"- {r['month']}: {r['avg']:g} over {r['n']} entries" for r in months)
     facts.append(f"Data covers {lo} to {hi}.")
     fact_block = "\n".join(facts)
 
-    text = client.chat(
-        model=config.ollama.fast_model,
-        messages=[
+    text = _chat(
+        client,
+        config.ollama.fast_model,
+        [
             {
                 "role": "system",
                 "content": (
                     "Answer the question about the asker's own journal using "
                     "ONLY the statistics provided. Do not invent numbers. Be "
-                    f"concise. {_READER_VOICE}"
+                    f"concise. {_READER_VOICE}{writer}"
                 ),
             },
             {"role": "user", "content": f"Question: {question}\n\nStatistics:\n{fact_block}"},
         ],
-        options={"temperature": SYNTHESIS_TEMPERATURE},
+        {"temperature": SYNTHESIS_TEMPERATURE},
+        on_text,
     ).strip()
     cited = [date.fromisoformat(d) for d in (lo, hi) if d]
-    return _finalize(text, "aggregate", cited_dates=cited, cited_notes=cited_notes)
+    return _finalize(
+        text, "aggregate", cited_dates=cited, cited_notes=cited_notes, read_notes=note_ids
+    )
 
 
 def _rrf_merge(
@@ -347,15 +424,22 @@ def _get_ranker(model_name: str) -> Any:
     return _RANKER_CACHE[model_name]
 
 
+def _passage(row: sqlite3.Row, part: sqlite3.Row | None) -> str:
+    # the cross-encoder only reads the start, so the part that matched goes first
+    pieces = [row["summary"], part["text"] if part is not None else None, row["raw_text"]]
+    return "\n\n".join(p for p in pieces if p)
+
+
 def _rerank(
-    question: str, rows: list[sqlite3.Row], model_name: str, top_k: int
+    question: str,
+    rows: list[sqlite3.Row],
+    model_name: str,
+    top_k: int,
+    parts: dict[int, sqlite3.Row] | None = None,
 ) -> list[sqlite3.Row]:
     global _RERANK_WARNED
     passages = [
-        {
-            "id": idx,
-            "text": f"{r['summary']}\n\n{r['raw_text']}" if r["summary"] else r["raw_text"],
-        }
+        {"id": idx, "text": _passage(r, (parts or {}).get(r["id"]))}
         for idx, r in enumerate(rows)
     ]
     try:
@@ -393,8 +477,11 @@ def _retrieve(
     *,
     query_vector: list[float] | None = None,
     boost_note_ids: list[int] | None = None,
+    only: store.EntryFilter | None = None,
+    parts: dict[int, sqlite3.Row] | None = None,
 ) -> list[sqlite3.Row]:
-    allowed = store.filtered_entry_ids(conn, plan.date_from, plan.date_to, plan.entities)
+    """`parts`, when given, collects the part of each entry found that matched best."""
+    allowed = store.filtered_entry_ids(conn, plan.date_from, plan.date_to, plan.entities, only)
     if not allowed:
         return []
 
@@ -406,6 +493,13 @@ def _retrieve(
         store.vec_search(conn, query_vector, allowed, fetch_k),
         store.fts_search(conn, plan.keywords + plan.entities, allowed, fetch_k),
     ]
+    best: dict[int, sqlite3.Row] = {}
+    if config.indexing.sections:
+        ranked_lists.extend(
+            _part_rankings(conn, query_vector, plan.keywords + plan.entities, allowed, fetch_k, best)
+        )
+    # what a vision model saw in the photos, which the entry's own text may not say
+    ranked_lists.append(store.photos_fts_search(conn, plan.keywords + plan.entities, allowed, fetch_k))
     if boost_note_ids:
         # a third ranking, so linked entries get a lift without crowding out the rest
         allowed_set = set(allowed)
@@ -419,9 +513,44 @@ def _retrieve(
     order = {eid: i for i, eid in enumerate(merged)}
     ranked = sorted(rows, key=lambda r: order.get(r["id"], len(order)))
 
-    if not config.reranking.enabled or len(ranked) <= 1:
-        return ranked[:top_k]
-    return _rerank(question, ranked, config.reranking.model, top_k)
+    if config.reranking.enabled and len(ranked) > 1:
+        ranked = _rerank(question, ranked, config.reranking.model, top_k, best)
+    ranked = ranked[:top_k]
+    if parts is not None:
+        parts.update({r["id"]: best[r["id"]] for r in ranked if r["id"] in best})
+    return ranked
+
+
+def _part_rankings(
+    conn: sqlite3.Connection,
+    query_vector: list[float] | None,
+    terms: list[str],
+    allowed: list[int] | None,
+    k: int,
+    best: dict[int, sqlite3.Row],
+) -> list[list[int]]:
+    """Entries ranked by their best part, by meaning and by keywords.
+
+    `best` collects that part for each entry: the one scoring highest across
+    both rankings, the same fusion the entries get.
+    """
+    searches = [store.sections_fts_search(conn, terms, allowed, k)]
+    if query_vector is not None:
+        searches.insert(0, store.section_vec_search(conn, query_vector, allowed, k))
+    rankings = []
+    scores: dict[int, float] = {}
+    found: dict[int, sqlite3.Row] = {}
+    for hits in searches:
+        ranked: dict[int, None] = {}
+        for rank, part in enumerate(hits):
+            ranked.setdefault(part["entry_id"], None)
+            scores[part["id"]] = scores.get(part["id"], 0.0) + 1.0 / (RRF_DAMPING + rank + 1)
+            found[part["id"]] = part
+        if ranked:
+            rankings.append(list(ranked))
+    for part_id in sorted(scores, key=lambda i: -scores[i]):
+        best.setdefault(found[part_id]["entry_id"], found[part_id])
+    return rankings
 
 
 def _matching_notes(
@@ -465,6 +594,8 @@ _SEARCH_WORD_RE = re.compile(r"(?<!\w)[^\W_][\w'-]{2,}")
 class SearchResults:
     entries: list[sqlite3.Row]
     notes: list[sqlite3.Row]
+    # entry id -> the part of it that matched best, for entries cut into parts
+    parts: dict[int, sqlite3.Row] = field(default_factory=dict)
 
 
 def search(
@@ -475,37 +606,87 @@ def search(
     limit: int = 10,
     date_from: date | None = None,
     date_to: date | None = None,
+    only: store.EntryFilter | None = None,
 ) -> SearchResults:
     """For `journal search`: no router and no answer, just the query embedding."""
-    keywords = [
-        w for w in _SEARCH_WORD_RE.findall(text.lower())
-        if w not in _SEARCH_STOPWORDS
-    ][:8]
+    keywords = search_keywords(text)
     plan = QueryPlan(
         intent="factual", date_from=date_from, date_to=date_to, keywords=keywords
     )
     query_vector = _embed_question(text, config, conn, client)
     named = notes_named_in(text, conn)
+    parts: dict[int, sqlite3.Row] = {}
     entries = _retrieve(
         text, plan, config, conn, client, top_k=limit,
-        query_vector=query_vector, boost_note_ids=named,
+        query_vector=query_vector, boost_note_ids=named, only=only, parts=parts,
     )
     note_ids = _matching_notes(conn, query_vector, keywords, named, NOTE_SEARCH_K)
-    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids))
+    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids), parts=parts)
+
+
+def search_keywords(text: str) -> list[str]:
+    return [
+        w for w in _SEARCH_WORD_RE.findall(text.lower())
+        if w not in _SEARCH_STOPWORDS
+    ][:8]
+
+
+def keyword_search(
+    text: str,
+    conn: sqlite3.Connection,
+    limit: int = 10,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> SearchResults:
+    """`search` without the embedding, so it works while Ollama is down."""
+    keywords = search_keywords(text)
+    named = notes_named_in(text, conn)
+    allowed = (
+        store.filtered_entry_ids(conn, date_from, date_to) if date_from or date_to else None
+    )
+    ranked_lists = [
+        store.fts_search(conn, keywords, allowed, limit),
+        store.photos_fts_search(conn, keywords, allowed, limit),
+    ]
+    best: dict[int, sqlite3.Row] = {}
+    ranked_lists.extend(_part_rankings(conn, None, keywords, allowed, limit, best))
+    if named:
+        allowed_set = set(allowed) if allowed is not None else None
+        linked = [
+            i for i in store.entry_ids_mentioning(conn, named)
+            if allowed_set is None or i in allowed_set
+        ]
+        ranked_lists.append(linked[:limit])
+    merged = _rrf_merge(ranked_lists, limit)
+    order = {eid: i for i, eid in enumerate(merged)}
+    entries = sorted(store.entries_by_ids(conn, merged), key=lambda r: order[r["id"]])
+    parts = {eid: best[eid] for eid in merged if eid in best}
+    note_ids = list(
+        dict.fromkeys([*named, *store.notes_fts_search(conn, keywords, NOTE_SEARCH_K)])
+    )
+    return SearchResults(entries=entries, notes=store.notes_by_ids(conn, note_ids), parts=parts)
 
 
 def _ensure_day_included(
     conn: sqlite3.Connection,
     day: date,
     candidates: list[sqlite3.Row],
+    only: store.EntryFilter | None = None,
 ) -> list[sqlite3.Row]:
     have = {r["id"] for r in candidates}
-    day_rows = [r for r in store.entries_in_range(conn, day, day) if r["id"] not in have]
+    allowed = set(store.filtered_entry_ids(conn, day, day, only=only))
+    day_rows = [r for r in store.entries_by_ids(conn, list(allowed)) if r["id"] not in have]
     # in front, so the raw-text budget can't drop it
     return day_rows + candidates
 
 
-def _note_line(row: sqlite3.Row, mentions: store.Mentions | None, vault: Path) -> str:
+def _note_line(
+    row: sqlite3.Row,
+    mentions: store.Mentions | None,
+    vault: Path,
+    learned: Sequence[str] = (),
+) -> str:
+    """`learned` are the names its links are written with (nicknames)."""
     note = store.note_from_row(row, vault)
     facts = [
         note.kind,
@@ -514,12 +695,19 @@ def _note_line(row: sqlite3.Row, mentions: store.Mentions | None, vault: Path) -
     ]
     if note.aliases:
         facts.append("also called " + ", ".join(note.aliases))
+    if learned:
+        facts.append("the journal also writes it as " + ", ".join(learned))
     if mentions is not None:
         facts.append(
             f"linked from {mentions.count} entries, {mentions.first} to {mentions.last}"
         )
     body = row["summary"] or note.raw_text or "(the note itself has no text)"
     return f"- [[{note.title}]] ({'; '.join(facts)}): {' '.join(body.split())}"
+
+
+def _learned_names(conn: sqlite3.Connection, notes: list[sqlite3.Row]) -> dict[int, list[str]]:
+    found = store.learned_names_for(conn, [r["id"] for r in notes])
+    return {note_id: [r["name"] for r in rows] for note_id, rows in found.items()}
 
 
 def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
@@ -530,8 +718,12 @@ def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
     if lo is None or hi is None:
         return []
     start, end = date.fromisoformat(lo), date.fromisoformat(hi)
-    if (end - start).days <= BROAD_RANGE_DAYS:
+    days = (end - start).days
+    if days < WEEK_DIGEST_MIN_DAYS:
         return []
+    if days <= BROAD_RANGE_DAYS:
+        weeks = store.get_rollups_in_range(conn, "week", start, end)[-MAX_WEEK_DIGESTS:]
+        return [f"- [week {r['period_key']}] {r['summary']}" for r in weeks]
     months = store.get_rollups_in_range(conn, "month", start, end)
     if len(months) > MAX_MONTH_DIGESTS:
         years = store.get_rollups_in_range(conn, "year", start, end)
@@ -541,39 +733,138 @@ def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
     return [f"- [month {r['period_key']}] {r['summary']}" for r in months]
 
 
+def _relationship_digests(
+    conn: sqlite3.Connection, config: Config, note_ids: list[int]
+) -> dict[int, str]:
+    """Relationship digests for these notes, by note id."""
+    if config.rollups.note_min_mentions == 0 or not note_ids:
+        return {}
+    rows = store.notes_by_ids(conn, note_ids[:MAX_CONTEXT_NOTES])
+    found = store.note_digests_for(conn, [r["link_key"] for r in rows])
+    return {
+        r["id"]: found[r["link_key"]]["summary"]
+        for r in rows
+        if r["link_key"] in found and found[r["link_key"]]["summary"]
+    }
+
+
 def _summary_context(
     candidates: list[sqlite3.Row],
     notes: list[sqlite3.Row],
     plan: QueryPlan,
     config: Config,
     conn: sqlite3.Connection,
+    about: Sequence[int] = (),
+    parts: dict[int, sqlite3.Row] | None = None,
 ) -> str:
+    """`parts` is the part of each entry that matched the question best, when one did."""
     vault = config.vault.path
     sections: list[str] = []
     linked = store.entities_for_entries(conn, [r["id"] for r in candidates])
+    metrics = store.metrics_for_entries(conn, [r["id"] for r in candidates])
+    longer = context.longer_summaries(conn, candidates, ANSWER_DETAILS_CHARS)
+    room = ANSWER_PARTS_CHARS
     lines = []
     for r in candidates:
         details = [f"file: {parser.relative_path(r['file_path'], vault)}"]
         names = [n["name"] for n in linked.get(r["id"], [])]
         if names:
             details.append(f"links: {', '.join(names)}")
-        lines.append(
-            f"- [{r['entry_date']}] {r['summary'] or '(no summary)'} ({'; '.join(details)})"
-        )
+        if r["id"] in metrics:
+            details.append(f"recorded: {_metric_text(metrics[r['id']])}")
+        summary = longer.get(r["id"]) or r["summary"] or "(no summary)"
+        lines.append(f"- [{r['entry_date']}] {summary} ({'; '.join(details)})")
+        part = (parts or {}).get(r["id"])
+        if part is not None:
+            text = context.clip(part["text"], ANSWER_PART_CHARS)
+            if len(text) <= room:
+                room -= len(text)
+                where = f'under "{part["heading"]}"' if part["heading"] else "before its first heading"
+                lines.append(f"  The part of that entry that matches, {where}: {text}")
     lines.extend(_digest_lines(plan, conn))
     if lines:
         sections.append("Journal entries:\n" + "\n".join(lines))
     if notes:
         mentions = store.mention_stats(conn, [r["id"] for r in notes])
+        learned = _learned_names(conn, notes)
         sections.append(
             "Reference notes:\n"
-            + "\n".join(_note_line(r, mentions.get(r["id"]), vault) for r in notes)
+            + "\n".join(
+                _note_line(r, mentions.get(r["id"]), vault, learned.get(r["id"], [])) for r in notes
+            )
+        )
+    digests = _relationship_digests(conn, config, list(about))
+    if digests:
+        titles = {r["id"]: r["title"] for r in store.notes_by_ids(conn, list(digests))}
+        sections.append(
+            "How they come up in the journal over the years:\n"
+            + "\n".join(f"- [[{titles[i]}]]: {text}" for i, text in digests.items())
         )
     return "\n\n".join(sections)
 
 
 # small models like to send "**INSUFFICIENT**" or "Insufficient."
 _INSUFFICIENT_RE = re.compile(r"\W*insufficient\b", re.IGNORECASE)
+_INSUFFICIENT = "insufficient"
+
+TextSink = Callable[[str], None]
+
+
+class _TrimStart:
+    """Passes text on once the first non-space arrives, so a reply never opens on a blank."""
+
+    def __init__(self, sink: TextSink):
+        self._sink = sink
+        self._started = False
+
+    def __call__(self, text: str) -> None:
+        if not self._started:
+            text = text.lstrip()
+            if not text:
+                return
+            self._started = True
+        self._sink(text)
+
+
+class _HoldUntilAnswer:
+    """Holds a fast reply back until it can't turn out to be INSUFFICIENT."""
+
+    def __init__(self, sink: TextSink):
+        self._sink = sink
+        self._held = ""
+        self.passing: bool | None = None
+
+    def __call__(self, text: str) -> None:
+        if self.passing:
+            self._sink(text)
+            return
+        if self.passing is False:
+            return
+        self._held += text
+        word = re.sub(r"^\W+", "", self._held).lower()
+        if not word or (_INSUFFICIENT.startswith(word) and len(word) <= len(_INSUFFICIENT)):
+            return  # could still be the word, or the word with nothing after it yet
+        if _INSUFFICIENT_RE.match(self._held):
+            self.passing = False
+            return
+        self.passing = True
+        self._sink(self._held)
+
+    def finish(self, full: str) -> None:
+        if self.passing is None and not _INSUFFICIENT_RE.match(full):
+            self._sink(self._held)
+
+
+def _chat(
+    client: OllamaClient,
+    model: str,
+    messages: list[dict[str, str]],
+    options: dict[str, Any],
+    on_text: TextSink | None,
+) -> str:
+    if on_text is None:
+        return client.chat(model=model, messages=messages, options=options)
+    return client.chat_stream(model, messages, _TrimStart(on_text), options=options)
 
 
 def _fast_attempt(
@@ -581,10 +872,14 @@ def _fast_attempt(
     context: str,
     config: Config,
     client: OllamaClient,
+    on_text: TextSink | None = None,
+    writer: str = "",
 ) -> str | None:
-    response = client.chat(
-        model=config.ollama.fast_model,
-        messages=[
+    hold = _HoldUntilAnswer(on_text) if on_text else None
+    response = _chat(
+        client,
+        config.ollama.fast_model,
+        [
             {
                 "role": "system",
                 "content": (
@@ -596,13 +891,16 @@ def _fast_attempt(
                     "about. Mention the dates or [[note names]] your answer "
                     f"draws on. {_READER_VOICE} If the material does not "
                     "contain enough information to answer confidently, reply "
-                    "with exactly the single word INSUFFICIENT."
+                    f"with exactly the single word INSUFFICIENT.{writer}"
                 ),
             },
             {"role": "user", "content": f"Question: {question}\n\n{context}"},
         ],
-        options={"temperature": SYNTHESIS_TEMPERATURE},
+        {"temperature": SYNTHESIS_TEMPERATURE},
+        hold,
     ).strip()
+    if hold is not None:
+        hold.finish(response)
     if _INSUFFICIENT_RE.match(response):
         return None
     return response
@@ -614,14 +912,25 @@ def _precise_reanalysis(
     notes: list[sqlite3.Row],
     config: Config,
     client: OllamaClient,
-) -> tuple[str, list[date], list[sqlite3.Row]]:
+    digests: dict[int, str] | None = None,
+    on_text: TextSink | None = None,
+    conn: sqlite3.Connection | None = None,
+    writer: str = "",
+) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     note_blocks: list[str] = []
     used_notes: list[sqlite3.Row] = []
     note_chars = 0
     vault = config.vault.path
+    learned = _learned_names(conn, notes) if conn is not None else {}
     for row in notes:  # most relevant first
         note = store.note_from_row(row, vault)
-        block = f"### Note: {note.header()}\n{note.raw_text}".rstrip()
+        over_years = (digests or {}).get(row["id"])
+        history = f"\nOver the years: {over_years}" if over_years else ""
+        written = (
+            "\nThe journal also writes it as: " + ", ".join(learned[row["id"]])
+            if row["id"] in learned else ""
+        )
+        block = f"### Note: {note.header()}{written}{history}\n{note.raw_text}".rstrip()
         if note_blocks and note_chars + len(block) > MAX_NOTE_CONTEXT_CHARS:
             continue
         block = block[:MAX_NOTE_CONTEXT_CHARS]
@@ -632,12 +941,21 @@ def _precise_reanalysis(
     budget = MAX_RAW_CONTEXT_CHARS - note_chars
     used: list[tuple[sqlite3.Row, str]] = []
     total = 0
+    ids = [r["id"] for r in candidates]
+    recorded = store.metrics_for_entries(conn, ids) if conn else {}
+    seen = store.photos_for_entries(conn, ids) if conn else {}
+    photo_text = {
+        entry_id: "\n" + "\n".join(f"Photo {p['name']}: {p['description']}" for p in found)
+        for entry_id, found in seen.items()
+    }
     for row in candidates:  # best first
         heading = (
             f"### Entry {row['entry_date']}\n"
             f"File: {parser.relative_path(row['file_path'], vault)}\n"
         )
-        cost = len(heading) + len(row["raw_text"])
+        if row["id"] in recorded:
+            heading += f"Recorded: {_metric_text(recorded[row['id']])}\n"
+        cost = len(heading) + len(row["raw_text"]) + len(photo_text.get(row["id"], ""))
         if used and total + cost > budget:
             continue
         used.append((row, heading))
@@ -645,16 +963,17 @@ def _precise_reanalysis(
     truncated = len(used) < len(candidates) or len(used_notes) < len(notes)
     entry_blocks = [
         # the first entry always gets in, so it alone can be over budget
-        (heading + row["raw_text"])[:budget]
+        (heading + row["raw_text"] + photo_text.get(row["id"], ""))[:budget]
         for row, heading in sorted(used, key=lambda pair: pair[0]["entry_date"])
     ]
     omitted = (
         "\n\n(Note: some lower-ranked entries or notes were omitted to fit the "
         "context budget.)" if truncated else ""
     )
-    text = client.chat(
-        model=config.ollama.precise_model,
-        messages=[
+    text = _chat(
+        client,
+        config.ollama.precise_model,
+        [
             {
                 "role": "system",
                 "content": (
@@ -665,7 +984,7 @@ def _precise_reanalysis(
                     "comes from; folder and file names can say what it is "
                     "about. Base the answer strictly on this material; mention "
                     f"the dates or [[note names]] it draws on. {_READER_VOICE} "
-                    "If it does not answer the question, say so."
+                    f"If it does not answer the question, say so.{writer}"
                 ),
             },
             {
@@ -673,9 +992,12 @@ def _precise_reanalysis(
                 "content": f"Question: {question}\n\n" + "\n\n".join(note_blocks + entry_blocks),
             },
         ],
-        options={"temperature": SYNTHESIS_TEMPERATURE},
+        {"temperature": SYNTHESIS_TEMPERATURE},
+        on_text,
     ).strip() + omitted
-    return text, [date.fromisoformat(row["entry_date"]) for row, _ in used], used_notes
+    if on_text and omitted:
+        on_text(omitted)
+    return text, [row for row, _ in used], used_notes
 
 
 def _no_progress(_stage: str) -> None:
@@ -689,26 +1011,43 @@ def answer(
     client: OllamaClient,
     today: date | None = None,
     on_stage: Callable[[str], None] = _no_progress,
+    since: date | None = None,
+    until: date | None = None,
+    only: store.EntryFilter | None = None,
+    on_text: TextSink | None = None,
 ) -> Answer:
+    """`since`, `until` and `only` are what the person asked for, so they
+    override whatever the router reads into the question. With `on_text`, the
+    answer is handed over piece by piece as the model writes it."""
     today = today or date.today()
+    writer = profile.context(conn, config)
     on_stage("Working out what you're asking...")
-    plan = _plan(question, config, client, today)
+    plan = _plan(question, config, client, today, profile.names(conn, config))
+    if since is not None or until is not None:
+        plan = plan.model_copy(update={"date_from": since, "date_to": until})
     named = notes_named_in(question, conn)
+    if only and only.note_ids:
+        named = list(dict.fromkeys([*only.note_ids, *named]))
 
     if plan.intent == "aggregate":
         on_stage("Putting the numbers into words...")
-        return _answer_aggregate(question, plan, config, conn, client, named)
+        return _answer_aggregate(
+            question, plan, config, conn, client, named, only, on_text, writer
+        )
 
     on_stage("Searching entries and notes...")
     about = _named_notes(conn, plan, named)
     query_vector = _embed_question(question, config, conn, client)
+    found_parts: dict[int, sqlite3.Row] = {}
     candidates = _retrieve(
         question, plan, config, conn, client,
-        query_vector=query_vector, boost_note_ids=named,
+        query_vector=query_vector, boost_note_ids=named, only=only, parts=found_parts,
     )
     explicit_day = _explicit_day(question, today)
-    if explicit_day is not None:
-        candidates = _ensure_day_included(conn, explicit_day, candidates)
+    if explicit_day is not None and (since is None or since <= explicit_day) and (
+        until is None or explicit_day <= until
+    ):
+        candidates = _ensure_day_included(conn, explicit_day, candidates, only)
     notes = _retrieve_notes(plan, conn, query_vector, about, candidates)
     if not candidates and not notes:
         return Answer(
@@ -718,23 +1057,43 @@ def answer(
 
     if not plan.needs_raw_text:
         on_stage("Answering from summaries...")
-        context = _summary_context(candidates, notes, plan, config, conn)
-        fast_answer = _fast_attempt(question, context, config, client)
+        context = _summary_context(candidates, notes, plan, config, conn, about, found_parts)
+        fast_answer = _fast_attempt(question, context, config, client, on_text, writer)
         if fast_answer is not None:
             return _finalize(
                 fast_answer,
                 "fast_summary",
                 cited_dates=[date.fromisoformat(r["entry_date"]) for r in candidates],
-                cited_notes=_notes_used(fast_answer, notes, about),
+                cited_notes=_notes_used(fast_answer, notes, about, _learned_names(conn, notes)),
+                read_entries=[r["id"] for r in candidates],
+                read_notes=[r["id"] for r in notes],
+                cited_parts=_cited_parts(candidates, found_parts),
             )
 
     on_stage("Re-reading the full entries...")
-    text, cited_dates, used_notes = _precise_reanalysis(
-        question, candidates, notes, config, client
+    text, used, used_notes = _precise_reanalysis(
+        question, candidates, notes, config, client,
+        digests=_relationship_digests(conn, config, about),
+        on_text=on_text,
+        conn=conn,
+        writer=writer,
     )
     return _finalize(
         text,
         "precise_raw",
-        cited_dates=cited_dates,
-        cited_notes=_notes_used(text, used_notes, about),
+        cited_dates=[date.fromisoformat(r["entry_date"]) for r in used],
+        cited_notes=_notes_used(text, used_notes, about, _learned_names(conn, used_notes)),
+        read_entries=[r["id"] for r in used],
+        read_notes=[r["id"] for r in used_notes],
+        cited_parts=_cited_parts(used, found_parts),
     )
+
+
+def _cited_parts(rows: list[sqlite3.Row], parts: dict[int, sqlite3.Row]) -> dict[str, str]:
+    """The heading of each cited day's best part; the first entry of a day wins."""
+    cited: dict[str, str] = {}
+    for r in rows:
+        part = parts.get(r["id"])
+        if part is not None and part["heading"]:
+            cited.setdefault(r["entry_date"], part["heading"])
+    return cited

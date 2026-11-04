@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import sqlite3
 from collections.abc import Iterable
@@ -15,12 +16,14 @@ from typer.testing import CliRunner
 from journal_analyzer import cli, db, store
 from journal_analyzer.config import Config
 from journal_analyzer.models import (
+    DetailedExtraction,
     Extraction,
     NoteSummary,
     ParsedEntry,
     ParsedNote,
     QueryPlan,
 )
+from journal_analyzer.profile import ProfileDigest, ScannedFacts
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EMBED_DIM = 8
@@ -37,13 +40,25 @@ class FakeOllamaClient:
                 summary="A pleasant day with friends outdoors.",
                 tags=["Friends", "outdoors", "nature"],
             ),
+            "DetailedExtraction": DetailedExtraction(
+                mood_score=7.0,
+                summary="A long day out with friends.",
+                tags=["Friends", "outdoors"],
+                details="A longer canned summary of a long day out with friends.",
+            ),
             "NoteSummary": NoteSummary(summary="A canned note summary."),
+            "ScannedFacts": ScannedFacts(),
+            "ProfileDigest": ProfileDigest(names="I go by Al.", profile="I like long walks."),
         }
         self.chat_calls: list[tuple[str, list[dict]]] = []
+        self.streamed_calls: list[str] = []
         self.structured_calls: list[tuple[str, str]] = []
         self.embed_calls: list[str] = []
         self.embed_options: list[dict | None] = []
         self.context_lengths: dict[str, int] = {}
+        # a string, or a callable taking (model, image bytes)
+        self.vision_response = "Two people on a sandy beach at sunset."
+        self.vision_calls: list[tuple[str, bytes]] = []
 
     def chat(self, model, messages, options=None):
         self.chat_calls.append((model, messages))
@@ -51,7 +66,16 @@ class FakeOllamaClient:
             return self.chat_response(model, messages)
         return self.chat_response
 
-    def chat_structured(self, model, messages, schema: type[BaseModel], options=None):
+    def chat_stream(self, model, messages, on_text, options=None):
+        # the same reply as chat, handed over a word at a time
+        full = self.chat(model, messages, options)
+        self.streamed_calls.append(model)
+        for piece in re.findall(r"\s*\S+", full):
+            on_text(piece)
+        return full
+
+    def chat_structured(self, model, messages, schema: type[BaseModel], options=None, memo_key=None,
+                        reply_tokens=None):
         self.structured_calls.append((model, schema.__name__))
         source = self.structured[schema.__name__]
         result = source(model, messages) if callable(source) else source
@@ -63,6 +87,12 @@ class FakeOllamaClient:
         self.embed_options.append(options)
         digest = hashlib.sha256(text.encode()).digest()
         return [b / 255.0 for b in digest[:EMBED_DIM]]
+
+    def describe_image(self, model, prompt, image):
+        self.vision_calls.append((model, image))
+        if callable(self.vision_response):
+            return self.vision_response(model, image)
+        return self.vision_response
 
     def list_models(self):
         return ["fake-fast", "fake-precise", "fake-embed"]
@@ -146,6 +176,8 @@ def add_note(
         aliases=list(aliases),
         properties=dict(properties or {}),
         links=[target.casefold() for target in links],
+        # "Friend, School" stands for the list [Friend, School]
+        property_values={k: [v.strip() for v in value.split(",")] for k, value in (properties or {}).items()},
     )
     return store.save_note(conn, note, summary, None)
 
