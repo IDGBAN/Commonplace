@@ -54,8 +54,22 @@ def period_keys_for_date(d: date) -> dict[str, str]:
     return {"week": week_key(d), "month": month_key(d), "year": year_key(d)}
 
 
+# `journal digest 2024-03-02..2024-03-11`; longer spans have month and year digests
+RANGE_MAX_DAYS = 92
+_RANGE_SEP = ".."
+
+
+def range_key(start: date, end: date) -> str:
+    return f"{start.isoformat()}{_RANGE_SEP}{end.isoformat()}"
+
+
 def period_bounds(period_type: str, period_key: str) -> tuple[date, date]:
-    """First and last day of a week, month or year key. ValueError if malformed."""
+    """First and last day of a week, month, year or range key. ValueError if malformed."""
+    if period_type == "range":
+        first, sep, last = period_key.partition(_RANGE_SEP)
+        if not sep:
+            raise ValueError(f"'{period_key}' isn't a span of days")
+        return date.fromisoformat(first), date.fromisoformat(last)
     if period_type == "week":
         year, week = period_key.split("-W")
         start = date.fromisocalendar(int(year), int(week), 1)
@@ -77,18 +91,62 @@ _PERIOD_PATTERNS = (
 )
 
 
-def parse_period(text: str) -> tuple[str, str, date, date]:
-    """A year, month or ISO week as typed, like 2024, 2024-03 or 2024-W10.
+_RANGE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})")
+
+
+def parse_period(text: str, ranges: bool = False) -> tuple[str, str, date, date]:
+    """A year, month or ISO week as typed, like 2024, 2024-03 or 2024-W10, and
+    with `ranges` a span of days like 2024-03-02..2024-03-11.
 
     Returns (kind, key, first day, last day), the key written the way rollups
-    are stored, so 2024-w3 is 2024-W03. ValueError if it's none of those.
+    are stored, so 2024-w3 is 2024-W03. ValueError if it's none of those, or
+    a span that ends before it starts or is longer than RANGE_MAX_DAYS.
     """
     value = text.strip()
+    found = _RANGE_RE.fullmatch(value) if ranges else None
+    if found:
+        try:
+            start, end = date.fromisoformat(found[1]), date.fromisoformat(found[2])
+        except ValueError:
+            raise ValueError(f"'{text}' has a day that isn't a date") from None
+        if end < start:
+            raise ValueError(f"{value} ends before it starts")
+        days = (end - start).days + 1
+        if days > RANGE_MAX_DAYS:
+            raise ValueError(
+                f"{value} is {days} days, and a span can be up to {RANGE_MAX_DAYS}. "
+                "For longer ones, read the month or year digests"
+            )
+        return "range", range_key(start, end), start, end
     for kind, pattern in _PERIOD_PATTERNS:
         if pattern.fullmatch(value):
             start, end = period_bounds(kind, value.upper())
             return kind, _PERIOD_KEY_FN[kind](start), start, end
     raise ValueError(f"'{text}' isn't a year, a month or an ISO week")
+
+
+def _day_title(d: date, month: bool = True, year: bool = True) -> str:
+    return " ".join([str(d.day), *([d.strftime("%B")] if month else []), *([str(d.year)] if year else [])])
+
+
+def period_title(kind: str, key: str) -> str:
+    """2024, March 2024, Week 10 of 2024 or 2 to 11 March 2024, for a key the
+    way rollups store it."""
+    if kind == "range":
+        start, end = period_bounds(kind, key)
+        if start == end:
+            return _day_title(start)
+        if start.year != end.year:
+            return f"{_day_title(start)} to {_day_title(end)}"
+        if start.month != end.month:
+            return f"{_day_title(start, year=False)} to {_day_title(end)}"
+        return f"{_day_title(start, month=False, year=False)} to {_day_title(end)}"
+    if kind == "month":
+        return datetime.strptime(key, "%Y-%m").strftime("%B %Y")
+    if kind == "week":
+        year, week = key.split("-W")
+        return f"Week {int(week)} of {year}"
+    return key
 
 
 def get_file_record(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
@@ -540,6 +598,52 @@ def monthly_metric(
                 WHERE {where}
                 GROUP BY month ORDER BY month""",
             [key, *params],
+        ).fetchall()
+    )
+
+
+def metric_is_yes_no(conn: sqlite3.Connection, key: str) -> bool:
+    """Whether every value is 0 or 1, as a true/false property is stored."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, SUM(value NOT IN (0, 1)) AS other FROM entry_metrics WHERE key = ?", (key,)
+    ).fetchone()
+    return bool(row["n"]) and not row["other"]
+
+
+def metric_days(conn: sqlite3.Connection, key: str) -> list[sqlite3.Row]:
+    """Each day's value, averaged over its entries when it has several."""
+    return list(
+        conn.execute(
+            """SELECT e.entry_date AS date, AVG(m.value) AS value, MIN(e.id) AS id
+               FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+               WHERE m.key = ? GROUP BY e.entry_date ORDER BY e.entry_date""",
+            (key,),
+        ).fetchall()
+    )
+
+
+def entries_by_metric(conn: sqlite3.Connection, key: str, limit: int, highest: bool) -> list[sqlite3.Row]:
+    """Entries with the highest or lowest values, with the value as `value`."""
+    direction = "DESC" if highest else "ASC"
+    return list(
+        conn.execute(
+            f"""SELECT e.*, m.value AS value
+                FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+                WHERE m.key = ? ORDER BY m.value {direction}, e.entry_date LIMIT ?""",
+            (key, limit),
+        ).fetchall()
+    )
+
+
+def monthly_mood_with_metric(conn: sqlite3.Connection, key: str) -> list[sqlite3.Row]:
+    """Mood by month over just the entries that record the metric, shaped like monthly_mood."""
+    return list(
+        conn.execute(
+            """SELECT substr(e.entry_date, 1, 7) AS month,
+                      ROUND(AVG(e.mood_score), 2) AS avg_mood, COUNT(*) AS entry_count
+               FROM entry_metrics m JOIN entries e ON e.id = m.entry_id
+               WHERE m.key = ? GROUP BY month ORDER BY month""",
+            (key,),
         ).fetchall()
     )
 
@@ -1156,6 +1260,11 @@ def months_before(day: date, months: int) -> date:
     return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
 
 
+def months_between(start: date, end: date) -> int:
+    """Whole months from start to end."""
+    return (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day)
+
+
 @dataclass(frozen=True)
 class Lapsed:
     note_id: int
@@ -1230,6 +1339,45 @@ def notes_linked_with(
     )
 
 
+def note_graph(
+    conn: sqlite3.Connection,
+    limit: int,
+    min_shared: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    kind: str | None = None,
+) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+    """The `limit` notes linked from the most entries, and the pairs of them
+    linked from at least `min_shared` of the same entries, as (nodes, edges).
+    Nodes have id, title, kind and n; edges a, b (note ids, a < b) and n."""
+    clauses, params = _range_clauses(date_from, date_to, alias="e.")
+    if kind:
+        clauses.append("n.kind = ?")
+        params.append(kind.casefold())
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    # one pass over the links in range, shared by both queries
+    linked = f"""SELECT DISTINCT ee.entry_id, ee.entity_id FROM entry_entities ee
+                 JOIN entries e ON e.id = ee.entry_id JOIN notes n ON n.id = ee.entity_id {where}"""
+    nodes = conn.execute(
+        f"""WITH linked AS ({linked})
+            SELECT n.id, n.title, n.kind, COUNT(*) AS n
+            FROM linked l JOIN notes n ON n.id = l.entity_id
+            GROUP BY n.id ORDER BY n DESC, n.title COLLATE NOCASE LIMIT ?""",
+        [*params, limit],
+    ).fetchall()
+    ids = _json_list([r["id"] for r in nodes])
+    edges = conn.execute(
+        f"""WITH linked AS ({linked}),
+                 shown AS (SELECT * FROM linked WHERE entity_id IN ({_JSON_VALUES}))
+            SELECT a.entity_id AS a, b.entity_id AS b, COUNT(*) AS n
+            FROM shown a JOIN shown b ON b.entry_id = a.entry_id AND b.entity_id > a.entity_id
+            GROUP BY a.entity_id, b.entity_id HAVING COUNT(*) >= ?
+            ORDER BY n DESC, a, b""",
+        [*params, ids, min_shared],
+    ).fetchall()
+    return list(nodes), list(edges)
+
+
 def note_outlinks(conn: sqlite3.Connection, note_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(
@@ -1266,6 +1414,30 @@ def mark_rollups_stale(conn: sqlite3.Connection, d: date) -> None:
                 "WHERE period_type = ? AND period_key = ?",
                 (period_type, period_key),
             )
+        day = d.isoformat()
+        conn.execute(
+            "UPDATE rollups SET stale = 1 WHERE period_type = 'range' "
+            "AND substr(period_key, 1, 10) <= ? AND substr(period_key, 13, 10) >= ?",
+            (day, day),
+        )
+
+
+def range_rollups_overlapping(
+    conn: sqlite3.Connection, date_from: date | None = None, date_to: date | None = None
+) -> list[sqlite3.Row]:
+    """Digests of spans of days that share at least one day with this range, by when they start."""
+    # keys are ISO dates, so they compare as strings
+    return list(
+        conn.execute(
+            "SELECT * FROM rollups WHERE period_type = 'range' "
+            "AND (? IS NULL OR substr(period_key, 13, 10) >= ?) "
+            "AND (? IS NULL OR substr(period_key, 1, 10) <= ?) ORDER BY period_key",
+            (
+                date_from and date_from.isoformat(), date_from and date_from.isoformat(),
+                date_to and date_to.isoformat(), date_to and date_to.isoformat(),
+            ),
+        ).fetchall()
+    )
 
 
 def upsert_rollup(
@@ -1878,7 +2050,7 @@ def top_entities(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return list(
         conn.execute(
-            f"""SELECT en.name, en.type, COUNT(*) AS n
+            f"""SELECT en.name, en.type, COUNT(*) AS n, MIN(en.id) AS id
                 FROM entities en
                 JOIN entry_entities ee ON ee.entity_id = en.id
                 JOIN entries e ON e.id = ee.entry_id
@@ -1987,6 +2159,23 @@ def notes_first_linked_in(
             (date_to.isoformat(), date_from.isoformat(), date_to.isoformat(), limit),
         ).fetchall()
     )
+
+
+def similar_to_day(conn: sqlite3.Connection, day: date, limit: int) -> list[sqlite3.Row] | None:
+    """The entries closest in meaning to that day's, best first, or None if
+    nothing was written that day. The day's own entries are left out."""
+    day_rows = entries_in_range(conn, day, day)
+    if not day_rows:
+        return None
+    day_ids = {r["id"] for r in day_rows}
+    seen: dict[int, None] = {}
+    for r in day_rows:
+        for eid in similar_entry_ids(conn, r["id"], limit + len(day_rows)):
+            if eid not in day_ids:
+                seen.setdefault(eid, None)
+    ids = list(seen)[:limit]
+    order = {eid: i for i, eid in enumerate(ids)}
+    return sorted(entries_by_ids(conn, ids), key=lambda r: order[r["id"]])
 
 
 def similar_entry_ids(conn: sqlite3.Connection, entry_id: int, k: int) -> list[int]:

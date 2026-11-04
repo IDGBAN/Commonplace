@@ -76,6 +76,9 @@ function stamp(isoTimestamp) {
 }
 
 const fmtMood = (m) => (m == null ? "–" : String(Math.round(m * 10) / 10));
+const valueFmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+// a yes/no number is stored as 1 or 0, so its average is the share of days with it
+const fmtValue = (v, yesNo) => (v == null ? "–" : yesNo ? `${Math.round(v * 100)}%` : valueFmt.format(v));
 
 function moodClass(mood, scale) {
   if (mood == null) return null;
@@ -90,6 +93,10 @@ function bytes(n) {
 }
 
 function periodTitle(type, key) {
+  if (type === "range") {
+    const [start, end] = key.split("..");
+    return start === end ? mediumDate(start) : `${mediumDate(start)} to ${mediumDate(end)}`;
+  }
   if (type === "month") return fmtMonth.format(toDate(`${key}-01`));
   if (type === "week") {
     const [year, week] = key.split("-W");
@@ -104,25 +111,34 @@ function periodRange(type, start, end) {
   return `${mediumDate(start)} – ${mediumDate(end)}`;
 }
 
-const KIND_LABELS = { week: "Week", month: "Month", year: "Year" };
+const KIND_LABELS = { week: "Week", month: "Month", year: "Year", range: "Span" };
+const DIGEST_TABS = ["year", "month", "week", "range", "notes"];
 const kindLabel = (kind) => kind.replace(/[-_]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 // ---------------------------------------------------------------- links
 
 const href = {
   overview: () => "#/",
-  calendar: (year) => (year ? `#/calendar/${year}` : "#/calendar"),
+  calendar: (year, by) => `${year ? `#/calendar/${year}` : "#/calendar"}${query({ by })}`,
   entries: (params) => `#/entries${query(params)}`,
   entry: (id, params) => `#/entry/${id}${query(params)}`,
   notes: (params) => `#/notes${query(params)}`,
+  map: (params) => `#/map${query(params)}`,
+  themes: () => "#/themes",
+  theme: (id) => `#/theme/${id}`,
   note: (id, params) => `#/note/${id}${query(params)}`,
   tags: () => "#/tags",
+  metrics: () => "#/metrics",
+  metric: (key) => `#/metric/${encodeURIComponent(key)}`,
   tag: (name) => `#/tag/${encodeURIComponent(name)}`,
   digests: (type) => `#/digests/${type || "month"}`,
   digest: (type, key) => `#/digest/${type}/${encodeURIComponent(key)}`,
+  compare: (first, second) => `#/compare/${encodeURIComponent(first)}${second ? `/${encodeURIComponent(second)}` : ""}`,
+  review: (key) => `#/review/${encodeURIComponent(key)}`,
   files: (params) => `#/files${query(params)}`,
   search: (q) => `#/search${query({ q })}`,
-  ask: (q) => `#/ask${query({ q })}`,
+  ask: (q, scope) => `#/ask${query({ q, ...scope })}`,
+  history: (id) => `#/history/${id}`,
 };
 
 function query(params) {
@@ -222,18 +238,19 @@ const noteChip = (note, cls = "chip") =>
   h("a", { class: cls, href: href.note(note.id), title: kindLabel(note.kind) }, note.title,
     h("span", { class: "n" }, kindLabel(note.kind)));
 
-function entryLines(entries, scale, { emptyText } = {}) {
+// `aside` replaces the tags under each line, like a number's value on its page
+function entryLines(entries, scale, { emptyText, aside } = {}) {
   if (!entries.length) return empty(emptyText || "No entries.");
   // search results say which part of a many-headed entry matched, and open there
-  return h("ol", { class: "lines" }, entries.map((e) =>
-    h("li", {},
+  return h("ol", { class: "lines" }, entries.map((e) => {
+    const under = aside ? aside(e) : [e.section && `in “${e.section}”`, ...(e.tags || [])].filter(Boolean).join(" · ");
+    return h("li", {},
       h("a", { class: "line", href: href.entry(e.id, e.section ? { at: e.section } : null) },
         h("span", { class: "line-date" }, mediumDate(e.date)),
         swatch(e.mood, scale),
         h("span", { class: e.summary ? "line-summary" : "line-summary none" }, e.summary || "No summary stored"),
-        (e.section || (e.tags && e.tags.length))
-          ? h("span", { class: "line-tags" }, [e.section && `in “${e.section}”`, ...(e.tags || [])].filter(Boolean).join(" · "))
-          : null))));
+        under ? h("span", { class: "line-tags" }, under) : null));
+  }));
 }
 
 // The stored text, with the part a link's #heading or #^block points at marked.
@@ -297,17 +314,27 @@ function field(label, control, grow = false) {
 
 // ---------------------------------------------------------------- charts
 
-function monthlyMoodChart(months, baseline, scale) {
-  const scored = months.filter((m) => m.avg_mood != null);
-  if (!scored.length) return empty("No entry has a mood score yet.");
-  // every month from the first to the last, so gaps in writing show as gaps
+// every month from the first to the last, so gaps in writing show as gaps
+function monthSpan(months) {
   const first = toDate(`${months[0].month}-01`);
   const last = toDate(`${months[months.length - 1].month}-01`);
-  const byKey = new Map(months.map((m) => [m.month, m]));
   const keys = [];
   for (let d = first; d <= last; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))) {
     keys.push(d.toISOString().slice(0, 7));
   }
+  return keys;
+}
+
+const lastDayOf = (month) => {
+  const [yy, mm] = month.split("-").map(Number);
+  return new Date(Date.UTC(yy, mm, 0)).toISOString().slice(0, 10);
+};
+
+function monthlyMoodChart(months, baseline, scale) {
+  const scored = months.filter((m) => m.avg_mood != null);
+  if (!scored.length) return empty("No entry has a mood score yet.");
+  const byKey = new Map(months.map((m) => [m.month, m]));
+  const keys = monthSpan(months);
   const slot = 14;
   const width = Math.max(keys.length * slot, 320);
   const height = 170;
@@ -352,6 +379,53 @@ function monthlyMoodChart(months, baseline, scale) {
   return h("div", { class: "chart-wrap" }, chart);
 }
 
+// a number's average by month, laid out like monthlyMoodChart so the two line up
+function metricChart(months, key, yesNo, tip) {
+  if (!months.length) return empty(`No entry records ${key}.`);
+  const byKey = new Map(months.map((m) => [m.month, m]));
+  const keys = monthSpan(months);
+  const values = months.map((m) => m.avg);
+  // bars start at zero, so a month with half the value looks half as tall
+  const lo = yesNo ? 0 : Math.min(0, ...values);
+  const hi = yesNo ? 1 : Math.max(0, ...values);
+  const slot = 14;
+  const width = Math.max(keys.length * slot, 320);
+  const height = 170;
+  const top = 12;
+  const bottom = 24;
+  const plot = height - top - bottom;
+  const y = (v) => top + plot - ((v - lo) / (hi - lo || 1)) * plot;
+
+  const chart = svg("svg", {
+    class: "chart", viewBox: `0 0 ${width + 20} ${height}`, role: "img",
+    "aria-label": `${yesNo ? `Share of days with ${key}` : `Average ${key}`} by month, ${keys.length} months`,
+  });
+  chart.style.maxWidth = `${(width + 20) * 1.4}px`;
+  chart.style.minWidth = `${Math.min(width + 20, 640)}px`;
+  for (const v of [...new Set([lo, (lo + hi) / 2, hi])]) {
+    chart.append(svg("line", { class: v === 0 && lo < 0 ? "zero" : "grid", x1: 0, x2: width, y1: y(v), y2: y(v) }),
+      svg("text", { class: "axis", x: width + 4, y: y(v) + 4 }, fmtValue(v, yesNo)));
+  }
+  keys.forEach((month, i) => {
+    const x = i * slot;
+    const m = byKey.get(month);
+    if (month.endsWith("-01") || i === 0) {
+      chart.append(svg("text", { class: "axis", x: x + 1, y: height - 6 }, month.slice(0, 4)));
+    }
+    if (!m) return;
+    const from = y(0);
+    const to = y(m.avg);
+    const what = yesNo ? `${key} on ${fmtValue(m.avg, true)} of days` : `${key} ${fmtValue(m.avg)}`;
+    chart.append(svg("a", { href: href.entries({ from: `${month}-01`, to: lastDayOf(month) }) },
+      svg("title", {}, tip ? tip(m) : `${fmtMonth.format(toDate(`${month}-01`))}: ${what}, ${plural(m.n, "entry", "entries")}`),
+      svg("rect", {
+        class: "bar metric", x: x + 2, y: Math.min(from, to),
+        width: slot - 4, height: Math.max(2, Math.abs(to - from)), rx: 1.5,
+      })));
+  });
+  return h("div", { class: "chart-wrap" }, chart);
+}
+
 function yearStrips(entries, scale) {
   const byYear = new Map();
   for (const e of entries) {
@@ -385,6 +459,16 @@ function yearStrips(entries, scale) {
   });
   return h("div", { class: "strips" }, rows, moodLegend(scale));
 }
+
+// for colouring by amount: seven steps of one blue, from `lo` to `hi`
+function amountLegend(lo, hi) {
+  return h("div", { class: "strip-scale" },
+    lo,
+    h("span", { class: "legend", "aria-hidden": "true" }, [0, 1, 2, 3, 4, 5, 6].map((i) => h("span", { class: `q${i}` }))),
+    hi);
+}
+
+const amountStep = (v, lo, hi) => `q${Math.round(Math.min(1, Math.max(0, (v - lo) / (hi - lo || 1))) * 6)}`;
 
 function moodLegend(scale) {
   return h("div", { class: "strip-scale" },
@@ -477,8 +561,39 @@ function fact(value, label, link) {
     h("div", { class: "fact-value" }, value), h("div", { class: "fact-label" }, label));
 }
 
-async function calendarView([yearParam]) {
-  const cat = await getCatalog();
+// past this share of days, a heavy day doesn't stretch the colours for everything else
+const WORDS_TOP_QUANTILE = 0.95;
+
+// How the calendar colours a day other than by mood: words written, or a number
+// you keep. Null when `by` names nothing there is.
+async function calendarAmount(by, byDate, metrics) {
+  if (by === "words") {
+    const totals = new Map([...byDate].map(([iso, list]) => [iso, list.reduce((n, e) => n + (e.words || 0), 0)]));
+    const sorted = [...totals.values()].sort((a, b) => a - b);
+    const hi = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * WORDS_TOP_QUANTILE))] || 1;
+    return {
+      label: "words", value: (iso) => totals.get(iso) ?? null, lo: 0, hi,
+      fmt: (v) => plural(v, "word"),
+      legend: amountLegend("fewer words", `${fmtNum(hi)} or more`),
+      lede: "Every day you wrote, coloured by how many words: lighter is fewer, darker is more.",
+    };
+  }
+  const m = metrics.find((x) => x.key === by);
+  if (!m) return null;
+  const d = await api(`metrics/${encodeURIComponent(m.key)}`);
+  const values = new Map(d.days.map((x) => [x.date, x.value]));
+  const lo = d.yes_no ? 0 : d.lo;
+  const hi = d.yes_no ? 1 : d.hi;
+  return {
+    label: m.key, value: (iso) => values.get(iso) ?? null, lo, hi,
+    fmt: (v) => (d.yes_no ? (v >= 0.5 ? `${m.key}: yes` : `${m.key}: no`) : `${m.key} ${fmtValue(v)}`),
+    legend: d.yes_no ? amountLegend("no", "yes") : amountLegend(fmtValue(lo), `${fmtValue(hi)} ${m.key}`),
+    lede: `Every day you wrote, coloured by your ${m.key}: lighter is ${d.yes_no ? "no" : "less"}, darker is ${d.yes_no ? "yes" : "more"}. Dashed squares are days you wrote without recording it.`,
+  };
+}
+
+async function calendarView([yearParam], params) {
+  const [cat, metrics] = await Promise.all([getCatalog(), api("metrics").then((d) => d.metrics).catch(() => [])]);
   const scale = cat.mood_scale;
   document.title = "Calendar · Commonplace";
   const byDate = new Map();
@@ -493,12 +608,17 @@ async function calendarView([yearParam]) {
   const year = years.includes(yearParam) ? yearParam : years[years.length - 1];
   const inYear = cat.entries.filter((e) => e.date.startsWith(year));
   const todayIso = localToday();
+  const wanted = params.get("by") || "";
+  const amount = wanted ? await calendarAmount(wanted, byDate, metrics) : null;
+  const by = amount ? wanted : "";
 
   const preview = h("aside", { class: "preview", "aria-live": "polite" });
   const showPreview = (iso) => {
     const list = byDate.get(iso) || [];
+    const value = amount ? amount.value(iso) : null;
     fill(preview,
       h("div", { class: "preview-date" }, longDate(iso)),
+      amount && list.length && h("div", { class: "meta-line" }, value == null ? `No ${amount.label} recorded` : amount.fmt(value)),
       list.length
         ? list.map((e) => h("div", {},
           h("div", { class: "meta-line" }, moodChip(e.mood, scale), plural(e.words, "word")),
@@ -530,13 +650,22 @@ async function calendarView([yearParam]) {
       grid.append(h("span", { class: iso === todayIso ? "cell today" : "cell", title: longDate(iso) }));
       continue;
     }
-    const mood = list.reduce((sum, e) => sum + (e.mood ?? 0), 0) / (list.filter((e) => e.mood != null).length || 1);
-    const hasMood = list.some((e) => e.mood != null);
-    const cls = hasMood ? `cell has ${moodClass(mood, scale)}` : "cell has nomood";
+    let cls;
+    let label;
+    if (amount) {
+      const value = amount.value(iso);
+      cls = value == null ? "cell has nomood" : `cell has ${amountStep(value, amount.lo, amount.hi)}`;
+      label = `${longDate(iso)}, ${value == null ? `no ${amount.label} recorded` : amount.fmt(value)}`;
+    } else {
+      const mood = list.reduce((sum, e) => sum + (e.mood ?? 0), 0) / (list.filter((e) => e.mood != null).length || 1);
+      const hasMood = list.some((e) => e.mood != null);
+      cls = hasMood ? `cell has ${moodClass(mood, scale)}` : "cell has nomood";
+      label = `${longDate(iso)}, mood ${hasMood ? fmtMood(mood) : "none"}`;
+    }
     const cell = h("a", {
       class: iso === todayIso ? `${cls} today` : cls,
       href: href.entry(list[0].id),
-      "aria-label": `${longDate(iso)}, mood ${hasMood ? fmtMood(mood) : "none"}`,
+      "aria-label": label,
       onmouseenter: () => showPreview(iso),
       onfocus: () => showPreview(iso),
     });
@@ -551,16 +680,25 @@ async function calendarView([yearParam]) {
     h("div", { class: "cal-days", "aria-hidden": "true" }, ["Mon", "", "Wed", "", "Fri", "", "Sun"].map((d) => h("span", {}, d))),
     grid);
 
+  const choose = h("select", {},
+    h("option", { value: "", selected: !by }, "Mood"),
+    h("option", { value: "words", selected: by === "words" }, "Words written"),
+    metrics.map((m) => h("option", { value: m.key, selected: by === m.key }, m.key)));
+  choose.addEventListener("change", () => { location.hash = href.calendar(year, choose.value); });
+
   return h("div", {},
     pageHead({
       eyebrow: "Calendar", title: year,
-      lede: "Every day you wrote, coloured by the mood the app gave that entry. Dashed squares are entries without a mood score.",
+      lede: amount ? amount.lede : "Every day you wrote, coloured by the mood the app gave that entry. Dashed squares are entries without a mood score.",
+      meta: [h("a", { href: href.review(year) }, `${year} in review`), h("a", { href: href.compare(year) }, `${year} against ${Number(year) - 1}`)],
     }),
     h("nav", { class: "year-tabs", "aria-label": "Years" }, years.map((y) =>
-      h("a", { class: y === year ? "chip active" : "chip", href: href.calendar(y), "aria-current": y === year ? "page" : null },
+      h("a", { class: y === year ? "chip active" : "chip", href: href.calendar(y, by), "aria-current": y === year ? "page" : null },
         y, h("span", { class: "n" }, fmtNum(cat.entries.filter((e) => e.date.startsWith(y)).length))))),
+    h("div", { class: "colour-by" }, field("Colour by", choose),
+      wanted && !amount ? h("span", { class: "quiet" }, `No entry records ${wanted}, so this is by mood.`) : null),
     h("div", { class: "cal-scroll" }, cal),
-    moodLegend(scale),
+    amount ? amount.legend : moodLegend(scale),
     preview,
     section(`Entries in ${year}`, entryLines([...inYear].reverse(), scale), {
       note: h("a", { href: href.entries({ from: `${year}-01-01`, to: `${year}-12-31` }) }, "filter these"),
@@ -592,6 +730,7 @@ async function entriesView(_, params) {
   const noteSlot = h("div", { class: "field" });
   const groupSlot = h("div", { class: "field" });
   const clear = h("button", { class: "button", type: "button" }, "Clear filters");
+  const askSlot = h("div", {});
 
   let token = 0;
   async function load() {
@@ -617,6 +756,12 @@ async function entriesView(_, params) {
       : []);
     const pages = Math.max(1, Math.ceil(data.total / pageSize));
     const filtered = state.q || state.tag || state.note || state.group || state.from || state.to;
+    const scope = scopeParams(state);
+    fill(askSlot, data.total && Object.keys(scope).length
+      ? askHere(scope, "What happened on these days?", state.q
+        ? "Answers read the entries the other filters keep. The words filter isn't used for asking."
+        : "Answers only read the entries these filters keep.")
+      : null);
     const go = (p) => () => { state.page = p; load(); window.scrollTo(0, 0); };
     fill(results,
       h("p", { class: "result-count" }, filtered
@@ -647,7 +792,8 @@ async function entriesView(_, params) {
     h("div", { class: "filters", role: "search" },
       field("Contains", text, true), field("Tag", tagSelect), field("From", from), field("To", to),
       field("Order", order), noteSlot, groupSlot, clear),
-    results);
+    results,
+    askSlot);
 }
 
 async function entryView([id], params) {
@@ -680,7 +826,7 @@ async function entryView([id], params) {
       e.tags.length ? h("div", { class: "chips" }, e.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t), title: fmTags.has(t) ? "From the frontmatter" : null }, t))) : h("span", { class: "quiet" }, "No tags"),
       e.tags.some((t) => fmTags.has(t)) && h("div", { class: "quiet" }, "Includes the tags in the file's frontmatter.")),
     Object.keys(e.metrics || {}).length > 0 && gloss("Your numbers",
-      h("dl", { class: "props numbers" }, Object.entries(e.metrics).map(([k, v]) => [h("dt", {}, k), h("dd", {}, fmtMood(v))])),
+      h("dl", { class: "props numbers" }, Object.entries(e.metrics).map(([k, v]) => [h("dt", {}, h("a", { href: href.metric(k) }, k)), h("dd", {}, fmtMood(v))])),
       h("div", { class: "quiet" }, "From the file's frontmatter")),
     gloss("Mentions",
       e.notes.length ? h("div", { class: "chips" }, e.notes.map((n) => [
@@ -852,6 +998,7 @@ async function notesView(_, params) {
       eyebrow: "Reference notes",
       title: "Notes",
       lede: "The undated notes about people, places and topics. A note's kind is the folder it sits in. Mentions come only from links in your entries.",
+      meta: [h("a", { href: href.map() }, "See them as a map")],
     }),
     h("div", { class: "filters", role: "search" }, field("Filter", filter, true), h("div", { class: "field" }, h("span", {}, "Kind"), kinds)),
     body,
@@ -934,6 +1081,8 @@ async function noteView([id], params) {
         rawText(n.raw_text, n.focus, "This note has no text of its own.")),
       margin),
     overYears,
+    askHere({ note: n.id }, `What did I write about ${n.title} last year?`,
+      ["Answers only read the entries that link ", n.title, "."]),
     n.linked_with.length ? section("Often linked with", h("div", { class: "chips" }, n.linked_with.map((o) =>
       h("a", { class: "chip", href: href.note(o.id), title: `${kindLabel(o.kind)}, in ${plural(o.n, "entry", "entries")} with ${n.title}` },
         o.title, h("span", { class: "n" }, fmtNum(o.n))))), {
@@ -1037,6 +1186,7 @@ async function tagView([name]) {
     t.cooccurring.length ? section("Often tagged alongside", h("div", { class: "chips" }, t.cooccurring.map((c) => tagChip(c.name, c.n))), {
       note: "number of shared entries",
     }) : null,
+    askHere({ tag: t.name }, "What do these days have in common?", `Answers only read the entries tagged ${t.name}.`),
     section("Entries", entryLines(t.entries, scale), {
       note: t.entries_capped ? h("a", { href: href.entries({ tag: t.name }) }, `newest ${fmtNum(t.entries.length)} shown, filter to see all`) : null,
     }));
@@ -1045,7 +1195,7 @@ async function tagView([name]) {
 async function digestsView([type]) {
   const data = await api("digests");
   const scale = data.mood_scale;
-  const current = ["year", "month", "week", "notes"].includes(type) ? type : "month";
+  const current = DIGEST_TABS.includes(type) ? type : "month";
   document.title = "Digests · Commonplace";
   const list = current === "notes" ? [] : data.digests[current] || [];
   const tabCount = (t) => (t === "notes" ? data.notes.length : (data.digests[t] || []).length);
@@ -1066,7 +1216,7 @@ async function digestsView([type]) {
       title: "Digests",
       lede: "Summaries of each week, month and year, and of the people, places and topics you link most. Answers read these instead of every entry. A digest goes out of date when an entry it covers changes, until the next journal rollup.",
     }),
-    h("nav", { class: "tabs", "aria-label": "Digest periods" }, ["year", "month", "week", "notes"].map((t) =>
+    h("nav", { class: "tabs", "aria-label": "Digest periods" }, DIGEST_TABS.map((t) =>
       h("a", { class: "tab", href: href.digests(t), "aria-current": t === current ? "page" : null },
         t === "notes" ? "Notes " : `${KIND_LABELS[t]}s `, h("span", { class: "count" }, fmtNum(tabCount(t)))))),
     current === "notes" ? noteCards : list.length
@@ -1078,7 +1228,9 @@ async function digestsView([type]) {
           d.stale && h("div", { class: "digest-sub" }, h("span", { class: "status pending" }, "out of date"))),
         h("div", { class: "digest-summary clamp" }, d.summary || "No summary text."),
         d.tags.length ? h("div", { class: "digest-tags" }, d.tags.join(" · ")) : null)))
-      : empty(`No ${current} digests yet. Run `, h("code", {}, "journal rollup"), " to write them."));
+      : current === "range"
+        ? empty("No digests of a span of days yet. For a trip or a hard fortnight, ", h("code", {}, "journal digest 2024-03-02..2024-03-11 --refresh"), " writes one, and answers about those days read it.")
+        : empty(`No ${current} digests yet. Run `, h("code", {}, "journal rollup"), " to write them."));
 }
 
 async function digestView([type, key]) {
@@ -1099,7 +1251,9 @@ async function digestView([type, key]) {
       gloss("Built from", plural(r.entries ?? 0, "entry", "entries")),
       gloss("Main tags", r.tags.length ? h("div", { class: "chips" }, r.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t) }, t))) : h("span", { class: "quiet" }, "None")),
       gloss("Written", stamp(r.generated_at), r.stale && h("div", {}, "Out of date: an entry in this period changed since. Run journal rollup.")),
-    ] : gloss("Status", "Not written yet. Run journal rollup."));
+    ] : gloss("Status", type === "range"
+      ? ["Not written yet. ", h("code", {}, `journal digest ${key} --refresh`), " writes it."]
+      : "Not written yet. Run journal rollup."));
 
   return h("div", {},
     pageHead({
@@ -1109,13 +1263,19 @@ async function digestView([type, key]) {
         button("← Earlier", prev && href.digest(type, prev), { disabled: !prev, key: "k" }),
         button("Later →", next && href.digest(type, next), { disabled: !next, key: "j" }),
       ],
-      meta: [h("span", {}, periodRange(type, d.start, d.end))],
+      meta: [
+        h("span", {}, periodRange(type, d.start, d.end)),
+        type !== "range" && d.entries.length ? h("a", { href: href.review(key) }, "Review") : null,
+        type !== "range" ? h("a", { href: href.compare(key) }, `Compare with the ${type} before`) : null,
+      ],
     }),
     h("div", { class: "folio" },
       h("article", {},
         h("p", { class: "reading-label" }, r ? "What the model wrote about this period" : "No digest for this period yet"),
         h("div", { class: r && r.summary ? "raw" : "raw empty" }, (r && r.summary) || "Nothing written.")),
       margin),
+    d.entries.length ? askHere({ from: d.start, to: d.end }, "What stood out in this period?",
+      `Answers only read the entries from ${periodRange(type, d.start, d.end)}.`) : null,
     section("Entries in this period", entryLines(d.entries, scale, { emptyText: "No entries in this period." })));
 }
 
@@ -1226,6 +1386,522 @@ async function searchView(_, params) {
     results);
 }
 
+// ---------------------------------------------------------------- themes
+
+const THEME_NEWEST = 30;
+
+function themeStatus(st) {
+  if (!st.made_at) return null;
+  const since = st.placed ? `; ${plural(st.placed, "entry", "entries")} written since go with the nearest theme` : "";
+  return h("p", { class: "section-note" }, `Worked out ${stamp(st.made_at)} from ${plural(st.grouped, "entry", "entries")}${since}.`,
+    st.stale ? [" That's a lot since; ", h("code", {}, "journal themes --refresh"), " groups them again."] : null);
+}
+
+// each month a cell, shaded by the share of that month's entries in the theme
+function themeStrip(theme, months, totals) {
+  const strip = svg("svg", {
+    class: "strip theme-strip", viewBox: `0 0 ${months.length} 1`, preserveAspectRatio: "none", role: "img",
+    "aria-label": `${theme.label}: ${plural(theme.entries, "entry", "entries")}, ${theme.first ? `${mediumDate(theme.first)} to ${mediumDate(theme.last)}` : ""}`,
+  });
+  months.forEach((month, i) => {
+    if (month.endsWith("-01") && i > 0) {
+      strip.append(svg("line", { class: "month", x1: i, x2: i, y1: 0, y2: 1, "vector-effect": "non-scaling-stroke" }));
+    }
+    const n = theme.months[month] || 0;
+    if (!n) return;
+    const share = n / (totals[month] || n);
+    strip.append(svg("a", { href: href.entries({ from: `${month}-01`, to: lastDayOf(month) }) },
+      svg("title", {}, `${fmtMonth.format(toDate(`${month}-01`))}: ${n} of ${plural(totals[month] || n, "entry", "entries")}`),
+      svg("rect", { class: `day ${amountStep(share, 0, 1)}`, x: i, y: 0, width: 1, height: 1 })));
+  });
+  return strip;
+}
+
+async function themesView() {
+  const data = await api("themes");
+  const scale = data.mood_scale;
+  document.title = "Themes · Commonplace";
+  const head = pageHead({
+    eyebrow: "Found from what your entries are about",
+    title: "Themes",
+    lede: "Threads that run through the journal, found by grouping entries close in meaning, whether or not you tagged or linked them. The fast model names each from the entries nearest its middle.",
+  });
+  if (!data.themes.length) {
+    return h("div", {}, head, empty("No themes yet. ", h("code", {}, "journal themes --refresh"),
+      " groups your entries (no model needed for that) and names each group with one call to the fast model."));
+  }
+  const months = Object.keys(data.month_totals);
+  const years = new Map();
+  for (const month of months) years.set(month.slice(0, 4), (years.get(month.slice(0, 4)) || 0) + 1);
+  const axis = h("div", { class: "theme-years", "aria-hidden": "true" }, [...years].map(([year, n]) => {
+    const label = h("span", {}, year);
+    label.style.flexGrow = String(n);
+    return label;
+  }));
+  const rows = data.themes.map((t) => h("div", { class: "theme-row" },
+    h("div", { class: "theme-name" },
+      h("a", { href: href.theme(t.id) }, t.label),
+      h("div", { class: "quiet" }, plural(t.entries, "entry", "entries"), " · ", moodChip(t.mood, scale))),
+    themeStrip(t, months, data.month_totals)));
+  return h("div", {}, head,
+    themeStatus(data.status),
+    h("div", { class: "theme-rows" }, h("div", { class: "theme-row" }, h("div", {}), axis), rows),
+    amountLegend("a small share of that month", "most of it"));
+}
+
+async function themeView([id]) {
+  const t = await api(`themes/${id}`);
+  const scale = t.mood_scale;
+  document.title = `${t.label} · Commonplace`;
+  const months = Object.entries(t.months).map(([month, n]) => ({ month, avg: n, n }));
+  const tip = (m) => `${fmtMonth.format(toDate(`${m.month}-01`))}: ${plural(m.n, "entry", "entries")}`;
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.themes() }, "Theme"),
+      title: t.label,
+      lede: t.about,
+      meta: [
+        h("span", {}, plural(t.entries, "entry", "entries")),
+        t.first && h("span", {}, `${mediumDate(t.first)} to ${mediumDate(t.last)}`),
+        t.mood != null && h("span", {}, "average mood ", moodChip(t.mood, scale), " ", delta(t.mood, t.baseline_mood)),
+      ],
+    }),
+    section("Entries a month", metricChart(months, "entries", false, tip)),
+    section("Closest to its middle", entryLines(t.central, scale), { note: t.name ? "what it was named from" : null }),
+    t.tags.length ? section("Tags", h("div", { class: "chips" }, t.tags.map((g) => tagChip(g.name, g.entries)))) : null,
+    t.notes.length ? section("Notes", h("div", { class: "chips" }, t.notes.map((n) =>
+      h("a", { class: "chip", href: href.note(n.id), title: kindLabel(n.kind) }, n.title, h("span", { class: "n" }, fmtNum(n.entries))))), {
+      note: "entries that link each",
+    }) : null,
+    section("Newest entries", entryLines(t.newest, scale), {
+      note: t.entries > t.newest.length ? `newest ${t.newest.length} of ${fmtNum(t.entries)}` : null,
+    }));
+}
+
+// ---------------------------------------------------------------- note map
+
+// A graph puts any two kinds side by side, and only three colours stay
+// distinct for everyone in every pair, so the rest share one gray.
+const MAP_KIND_SLOTS = 3;
+const MAP_LABELLED = 12;
+const MAP_STEPS = 300;
+const MAP_WIDTH = 900;
+const MAP_HEIGHT = 560;
+const MAP_SIZES = [25, 40, 80, 150];
+
+// Fruchterman-Reingold, started from a circle in order of size so the same
+// notes always land in the same places
+function mapLayout(nodes, edges) {
+  const n = nodes.length;
+  const cx = MAP_WIDTH / 2;
+  const cy = MAP_HEIGHT / 2;
+  const pos = nodes.map((_, i) => {
+    const a = (i / Math.max(1, n)) * 2 * Math.PI;
+    return { x: cx + Math.cos(a) * MAP_WIDTH * 0.32, y: cy + Math.sin(a) * MAP_HEIGHT * 0.32 };
+  });
+  if (n < 2) return pos.map(() => ({ x: cx, y: cy }));
+  const at = new Map(nodes.map((node, i) => [node.id, i]));
+  const most = Math.max(...edges.map((e) => e.n), 1);
+  const k = Math.sqrt((MAP_WIDTH * MAP_HEIGHT) / n) * 0.55;
+  for (let step = 0; step < MAP_STEPS; step++) {
+    const heat = (MAP_WIDTH / 12) * (1 - step / MAP_STEPS) + 0.5;
+    const move = pos.map(() => ({ x: 0, y: 0 }));
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = pos[i].x - pos[j].x;
+        const dy = pos[i].y - pos[j].y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        const push = (k * k) / d;
+        move[i].x += (dx / d) * push; move[i].y += (dy / d) * push;
+        move[j].x -= (dx / d) * push; move[j].y -= (dy / d) * push;
+      }
+    }
+    for (const e of edges) {
+      const i = at.get(e.a);
+      const j = at.get(e.b);
+      const dx = pos[i].x - pos[j].x;
+      const dy = pos[i].y - pos[j].y;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      const pull = ((d * d) / k) * (0.3 + 0.7 * (e.n / most));
+      move[i].x -= (dx / d) * pull; move[i].y -= (dy / d) * pull;
+      move[j].x += (dx / d) * pull; move[j].y += (dy / d) * pull;
+    }
+    pos.forEach((p, i) => {
+      // a little gravity keeps notes with no pairs from drifting off
+      move[i].x += (cx - p.x) * 0.05 * k / 40;
+      move[i].y += (cy - p.y) * 0.05 * k / 40;
+      const len = Math.max(1, Math.hypot(move[i].x, move[i].y));
+      p.x = Math.min(MAP_WIDTH - 40, Math.max(40, p.x + (move[i].x / len) * Math.min(len, heat)));
+      p.y = Math.min(MAP_HEIGHT - 24, Math.max(24, p.y + (move[i].y / len) * Math.min(len, heat)));
+    });
+  }
+  return pos;
+}
+
+function noteMap(data) {
+  const { nodes, edges } = data;
+  const counts = new Map();
+  for (const node of nodes) counts.set(node.kind, (counts.get(node.kind) || 0) + 1);
+  const slotted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, MAP_KIND_SLOTS).map(([k]) => k);
+  const kindClass = (kind) => (slotted.includes(kind) ? `k${slotted.indexOf(kind) + 1}` : "k-other");
+  const pos = mapLayout(nodes, edges);
+  const most = Math.max(...nodes.map((x) => x.n), 1);
+  const radius = (x) => 4 + 12 * Math.sqrt(x.n / most);
+  const mostShared = Math.max(...edges.map((e) => e.n), 1);
+  const at = new Map(nodes.map((x, i) => [x.id, i]));
+  const labelled = new Set(nodes.slice(0, MAP_LABELLED).map((x) => x.id));
+  const neighbours = new Map(nodes.map((x) => [x.id, new Set([x.id])]));
+  for (const e of edges) {
+    neighbours.get(e.a).add(e.b);
+    neighbours.get(e.b).add(e.a);
+  }
+
+  const chart = svg("svg", {
+    class: "note-map", viewBox: `0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`, role: "group",
+    "aria-label": `${plural(nodes.length, "note")} and the ${plural(edges.length, "pair")} of them linked from the same entries`,
+  });
+  const lines = edges.map((e) => {
+    const a = pos[at.get(e.a)];
+    const b = pos[at.get(e.b)];
+    return svg("line", {
+      class: "map-edge", x1: a.x, y1: a.y, x2: b.x, y2: b.y, "data-a": e.a, "data-b": e.b,
+      "stroke-width": 1 + 3 * ((e.n - data.min_shared) / Math.max(1, mostShared - data.min_shared)),
+    });
+  });
+  chart.append(svg("g", { "aria-hidden": "true" }, lines));
+
+  const marks = nodes.map((x, i) => {
+    const p = pos[i];
+    const r = radius(x);
+    const left = p.x > MAP_WIDTH - 140;
+    const mark = svg("a", {
+      class: labelled.has(x.id) ? "map-node labelled" : "map-node", href: href.note(x.id), "data-id": x.id,
+      "aria-label": `${x.title}, ${kindLabel(x.kind)}, linked from ${plural(x.n, "entry", "entries")}`,
+    },
+      svg("title", {}, `${x.title} (${kindLabel(x.kind)}): ${plural(x.n, "entry", "entries")}`),
+      svg("circle", { class: kindClass(x.kind), cx: p.x, cy: p.y, r }),
+      svg("text", { x: left ? p.x - r - 4 : p.x + r + 4, y: p.y + 4, "text-anchor": left ? "end" : "start" }, x.title));
+    const near = () => {
+      chart.classList.add("focusing");
+      const close = neighbours.get(x.id);
+      for (const m of marks) m.classList.toggle("near", close.has(Number(m.dataset.id)));
+      for (const line of lines) line.classList.toggle("near", Number(line.dataset.a) === x.id || Number(line.dataset.b) === x.id);
+    };
+    const away = () => chart.classList.remove("focusing");
+    mark.addEventListener("mouseenter", near);
+    mark.addEventListener("focus", near);
+    mark.addEventListener("mouseleave", away);
+    mark.addEventListener("blur", away);
+    return mark;
+  });
+  // biggest last, so they're drawn on top
+  chart.append(svg("g", {}, [...marks].reverse()));
+
+  const others = [...counts.keys()].filter((k) => !slotted.includes(k));
+  const legend = h("div", { class: "map-legend" },
+    slotted.map((k) => h("span", {}, h("span", { class: `map-swatch ${kindClass(k)}`, "aria-hidden": "true" }), `${kindLabel(k)} (${fmtNum(counts.get(k))})`)),
+    others.length ? h("span", {}, h("span", { class: "map-swatch k-other", "aria-hidden": "true" }),
+      `${others.map(kindLabel).join(", ")} (${fmtNum(others.reduce((sum, k) => sum + counts.get(k), 0))})`) : null,
+    h("span", { class: "quiet" }, "Bigger dots are linked from more entries; thicker lines join notes that share more."));
+
+  const byId = new Map(nodes.map((x) => [x.id, x]));
+  const table = h("details", { class: "turn-read" },
+    h("summary", {}, "As a table"),
+    edges.length
+      ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, h("th", {}, "Note"), h("th", {}, "and"), h("th", { class: "num" }, "Shared entries"))),
+        h("tbody", {}, edges.map((e) => h("tr", {},
+          h("td", {}, h("a", { href: href.note(e.a) }, byId.get(e.a).title)),
+          h("td", {}, h("a", { href: href.note(e.b) }, byId.get(e.b).title)),
+          h("td", { class: "num" }, fmtNum(e.n)))))))
+      : empty("No two of these notes share an entry."));
+  return [legend, h("div", { class: "chart-wrap map-wrap" }, chart), table];
+}
+
+async function mapView(_, params) {
+  const cat = await getCatalog();
+  document.title = "Note map · Commonplace";
+  const state = {
+    kind: params.get("kind") || "", year: params.get("year") || "",
+    limit: MAP_SIZES.includes(Number(params.get("limit"))) ? Number(params.get("limit")) : 40,
+  };
+  const years = [...new Set(cat.entries.map((e) => e.date.slice(0, 4)))].sort().reverse();
+  const kinds = [...new Set(cat.notes.map((n) => n.kind))].sort();
+  const kindSelect = h("select", {}, h("option", { value: "" }, "Every kind"),
+    kinds.map((k) => h("option", { value: k, selected: k === state.kind }, kindLabel(k))));
+  const yearSelect = h("select", {}, h("option", { value: "" }, "All years"),
+    years.map((y) => h("option", { value: y, selected: y === state.year }, y)));
+  const sizeSelect = h("select", {}, MAP_SIZES.map((n) => h("option", { value: n, selected: n === state.limit }, `${n} notes`)));
+  const body = h("div", {});
+  let token = 0;
+
+  async function load() {
+    const mine = ++token;
+    replaceParams("/map", { kind: state.kind, year: state.year, limit: state.limit === 40 ? "" : state.limit });
+    fill(body, h("p", { class: "search-status", role: "status" }, "Laying out the notes…"));
+    const data = await api("graph", {
+      kind: state.kind, limit: state.limit,
+      from: state.year && `${state.year}-01-01`, to: state.year && `${state.year}-12-31`,
+    }).catch((err) => ({ error: err }));
+    if (mine !== token) return;
+    if (data.error) {
+      fill(body, h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't draw the map"), data.error.message));
+      return;
+    }
+    if (!data.nodes.length) {
+      fill(body, empty(state.kind || state.year ? "No entry links a note like that in this range." : "No entry links a note yet. Notes come from the folders in notes.paths."));
+      return;
+    }
+    fill(body, noteMap(data));
+  }
+
+  const change = (key, el, number = false) => () => { state[key] = number ? Number(el.value) : el.value; load(); };
+  kindSelect.addEventListener("change", change("kind", kindSelect));
+  yearSelect.addEventListener("change", change("year", yearSelect));
+  sizeSelect.addEventListener("change", change("limit", sizeSelect, true));
+  load();
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.notes() }, "Notes"),
+      title: "Note map",
+      lede: "The notes you link most, joined when the same entries link both. Point at one to see who and what it turns up with, or open it.",
+    }),
+    h("div", { class: "filters", role: "search" }, field("Kind", kindSelect), field("Years", yearSelect), field("Show", sizeSelect)),
+    body);
+}
+
+// ---------------------------------------------------------------- compare and review
+
+const PERIOD_HINT = "2024, 2024-03 or 2024-W10";
+
+function share(n, of) {
+  return n ? `${fmtNum(n)} (${Math.round(of * 100)}%)` : "–";
+}
+
+function changeTable(title, rows, label, cat, periods, { note } = {}) {
+  if (!rows.length) return null;
+  const notes = new Map(cat.notes.map((n) => [n.title, n]));
+  const name = (c) => {
+    if (label === "tag") return h("a", { href: href.tag(c.name) }, c.name);
+    const found = notes.get(c.name);
+    return found ? h("a", { href: href.note(found.id), title: kindLabel(found.kind) }, c.name) : c.name;
+  };
+  return section(title, h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, h("th", {}, label === "tag" ? "Tag" : "Note"),
+      h("th", { class: "num" }, periods[0].title), h("th", { class: "num" }, periods[1].title))),
+    h("tbody", {}, rows.map((c) => h("tr", {},
+      h("td", {}, name(c)),
+      h("td", { class: "num" }, share(c.a, c.a_share)),
+      h("td", { class: "num" }, share(c.b, c.b_share))))))), { note });
+}
+
+async function compareView([first, second]) {
+  const inA = h("input", { type: "text", value: first, placeholder: PERIOD_HINT, "aria-label": "First period", spellcheck: "false" });
+  const inB = h("input", { type: "text", value: second || "", placeholder: "the one before", "aria-label": "Second period", spellcheck: "false" });
+  const form = h("form", { class: "filters", role: "search" },
+    field("Compare", inA), field("with", inB), h("button", { class: "button", type: "submit" }, "Compare"));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    if (inA.value.trim()) location.hash = href.compare(inA.value.trim(), inB.value.trim());
+  });
+  let d;
+  let cat;
+  let known;
+  try {
+    [d, cat, known] = await Promise.all([
+      api("compare", { first, second }), getCatalog(), api("metrics").then((m) => m.metrics).catch(() => []),
+    ]);
+  } catch (err) {
+    // a period that isn't one, or one with nothing in it; the form is how to fix it
+    if (!(err instanceof ApiError) || ![400, 404].includes(err.status)) throw err;
+    document.title = "Side by side · Commonplace";
+    return h("div", {}, pageHead({ eyebrow: "Side by side", title: "Compare two periods" }), form,
+      h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't compare"), h("span", {}, err.message)));
+  }
+  const yesNo = new Set(known.filter((m) => m.yes_no).map((m) => m.key));
+  const scale = d.mood_scale;
+  const sides = [d.a, d.b];
+  const titles = sides.map((side) => d.periods[side.label]);
+  document.title = `${titles[0].title} and ${titles[1].title} · Commonplace`;
+
+  const head = (t) => h("th", { class: "num" }, h("a", { href: href.review(t.key) }, t.title));
+  const row = (label, a, b) => h("tr", {}, h("td", {}, label), h("td", { class: "num" }, a), h("td", { class: "num" }, b));
+  const metricKeys = [...new Set([...Object.keys(d.a.metrics), ...Object.keys(d.b.metrics)])].sort();
+  const numbers = h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, h("th", {}, ""), head(titles[0]), head(titles[1]))),
+    h("tbody", {},
+      row("Entries", fmtNum(d.a.writing.entries), fmtNum(d.b.writing.entries)),
+      row("Days written", fmtNum(d.a.writing.days_written), fmtNum(d.b.writing.days_written)),
+      row("Words", fmtNum(d.a.writing.words), fmtNum(d.b.writing.words)),
+      row("Average mood", moodChip(d.a.mood, scale), moodChip(d.b.mood, scale)),
+      row("Longest streak", plural(d.a.writing.longest_streak, "day"), plural(d.b.writing.longest_streak, "day")),
+      metricKeys.map((k) => row(h("a", { href: href.metric(k) }, k),
+        d.a.metrics[k] ? fmtValue(d.a.metrics[k][0], yesNo.has(k)) : "–", d.b.metrics[k] ? fmtValue(d.b.metrics[k][0], yesNo.has(k)) : "–")))));
+
+  const shareNote = `share of each period's entries; ${d.min_count} or more to count`;
+  const changes = [
+    changeTable("Tags you wrote more", d.tags_up, "tag", cat, titles, { note: shareNote }),
+    changeTable("Tags you wrote less", d.tags_down, "tag", cat, titles, { note: shareNote }),
+    changeTable("Notes you linked more", d.notes_up, "note", cat, titles, { note: shareNote }),
+    changeTable("Notes you linked less", d.notes_down, "note", cat, titles, { note: shareNote }),
+    changeTable(`New in ${titles[1].title}`, d.notes_new, "note", cat, titles, { note: `not linked at all in ${titles[0].title}` }),
+    changeTable(`Gone in ${titles[1].title}`, d.notes_gone, "note", cat, titles, { note: `not linked at all in ${titles[1].title}` }),
+  ].filter(Boolean);
+
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.digests(titles[1].kind) }, "Side by side"),
+      title: `${titles[0].title} and ${titles[1].title}`,
+      lede: "Two periods from what's already stored. Tags and notes are compared by the share of each period's entries they're on, since a busy month would otherwise seem to have more of everything.",
+    }),
+    form,
+    section("In numbers", numbers),
+    changes.length ? changes : empty("No tag or note rose or fell by enough to show."));
+}
+
+async function reviewView([period]) {
+  const r = await api(`review/${encodeURIComponent(period)}`);
+  const scale = r.mood_scale;
+  const before = `the ${r.kind} before`;
+  const w = r.writing;
+  document.title = `${r.title} in review · Commonplace`;
+
+  const digest = r.digest
+    ? [h("div", { class: "raw" }, r.digest.summary),
+      r.digest.stale && h("p", { class: "turn-meta" }, h("span", { class: "status pending" }, "out of date"),
+        " Some entries changed after this was written. ", h("code", {}, `journal digest ${r.key} --refresh`), " rewrites it.")]
+    : empty(`There's no ${r.kind} digest yet. `, h("code", {}, `journal digest ${r.key} --refresh`), " writes one.");
+
+  const facts = h("div", { class: "facts" },
+    fact(fmtNum(w.entries), `entries on ${plural(w.days_written, "day")}`, href.entries({ from: r.start, to: r.end })),
+    fact(fmtNum(w.words), "words"),
+    fact(plural(w.longest_streak, "day"), w.longest_streak_end ? `longest streak, to ${mediumDate(w.longest_streak_end)}` : "longest streak"),
+    fact(fmtMood(r.mood.average), r.mood.previous != null ? `average mood, ${fmtMood(r.mood.previous)} ${before}` : "average mood"));
+
+  const partName = r.kind === "year" ? "month" : "week";
+  const parts = r.parts.length ? section(`Mood by ${partName}`, h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, h("th", {}, partName === "month" ? "Month" : "Week"), h("th", {}, "Mood"), h("th", { class: "num" }, "Entries"))),
+    h("tbody", {}, r.parts.map((p) => h("tr", {},
+      h("td", {}, p.entries
+        ? h("a", { href: partName === "month" ? href.review(p.start.slice(0, 7)) : href.entries({ from: p.start, to: p.end }) }, p.label)
+        : p.label),
+      h("td", {}, p.entries ? moodChip(p.mood, scale) : h("span", { class: "quiet" }, "nothing written")),
+      h("td", { class: "num" }, fmtNum(p.entries)))))))) : null;
+
+  const noteChips = (rows, count) => h("div", { class: "chips" }, rows.map((n) =>
+    h("a", { class: "chip", href: href.note(n.id), title: kindLabel(n.kind) }, n.title, h("span", { class: "n" }, count(n)))));
+
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.digest(r.kind, r.key) }, `${KIND_LABELS[r.kind]} digest`),
+      title: `${r.title} in review`,
+      actions: [button(`← ${periodTitle(r.kind, r.previous.key)}`, href.review(r.previous.key), { title: `The review of ${before}` })],
+      meta: [h("span", {}, periodRange(r.kind, r.start, r.end)), h("a", { href: href.compare(r.key) }, `Compare with ${before}`)],
+    }),
+    section("Digest", digest),
+    facts,
+    parts,
+    r.days.length ? section("Day by day", entryLines(r.days, scale)) : null,
+    r.best.length ? section("Best days", entryLines(r.best, scale)) : null,
+    r.hardest.length ? section("Hardest days", entryLines(r.hardest, scale)) : null,
+    r.notes.length ? section("Who and what came up most", noteChips(r.notes, (n) => fmtNum(n.entries)), { note: "entries that link each" }) : null,
+    r.new_notes.length && r.has_earlier ? section(`New this ${r.kind}`, noteChips(r.new_notes, (n) => `from ${mediumDate(n.first)}`)) : null,
+    r.tags.length ? section("Tags", h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Tag"), h("th", { class: "num" }, "Entries"), r.has_earlier ? h("th", { class: "num" }, `${before[0].toUpperCase()}${before.slice(1)}`) : null)),
+      h("tbody", {}, r.tags.map((t) => h("tr", {},
+        h("td", {}, h("a", { href: href.tag(t.name) }, t.name)),
+        h("td", { class: "num" }, fmtNum(t.entries)),
+        r.has_earlier ? h("td", { class: "num" }, t.previous ? fmtNum(t.previous) : "–") : null)))))) : null,
+    r.fell_away.length ? section("Fell away", h("ul", { class: "plain" }, r.fell_away.map((t) =>
+      h("li", {}, h("a", { href: href.tag(t.name) }, t.name), `: ${plural(t.entries, "entry", "entries")}, down from ${fmtNum(t.previous)}`)))) : null,
+    r.about_you.length ? section("New about you", h("ul", { class: "plain" }, r.about_you.map((f) =>
+      h("li", {}, f.fact, " ", h("a", { href: href.entries({ from: f.date, to: f.date }), class: "quiet" }, mediumDate(f.date)))))) : null);
+}
+
+// ---------------------------------------------------------------- numbers
+
+async function metricsView() {
+  const data = await api("metrics");
+  document.title = "Numbers · Commonplace";
+  const head = pageHead({
+    eyebrow: "From your frontmatter",
+    title: "Numbers",
+    lede: "Numbers you keep in your entries' frontmatter, like sleep: 7 or exercise: true. No model reads them; they're kept as you wrote them, and true and false count as 1 and 0.",
+  });
+  if (!data.metrics.length) {
+    return h("div", {}, head, empty("None yet. Add a line like ", h("code", {}, "sleep: 7"), " to a daily note's frontmatter and run ", h("code", {}, "journal index"), "."));
+  }
+  return h("div", {}, head,
+    h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Number"), h("th", { class: "num" }, "Entries"), h("th", { class: "num" }, "Average"),
+        h("th", { class: "num" }, "Lowest"), h("th", { class: "num" }, "Highest"), h("th", { class: "num" }, "First"), h("th", { class: "num" }, "Last"))),
+      h("tbody", {}, data.metrics.map((m) => h("tr", {},
+        h("td", {}, h("a", { href: href.metric(m.key) }, m.key), m.yes_no ? h("span", { class: "quiet" }, " yes or no") : null),
+        h("td", { class: "num" }, fmtNum(m.n)),
+        h("td", { class: "num" }, m.yes_no ? `${fmtValue(m.avg, true)} of days` : fmtValue(m.avg)),
+        h("td", { class: "num" }, m.yes_no ? "–" : fmtValue(m.lo)),
+        h("td", { class: "num" }, m.yes_no ? "–" : fmtValue(m.hi)),
+        h("td", { class: "num" }, mediumDate(m.first)),
+        h("td", { class: "num" }, mediumDate(m.last))))))));
+}
+
+function splitText(d, scale) {
+  const s = d.split;
+  if (!s) return empty(`Every entry records the same ${d.key}, so there's nothing to set side by side.`);
+  const days = (n) => plural(n, "day");
+  const lines = s.yes_no
+    ? [
+      h("p", { class: "split-line" }, `On the ${days(s.high.days)} with ${d.key}, your mood averaged `, moodChip(s.high.mood, scale), "."),
+      h("p", { class: "split-line" }, `On the ${days(s.low.days)} without it, `, moodChip(s.low.mood, scale), "."),
+    ]
+    : [
+      h("p", { class: "split-line" }, `On the ${days(s.high.days)} your ${d.key} was ${fmtValue(s.median)} or more (its median), your mood averaged `, moodChip(s.high.mood, scale), "."),
+      h("p", { class: "split-line" }, `On the ${days(s.low.days)} it was less, `, moodChip(s.low.mood, scale), "."),
+    ];
+  return [lines, h("p", { class: "section-note" }, s.enough
+    ? "The two go together on these days; that doesn't mean one causes the other."
+    : "There are too few scored days on one side to say much yet.")];
+}
+
+async function metricView([key]) {
+  const d = await api(`metrics/${encodeURIComponent(key)}`);
+  const scale = d.mood_scale;
+  const yesNo = d.yes_no;
+  document.title = `${d.key} · Commonplace`;
+  const onCalendar = href.calendar(d.last.slice(0, 4), d.key);
+  const facts = h("div", { class: "facts" },
+    fact(fmtValue(d.avg, yesNo), yesNo ? "of the entries that record it say yes" : "average"),
+    fact(fmtNum(d.n), "entries record it"),
+    yesNo ? null : fact(`${fmtValue(d.lo)} to ${fmtValue(d.hi)}`, "lowest to highest"),
+    fact(mediumDate(d.last), `last recorded, first on ${mediumDate(d.first)}`, onCalendar));
+  const moodBy = new Map(d.mood_months.map((m) => [m.month, m.avg_mood]));
+  const table = h("details", { class: "turn-read" },
+    h("summary", {}, "As a table"),
+    h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Month"), h("th", { class: "num" }, yesNo ? "Share of days" : "Average"),
+        h("th", { class: "num" }, "Entries"), h("th", {}, "Mood those days"))),
+      h("tbody", {}, d.months.map((m) => h("tr", {},
+        h("td", {}, h("a", { href: href.entries({ from: `${m.month}-01`, to: lastDayOf(m.month) }) }, fmtMonth.format(toDate(`${m.month}-01`)))),
+        h("td", { class: "num" }, fmtValue(m.avg, yesNo)),
+        h("td", { class: "num" }, fmtNum(m.n)),
+        h("td", {}, moodChip(moodBy.get(m.month) ?? null, scale))))))));
+  const aside = (e) => `${d.key} ${fmtValue(e.value)}`;
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: href.metrics() }, "Numbers"),
+      title: d.key,
+      meta: [h("a", { href: onCalendar }, "See it on the calendar")],
+    }),
+    facts,
+    section("By month", h("div", { class: "chart-pair" },
+      h("div", {}, h("h3", {}, yesNo ? `Share of days with ${d.key}` : `Average ${d.key}`), metricChart(d.months, d.key, yesNo)),
+      h("div", {}, h("h3", {}, "Mood on those days"), monthlyMoodChart(d.mood_months, d.baseline_mood, scale)),
+      table), { note: "two charts, one month to a column" }),
+    section(yesNo ? `Mood with and without ${d.key}` : "Mood either side of the median", splitText(d, scale)),
+    yesNo ? null : section(`Highest ${d.key}`, entryLines(d.highest, scale, { aside })),
+    yesNo ? null : section(`Lowest ${d.key}`, entryLines(d.lowest, scale, { aside })));
+}
+
 // ---------------------------------------------------------------- ask
 
 const STAGE_LABELS = {
@@ -1238,9 +1914,12 @@ const STAGE_LABELS = {
 const HISTORY_TURNS = 6;
 const HISTORY_ANSWER_CHARS = 400;
 
+// what an answer can be kept to, as /api/ask and the entries page name them
+const SCOPE_KEYS = ["note", "tag", "group", "from", "to"];
+
 // Kept outside the view so a question keeps running, and the conversation
 // stays, while you look at the entries it cites.
-const ask = { turns: loadTurns(), controller: null, redraw: null };
+const ask = { turns: loadTurns(), scope: loadScope(), conversation: loadConversation(), controller: null, redraw: null };
 
 function loadTurns() {
   try {
@@ -1252,12 +1931,79 @@ function loadTurns() {
   }
 }
 
+// so the question history, when it's on, keeps a conversation's turns together
+function loadConversation() {
+  try {
+    return sessionStorage.getItem("ask-conversation") || newConversation();
+  } catch {
+    return newConversation();
+  }
+}
+
+function newConversation() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function loadScope() {
+  try {
+    return JSON.parse(sessionStorage.getItem("ask-scope") || "null");
+  } catch {
+    return null;
+  }
+}
+
 function saveTurns() {
   try {
     sessionStorage.setItem("ask-turns", JSON.stringify(ask.turns));
+    sessionStorage.setItem("ask-scope", JSON.stringify(ask.scope));
+    sessionStorage.setItem("ask-conversation", ask.conversation);
   } catch {
     // storage can be full or refused; the conversation still works for this visit
   }
+}
+
+function scopeFrom(params) {
+  const scope = {};
+  for (const key of SCOPE_KEYS) {
+    const value = (params.get(key) || "").trim();
+    if (value) scope[key] = value;
+  }
+  return Object.keys(scope).length ? scope : null;
+}
+
+function scopeLabel(scope, cat) {
+  const parts = [];
+  if (scope.note) {
+    const note = cat.notes.find((n) => String(n.id) === String(scope.note));
+    parts.push(`linking ${note ? note.title : "a note that's gone"}`);
+  }
+  if (scope.group) {
+    const [key, value] = scope.group.split("=");
+    parts.push(`linking a note whose ${key} is ${value}`);
+  }
+  if (scope.tag) parts.push(`tagged ${scope.tag}`);
+  if (scope.from && scope.to) parts.push(`from ${mediumDate(scope.from)} to ${mediumDate(scope.to)}`);
+  else if (scope.from) parts.push(`from ${mediumDate(scope.from)} on`);
+  else if (scope.to) parts.push(`up to ${mediumDate(scope.to)}`);
+  return `Only entries ${parts.join(" and ")}`;
+}
+
+const scopeParams = (scope) => Object.fromEntries(SCOPE_KEYS.filter((k) => scope && scope[k]).map((k) => [k, scope[k]]));
+
+// a question box on a note, tag, digest or entries page, kept to what that page shows
+function askHere(scope, placeholder, intro) {
+  const input = h("input", {
+    type: "text", placeholder, "aria-label": "Your question", autocomplete: "off", maxlength: 2000,
+  });
+  const form = h("form", { class: "search-box ask-box ask-here", role: "search" },
+    input, h("button", { class: "button", type: "submit" }, "Ask"));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const q = input.value.trim();
+    if (q) location.hash = href.ask(q, scope);
+  });
+  return section("Ask about this", form, { intro });
 }
 
 function changed() {
@@ -1293,13 +2039,17 @@ async function askQuestion(question) {
     .filter((t) => t.status === "done")
     .slice(-HISTORY_TURNS)
     .map((t) => [t.rewritten || t.question, t.answer.text.slice(0, HISTORY_ANSWER_CHARS)]);
-  const turn = { question, status: "running", stage: "Starting…" };
+  const turn = { question, status: "running", stage: "Starting…", scope: ask.scope };
   ask.turns.push(turn);
   const controller = new AbortController();
   ask.controller = controller;
   changed();
   try {
-    const response = await fetch(`/api/ask${query({ q: question, history: history.length ? JSON.stringify(history) : "" })}`, {
+    const params = {
+      q: question, history: history.length ? JSON.stringify(history) : "", conversation: ask.conversation,
+      ...scopeParams(turn.scope),
+    };
+    const response = await fetch(`/api/ask${query(params)}`, {
       headers: { Accept: "text/event-stream" }, signal: controller.signal,
     });
     if (!response.ok) {
@@ -1328,6 +2078,19 @@ async function askQuestion(question) {
   }
 }
 
+// the sentence of each cited day that has the question's words, to check the answer against
+function sourceQuotes(answer) {
+  const quoted = answer.sources.dates.filter((d) => d.quote);
+  if (!quoted.length) return null;
+  return h("details", { class: "turn-read" },
+    h("summary", {}, `What those days say: ${plural(quoted.length, "line")} with the question's words`),
+    h("ul", { class: "turn-quotes" }, quoted.map((d) => h("li", {},
+      d.id == null
+        ? h("span", { class: "line-date" }, mediumDate(d.date))
+        : h("a", { class: "line-date", href: href.entry(d.id, d.section ? { at: d.section } : null) }, mediumDate(d.date)),
+      h("q", {}, d.quote)))));
+}
+
 function sourceChips(answer) {
   const { dates, notes } = answer.sources;
   if (!dates.length && !notes.length) return null;
@@ -1346,6 +2109,7 @@ function sourceChips(answer) {
 
 function turnView(turn, scale, index) {
   const parts = [h("p", { class: "turn-q" }, turn.question)];
+  if (turn.scope) parts.push(h("p", { class: "turn-rewrite" }, `${turn.scope.label}.`));
   if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, turn.rewritten)));
   if (turn.status === "running") {
     if (turn.partial) parts.push(h("div", { class: "turn-answer writing" }, turn.partial));
@@ -1362,6 +2126,7 @@ function turnView(turn, scale, index) {
     parts.push(
       h("div", { class: "turn-answer" }, a.body),
       sourceChips(a),
+      sourceQuotes(a),
       h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}.`),
       readCount ? h("details", { class: "turn-read" },
         h("summary", {}, `What it read: ${plural(a.entries.length, "entry", "entries")}, ${plural(a.notes.length, "note")}`),
@@ -1387,12 +2152,26 @@ async function askView(_, params) {
   const go = h("button", { class: "button", type: "submit" }, "Ask");
   const reset = h("button", { class: "button", type: "button" }, "New conversation");
   const hint = h("p", { class: "section-note" });
+  const scopeSlot = h("div", { class: "ask-scope" });
   const form = h("form", { class: "search-box ask-box", role: "search" }, input, go);
+
+  // a question from the jump box is about everything; one from a page, about what it shows
+  const fromLink = scopeFrom(params);
+  if (fromLink) ask.scope = { ...fromLink, label: scopeLabel(fromLink, cat) };
+  else if ((params.get("q") || "").trim()) ask.scope = null;
 
   const draw = () => {
     const running = ask.turns.some((t) => t.status === "running");
     go.disabled = running;
     reset.hidden = !ask.turns.length || running;
+    fill(scopeSlot, ask.scope
+      ? h("span", { class: "chip pencil" }, ask.scope.label,
+        h("button", {
+          type: "button", "aria-label": "Ask about the whole journal again",
+          title: "Ask about the whole journal again",
+          onclick: () => { ask.scope = null; changed(); input.focus(); },
+        }, "×"))
+      : null);
     hint.textContent = ask.turns.some((t) => t.status === "done")
       ? "Follow-ups like “what about the month after?” build on the answers above."
       : "";
@@ -1413,15 +2192,17 @@ async function askView(_, params) {
   });
   reset.addEventListener("click", () => {
     ask.turns = [];
+    ask.conversation = newConversation();
     changed();
     input.focus();
   });
 
   const preset = (params.get("q") || "").trim();
-  if (preset) {
+  if (preset || fromLink) {
     replaceParams("/ask", {});
-    if (!ask.controller) askQuestion(preset);
+    saveTurns();
   }
+  if (preset && !ask.controller) askQuestion(preset);
   draw();
   setTimeout(() => input.focus(), 0);
   return h("div", {},
@@ -1429,7 +2210,44 @@ async function askView(_, params) {
       eyebrow: "Questions about your journal", title: "Ask",
       lede: "Ask in plain words. The answer cites the days and notes it drew on, and you can open each one.",
     }),
-    thread, form, h("div", { class: "ask-foot" }, hint, reset));
+    thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset), earlierQuestions());
+}
+
+// filled in once the list arrives, so the Ask page doesn't wait on it
+function earlierQuestions() {
+  const slot = h("div", {});
+  api("history").then((data) => {
+    if (!data.items.length) return;
+    fill(slot, section("Earlier questions", [
+      h("ol", { class: "lines" }, data.items.map((k) => h("li", {},
+        h("a", { class: "line", href: href.history(k.id) },
+          h("span", { class: "line-date" }, stamp(k.asked_at)),
+          h("span", { "aria-hidden": "true" }),
+          h("span", { class: "line-summary" }, k.question),
+          k.scope ? h("span", { class: "line-tags" }, `only ${k.scope}`) : null)))),
+      h("p", { class: "section-note" }, data.enabled
+        ? ["Kept because [history] is on in config.toml. ", h("code", {}, "journal history --delete N"), " forgets one, and ", h("code", {}, "journal history --clear"), " deletes them all for good."]
+        : ["History is off, so nothing new is kept, but these still are. ", h("code", {}, "journal history --clear"), " deletes them for good."]),
+    ], { note: plural(data.items.length, "question") }));
+  }).catch(() => {});
+  return slot;
+}
+
+async function historyView([id]) {
+  const k = await api(`history/${id}`);
+  document.title = `${k.question} · Commonplace`;
+  const where = { ask: "journal ask", chat: "journal chat", browse: "this browser" }[k.source] || k.source;
+  return h("div", {},
+    pageHead({
+      eyebrow: h("a", { href: "#/ask" }, "Earlier question"),
+      title: k.question,
+      meta: [h("span", {}, `asked ${stamp(k.asked_at)} in ${where}`), k.scope ? h("span", {}, `only ${k.scope}`) : null],
+    }),
+    k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
+    h("div", { class: "turn-answer" }, k.answer.replace(/\n\nSources: .*$/s, "")),
+    sourceChips(k),
+    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}. The days and notes it cited may have changed since.`),
+    h("p", { class: "section-note" }, h("code", {}, `journal history --delete ${k.id}`), " forgets this one for good."));
 }
 
 // ---------------------------------------------------------------- you
@@ -1530,14 +2348,22 @@ const routes = [
   [/^\/entries$/, entriesView, "entries"],
   [/^\/entry\/(\d+)$/, entryView, "entries"],
   [/^\/notes$/, notesView, "notes"],
+  [/^\/map$/, mapView, "notes"],
+  [/^\/themes$/, themesView, "themes"],
+  [/^\/theme\/(\d+)$/, themeView, "themes"],
   [/^\/note\/(\d+)$/, noteView, "notes"],
   [/^\/tags$/, tagsView, "tags"],
   [/^\/tag\/(.+)$/, tagView, "tags"],
-  [/^\/digests(?:\/(year|month|week|notes))?$/, digestsView, "digests"],
-  [/^\/digest\/(year|month|week)\/([^/]+)$/, digestView, "digests"],
+  [/^\/metrics$/, metricsView, "metrics"],
+  [/^\/metric\/(.+)$/, metricView, "metrics"],
+  [/^\/digests(?:\/(year|month|week|range|notes))?$/, digestsView, "digests"],
+  [/^\/digest\/(year|month|week|range)\/([^/]+)$/, digestView, "digests"],
+  [/^\/compare\/([^/]+)(?:\/([^/]+))?$/, compareView, "digests"],
+  [/^\/review\/([^/]+)$/, reviewView, "digests"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],
+  [/^\/history\/(\d+)$/, historyView, "ask"],
   [/^\/you$/, youView, "you"],
 ];
 

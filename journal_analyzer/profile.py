@@ -64,6 +64,8 @@ _META_NAMES = "profile_names"
 _META_UPDATED = "profile_updated_at"
 _META_NOTE_HASH = "profile_note_hash"
 _META_SHORTENED = "profile_shortened_hash"
+# what's shown and given to prompts, as opposed to bookkeeping
+TEXT_KEYS = (_META_TEXT, _META_NAMES, _META_UPDATED)
 
 _SCAN_PROMPT = """You read entries from one person's journal and pull out lasting \
 facts about that person: names or nicknames they go by or use for people \
@@ -400,3 +402,15 @@ def facts_json(conn: sqlite3.Connection, limit: int = 500) -> list[dict[str, obj
         for r in store.profile_facts(conn, limit)
     ]
 
+
+def to_json(conn: sqlite3.Connection, config: Config, facts: int) -> dict[str, object]:
+    """The profile, its counts and the newest facts, as `journal profile --json` prints them."""
+    found = current(conn)
+    return {
+        "profile": None if found is None else {
+            "text": found.text, "names": found.names, "updated_at": found.updated_at,
+        },
+        "note": config.profile.note or None,
+        **summary_counts(conn),
+        "recent_facts": facts_json(conn, facts),
+    }

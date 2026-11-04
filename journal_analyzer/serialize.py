@@ -163,6 +163,7 @@ def answer_json(conn: sqlite3.Connection, answer: Answer) -> Json:
             "date": day.isoformat(),
             "id": rows[0]["id"] if rows else None,
             "section": answer.cited_parts.get(day.isoformat()),
+            "quote": answer.quotes.get(day.isoformat()),
         })
     notes = []
     for title in answer.cited_notes:

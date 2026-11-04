@@ -77,6 +77,7 @@ journal init              # create the DB schema and detect the embedding size
 journal index             # index the vault, skipping unchanged files
 journal index --force     # re-process everything (model results it's seen before are reused)
 journal index --dry-run   # what would be indexed, which files won't parse, how many model calls
+journal index 2024-03-04.md --force   # read one file (or folder) again, leaving the rest alone
 journal stats             # entries, notes, links, date range, DB size, errored and future-dated files
 
 # questions
@@ -93,15 +94,19 @@ journal rollup --since 2025-01-01 --only month,year   # just this year's months 
 journal rollup --dry-run      # list what would be written, without Ollama
 journal digest 2024-03        # read one digest: a year (2024), month (2024-03) or week (2024-W10)
 journal digest 2024-03 --refresh   # write that one first if it's missing or out of date
+journal digest 2024-03-02..2024-03-11 --refresh   # a span of days, like a trip
 
 # live updates
-journal watch             # keeps running and indexes notes as you save them
+journal watch             # keeps running and indexes notes as you save them (and digests, if you turn that on)
 
 # reflection
 journal chat              # Q&A that remembers the last few turns
+journal history           # earlier questions and answers, with [history] enabled = true
 journal insights          # mood, tag and timing patterns you didn't ask about
+journal themes --refresh  # group your entries into the threads that run through them
+journal themes            # those themes, biggest first; 'journal themes 3' shows one
 journal prompt            # ideas for what to write next, from threads left open
-journal review 2025       # the year in review, as Markdown
+journal review 2025       # the year in review, as Markdown (or a month, 2025-03, or a week, 2025-W10)
 journal compare 2024 2025 # two periods side by side; one period compares it with the one before
 
 # other tools
@@ -121,15 +126,21 @@ It never writes to `.obsidian` or anywhere in the vault, and with no `.obsidian`
 
 Before a long first run, or after changing `date_source`, `date_format` or `split_heading_regex`, run `journal index --dry-run`. It walks the vault the same way `journal index` does and parses every file it would index, without Ollama and without touching the cache. It lists files that would fail and why, files that split into several entries, entries dated in the future, files that would be dropped, and roughly how many model calls the real run would make. Add `--force` to check every file, not just new and changed ones.
 
-`journal rollup` shows a progress bar with the time left. `--since` and `--until` limit it to periods that overlap those dates and `--only` to some kinds (`profile`, `month`, `year`, `note`, `week`); your profile and relationship digests cover the whole journal, so the dates don't apply to them. `--dry-run` lists what it would write and why (not written yet, out of date, or rewritten for `--rebuild-all`). To read one digest, or to write just the one you want instead of waiting for a full run, use `journal digest`. A year is written from its month digests, so refreshing a year writes any of its months that are missing first.
+To index just some files, name them: `journal index 2024-03-04.md Trips/Lisbon` takes files and folders from the vault root (or from the folder you're in), and nothing else in the vault is read or dropped. It's handy after editing an entry when `journal watch` isn't running, or with `--force` to have the model read one entry again. A named file that's been deleted is taken out of the cache, and one a full run wouldn't index (outside the vault, left out by `ignore_patterns`, or matched by neither `daily_note_glob` nor `notes.paths`) is refused with the reason. `--dry-run` works the same way.
+
+`journal rollup` shows a progress bar with the time left. `--since` and `--until` limit it to periods that overlap those dates and `--only` to some kinds (`profile`, `month`, `year`, `note`, `week`, `range`); your profile and relationship digests cover the whole journal, so the dates don't apply to them. `--dry-run` lists what it would write and why (not written yet, out of date, or rewritten for `--rebuild-all`). To read one digest, or to write just the one you want instead of waiting for a full run, use `journal digest`. A year is written from its month digests, so refreshing a year writes any of its months that are missing first.
+
+A digest can cover any span of days, too, for the weeks and months that don't line up with what happened: a trip, a move, a hard fortnight. `journal digest 2024-03-02..2024-03-11 --refresh` writes one (up to 92 days; past that, read the month and year digests), and `journal digest 2024-03-02..2024-03-11` reads it back. They're only written when you ask, but once there they go out of date like the others when an entry in them changes, and `journal rollup` rewrites the stale ones (`--only range` for just those), as `journal watch` does with `watch_refresh_minutes` set. A question whose dates overlap one reads it next to the week or month digests, the three that share the most days with the question first. The browser lists them under Spans on the Digests page, and each entry's page shows the spans it's in. `journal compare` and `journal review` still take years, months and weeks only.
 
 Notes you link often (from 8 or more entries by default) also get a relationship digest: a few sentences on how that person, place or topic figures in your journal over the years. It's written from the note itself and the summaries of the entries that link to it, a sample of each year's when there are many. `journal note` shows it, so do the note's page and the Digests page in the browser, and answers that name the note read it. It goes out of date when an entry that links the note, or the note itself, changes. `[rollups] note_min_mentions` sets the threshold (0 turns them off) and `note_entries_per_year` caps how many entries from each year go in.
+
+`journal watch` can keep the week and month digests current as you write. Set `[rollups] watch_refresh_minutes` (0, off, by default) and, once nothing is waiting to be indexed and that many minutes have passed since it last did this, watch writes the digests of the weeks and months it indexed or dropped entries in: the ones that are out of date, and the ones that don't exist yet. Months go first and newest first, since answers read months, and it stops as soon as a file changes and picks up again later. It only looks at days that changed while it was running, so a backlog from before (after `journal index --force`, say) is still `journal rollup`'s job, and so are year and relationship digests. If Ollama is down, the days wait for the next try.
 
 Each digest is one call to the precise model, so on a CPU a full `journal rollup` can take hours. Your profile is updated first, since every digest is written with it, then month and year digests, because those are what answers use, so if you stop a run partway they're already there.
 
 `journal ask` shows which step it's on while it works, then prints the answer as the model writes it, so on a CPU you can start reading long before it finishes. The fast model's first try is held back for a moment until it's clear it isn't giving up (it answers INSUFFICIENT when the summaries aren't enough and the precise model takes over). At the end it says which stage produced the answer: `aggregate` (plain SQL), `fast_summary` (the fast model reading stored summaries and notes) or `precise_raw` (the precise model re-reading the full text of the cited entries and notes).
 
-To check an answer, add `--sources`: it lists the entries (date, mood, tags, summary) and notes the model was given. In `journal chat`, type `sources` after an answer. The `Sources:` line links each day and note to its file, so in a terminal that supports links (Windows Terminal, iTerm2 and most Linux terminals) clicking one opens it in Obsidian.
+To check an answer, add `--sources`: it lists the entries (date, mood, tags, summary) and notes the model was given, and for each cited day the sentence of it with the most of the question's words, so you can read what you wrote next to what the answer says. In `journal chat`, type `sources` after an answer. The browser shows the same sentences under an answer's Sources, and `ask --json` gives each as `sources.dates[].quote` (null when no sentence has the question's words). Words that most sentences have count for little, so the sentence that names John or the garden wins over one that only says "today". No model picks them, and the part of a day that matched the search counts for a little more. The `Sources:` line links each day and note to its file, so in a terminal that supports links (Windows Terminal, iTerm2 and most Linux terminals) clicking one opens it in Obsidian.
 
 ### Browsing commands
 
@@ -160,13 +171,16 @@ journal streaks                          # days written, words, longest run
 journal on-this-day                      # what you wrote on this date in earlier years
 journal similar 2024-01-15               # closest entries by stored embedding
 journal export --format markdown --out ~/journal-export.md
+journal export --format csv --out ~/journal.csv   # one row per day, for a spreadsheet
 ```
 
 `search`, `tags`, `entities`, `mood`, `metric`, `insights` and `export` take `--since` and `--until` as ISO dates. `search`, `mood`, `metric` and `export`, as well as `ask` and `chat`, also take `--about NOTE` (only entries that link that note, by title or alias), `--tag TAG` and `--group PROPERTY=VALUE` (only entries that link a note with that property value). On `ask` and `chat`, `--since` and `--until` replace whatever dates the question's wording suggests, which helps when the small routing model reads a date wrong; with `chat` the filters apply to every question in the conversation. `journal export` writes JSON by default, includes the full entry text with `--include-raw`, and won't write to an `--out` path inside the vault.
 
+`--format csv` is for spreadsheets: one row per entry with its date, mood, word count, tags and linked notes, a column for each number you keep in frontmatter (see [Metrics](#metrics)), then the summaries and the file. Tags and notes are separated by `; `. A text cell that starts with `=`, `+`, `-` or `@` gets a `'` in front, since a spreadsheet would otherwise run it as a formula (an entry that starts with `- [x]` shows up as `#NAME?` in Excel). Written to a file with `--out`, it starts with a byte-order mark so Excel reads it as UTF-8; printed to the terminal it doesn't.
+
 ### JSON for scripts
 
-`ask`, `search`, `show`, `note`, `stats`, `tags`, `entities`, `mood`, `metric`, `streaks`, `on-this-day`, `similar`, `lapsed`, `unlinked`, `links`, `compare` and `digest` take `--json` and print one JSON object instead of tables, for a launcher, an editor plugin or `jq`. Entries, notes and digests have the same shape as in the `journal browse` API. Errors come out as `{"error": "..."}` with exit code 1, and anything that isn't the result (like the progress of `digest --refresh`) goes to stderr. `ask --json` waits for the whole answer instead of streaming it.
+`ask`, `search`, `show`, `note`, `stats`, `tags`, `entities`, `mood`, `metric`, `streaks`, `on-this-day`, `similar`, `lapsed`, `unlinked`, `links`, `compare`, `review` and `digest` take `--json` and print one JSON object instead of tables, for a launcher, an editor plugin or `jq`. Entries, notes and digests have the same shape as in the `journal browse` API. Errors come out as `{"error": "..."}` with exit code 1, and anything that isn't the result (like the progress of `digest --refresh`) goes to stderr. `ask --json` waits for the whole answer instead of streaming it.
 
 ```sh
 journal mood --about "John Doe" --json | jq '.months[] | select(.avg_mood < 5)'
@@ -184,9 +198,18 @@ journal mood --about "John Doe" --json | jq '.months[] | select(.avg_mood < 5)'
 }
 ```
 
-The tools are `search`, `ask`, `day`, `note`, `notes`, `mood`, `digest`, `on_this_day` and `broken_links`. They return the same JSON as the `--json` commands. `search` falls back to keywords when Ollama isn't running, and `ask` needs Ollama like `journal ask` does. Every call opens the cache read-only, so it can run next to `journal watch`, and nothing is ever written. It needs no extra packages.
+The tools are `search`, `ask`, `day`, `note`, `notes`, `mood`, `digest`, `on_this_day`, `broken_links`, `compare`, `review`, `metric`, `similar`, `tags`, `lapsed`, `unlinked` and `profile`. They return the same JSON as the `--json` commands, and `ask`, `mood` and `metric` take the same `about`, `tag` and `group` filters. `search` falls back to keywords when Ollama isn't running, and `ask` needs Ollama like `journal ask` does. Every call opens the cache read-only, so it can run next to `journal watch`, and nothing is ever written. It needs no extra packages.
 
 Whatever app you connect gets your journal's text, summaries and notes. If that app sends them to a hosted model, they leave your machine, which nothing else in this tool does. Connect it only to clients you'd trust with the journal itself.
+
+`[mcp]` in `config.toml` narrows what a client can see:
+
+- `raw_text = false` leaves out the text of entries and notes, and the sentences `unlinked` quotes, so a client gets summaries, digests, tags and numbers. Answers from `ask` are still written from the full text by your local model and can repeat parts of it; leave `ask` out of `tools` if that matters.
+- `exclude_tags = ["therapy"]` takes every entry with one of those tags out of every tool: tagged inline, in the file's frontmatter, or by the model, even if `[tags] ignore` drops the tag. A note with one in its file goes too. So does what was written from them: the digests of any period they fall in, the relationship digests of the notes they link and of notes that link their days, the facts about you they gave, and your profile if those facts went into it. Links to a day that has nothing left on it are dropped as well, so they don't show up as broken links that give the date away.
+- `exclude_kinds = ["health"]` does the same for notes of those kinds, along with the links to them and the digests that read them. The entries that link such a note stay. Their summaries were written with the note as background, so they can repeat what it says; tag those entries too if they should go.
+- `tools = ["search", "day", "mood"]` offers only those tools.
+
+With `exclude_tags` or `exclude_kinds` set, the server keeps a copy of the cache in memory with all of that taken out, and makes it again whenever the cache file changes, so it keeps up with `journal watch`. The cache itself isn't touched. When it starts, it says on stderr what it's leaving out, which most clients show in their logs.
 
 ### Browsing in a web page
 
@@ -195,9 +218,11 @@ journal browse              # opens http://127.0.0.1:8765 in your browser
 journal browse --port 9000 --no-open
 ```
 
-`journal browse` shows everything in the cache as a local web page, so you can see exactly what the app knows. Each entry page puts your stored text next to what the models took from it: mood, summary, tags, the notes and days it links to (and the part of each that a `#heading` link points at, which opens with that part marked), links that don't resolve to a note yet, which model read it and when, whether it has a vector, the entries closest to it in meaning, and the digests that cover it. There are also pages for notes (aliases, properties, backlinks, mentions by year), tags (with average mood against your usual), digests, a mood calendar, and every tracked file with its index status and errors. Type `/` to jump to a date, note or tag, and `j`/`k` to step through entries.
+`journal browse` shows everything in the cache as a local web page, so you can see exactly what the app knows. Each entry page puts your stored text next to what the models took from it: mood, summary, tags, the notes and days it links to (and the part of each that a `#heading` link points at, which opens with that part marked), links that don't resolve to a note yet, which model read it and when, whether it has a vector, the entries closest to it in meaning, and the digests that cover it. There are also pages for notes (aliases, properties, backlinks, mentions by year), tags (with average mood against your usual), the numbers you keep in frontmatter (see [Metrics](#metrics)), digests, a calendar coloured by mood, words or one of those numbers, and every tracked file with its index status and errors. Type `/` to jump to a date, note or tag, and `j`/`k` to step through entries.
 
 The Ask page answers questions the same way `journal ask` does. You see each step while it works and the answer as it's written, then its sources linked to their entry and note pages, and a list of everything the model read. Follow-ups build on earlier answers like `journal chat`, and the conversation stays put while you open the pages it cites. Asking needs Ollama; Cancel stops waiting for an answer. From the jump box, type a question and pick "Ask".
+
+Note, tag and digest pages, and the Entries page once it's filtered, have an Ask box of their own. A question asked there only reads the entries that page shows: the ones that link the note, have the tag, fall in the digest's dates, or pass the filters (all but the words filter). It works like `--about`, `--tag`, `--group`, `--since` and `--until` on `journal ask`. The Ask page shows what it's kept to above the question box, and follow-ups stay kept to it until you take it off with ×.
 
 It opens the cache read-only and never touches your notes, so it's safe to leave open while `journal watch` runs. Reload a page to see new changes. It only listens on 127.0.0.1 and turns away requests that use any other host name. Keyword search works offline; matching by meaning needs Ollama and falls back to keywords when it isn't running. Nothing loads from the internet. Ctrl-C stops it.
 
@@ -209,9 +234,41 @@ It opens the cache read-only and never touches your notes, so it's safe to leave
 
 `journal review 2025` puts a year on one page in Markdown: the year digest, writing numbers, mood by month, your best and hardest days by mood, the notes you linked most and the ones that first appear that year, your top tags against the year before, and tags that fell away. Days and notes are `[[links]]`, so it reads well pasted into Obsidian. It makes no model calls; if the year digest isn't written yet it says how to write it. Leave out the year for the latest one you wrote in, and add `--out FILE` to save it (outside the vault).
 
+A month or a week works the same way. `journal review 2025-03` has the month digest, mood by week (each week cut to the days inside the month), your three best and hardest days, and the tags and notes against February. `journal review 2025-W10` lists each day of the week with its mood and summary instead of picking best and hardest. `--json` prints the same review as JSON.
+
+The browser has the same review as a page, `#/review/2025-03` and so on, linked from each digest's page and from the calendar, with each month of a year linking to its own review. `journal compare` has a page too: the Compare link on a digest or review page sets the period beside the one before, and the form at the top takes any two.
+
 `journal compare 2024 2025` puts two periods side by side: entries, days written, words, average mood, the longest streak and the average of each number you keep in frontmatter, then the tags you wrote more and less of, the notes you linked more and less, and the notes that are new or no longer linked. Periods are years, months (`2025-03`) or ISO weeks (`2025-W10`), and with one period it compares it with the one just before, so `journal compare 2025-03` is February against March. Tags and notes are compared by the share of each period's entries they're on, since a busy month would otherwise seem to have more of everything, and one needs at least 2 entries in a period to count as rising, falling, new or gone. It makes no model calls, and takes `--json`.
 
 `journal prompt` looks back over recent entries (14 days by default, or `--days N`) and suggests open-ended writing prompts that pick up loose threads, like a project you named, a person who keeps coming up, or a feeling you left unresolved. `--count N` sets how many. It only reads the cache and never touches your notes.
+
+## Themes
+
+Tags depend on what the model picked for each entry, and notes on what you linked, so a thread you never named, like a year of job hunting or a run of bad sleep, may show up in neither. `journal themes --refresh` finds those threads from what the entries are about: it groups their stored vectors with k-means, seeded so the same entries always give the same themes, then has the fast model name each group from the 8 entries nearest its middle (and the tags and notes they share most). Grouping needs no model and takes a second or two for a few thousand entries; naming is one call per theme, kept in the memo, so a theme that comes out the same isn't named twice. If Ollama is down, the themes are kept without names and labelled by what their entries share until the next refresh.
+
+`journal themes` lists them, biggest first, with how many entries each has, when it ran and its average mood, and `journal themes 3` shows one: what it's about, its entries by year, its tags and notes and the entries closest to its middle. Both take `--json`. The browser's Themes page puts every theme on one time axis, each month shaded by the share of that month's entries in it, and each theme has a page with its entries month by month. A narrative question, or one about four weeks or more, also gets the themes with the most entries in its dates.
+
+An entry written after the last refresh goes with the nearest theme when the themes are read, without anything being written, so they keep up between refreshes. Once a fifth of the entries came that way (`[themes] stale_share`), the list says it's time to refresh. `[themes] count` sets how many to look for (0, the default, picks about the square root of a quarter of your entries, between 3 and 15), and a theme with fewer than `min_entries` entries (5) is folded into the others. Themes are numbered again at each refresh, so `journal themes 3` can be a different one afterwards.
+
+With `exclude_tags` or `exclude_kinds` set under `[mcp]`, a theme named from an entry that's left out keeps its entries but loses its name and description, which were written from that entry.
+
+## Question history
+
+Answers aren't kept anywhere unless you ask for that, since they're made of your journal. Set `[history] enabled = true` and every question you ask with `journal ask`, `journal chat` or the browser's Ask page is kept with its answer, so you can read it again:
+
+```sh
+journal history               # the questions you asked, newest first
+journal history 12            # question 12 and its answer again
+journal history --delete 12   # forget that one for good
+journal history --clear       # delete the whole history file (asks first; --yes doesn't)
+journal chat --resume         # pick your last chat back up where it stopped
+```
+
+They go in a file of their own, `journal-history.db` next to the cache (`[history] path` moves it, but never into the vault), so rebuilding the cache leaves them alone and deleting that file deletes all of them. It's made the first time a question is kept, with the same private permissions as the cache, and listing it never creates it. Only what you need to read an answer again goes in: the question, how a follow-up was read, what it was kept to (`--about`, dates and so on), the answer with its Sources line, and which days and notes it cited. Not the entries it read, and not the sentences quoted from them.
+
+Deleting really deletes: rows are overwritten rather than left in the file's free space, and the file keeps no `-wal` journal holding older copies. `keep` (500) is how many questions it holds before the oldest go, and `forget_after_days` (0, off) also drops the ones older than that. If you turn history off again, nothing new is kept, but the file stays until you run `journal history --clear`; `journal history` and `journal stats` remind you it's there. Questions asked through `journal mcp` are never kept, since the app on the other end keeps its own.
+
+With it on, the browser's Ask page lists your earlier questions, and each opens on a page of its own with its answer and sources. The browser doesn't delete them, since it only ever reads; use `journal history`.
 
 ## Longer summaries
 
@@ -260,6 +317,8 @@ Numbers in your entries' frontmatter are stored with each entry without any mode
 - a question that names one, like "how did I sleep in March?", gets its monthly averages when it's answered from statistics, and the entries an answer reads list their numbers
 - week and month digests see each day's numbers next to its mood
 - `journal show`, `journal export` and the entry pages in `journal browse` show them
+- the browser's Numbers page lists them, and each has a page of its own: its average by month above your mood by month on the same days (two charts lined up month by month, with a table under them), your mood on either side of its median, or with and without a yes/no one, as `journal insights` works it out, and the days with the highest and lowest values
+- the Calendar's Colour by picker shades each day by one of them, or by words written, in one blue from light (less) to dark (more), and a dashed square is a day you wrote without recording it
 
 Changing `[metrics]` takes effect on the next `journal index` with no model calls.
 
@@ -289,6 +348,8 @@ Entities come only from links. `journal entities`, the name filter in answers an
 Properties group notes. A note with `Relationship: [Friend, School]` is in the Friend group and the School group of `relationship`, and a plain `Relationship: Friend` puts it in one. `journal entities --by relationship` lists each value with how many notes have it, how many entries link one of them, and their average mood. `--group relationship=family` on `ask`, `chat`, `search`, `mood`, `metric` and `export` keeps only the entries that link a note in that group, so `journal mood --group relationship=family` is your mood on the days you wrote about family. `journal insights` reports groups of two or more notes whose days run above or below your usual mood, using the properties in `[notes] group_keys`, or all of them when that's empty. In the browser, a note's property values link to those entries, and the Notes page lists the groups. Property names and values ignore case. Notes indexed before groups existed get their values from their files on the next `journal index`, without a model call.
 
 `journal note "John Doe"` also lists the notes most often linked from the same entries as John, with how many entries they share, and so does his page in the browser under Often linked with. `journal entities --with "John Doe"` gives the whole list, and takes `--since`, `--until` and `--type` like the rest of `entities`.
+
+The browser draws the same thing for all your notes at once on the Note map (linked from the Notes page): the notes you link most as dots, sized by how many entries link them and coloured by kind, joined by a line when two or more entries link both. Pointing at a note, or tabbing to it, picks out the ones it turns up with. You can keep it to one kind or one year, show 25 to 150 notes, and read the pairs as a table underneath. Only the three most common kinds get a colour of their own, since more can't be told apart in every pair, and the rest share a gray.
 
 `journal lapsed` lists the notes you linked from at least 5 entries (`--min`) but not in the 6 months (`--quiet`) before your latest entry, with the year you linked each one most and how long it's been. The browser's Notes page shows the same list under Gone quiet. The months are counted back from your latest entry rather than today, so a few weeks off from writing doesn't make everyone look absent.
 

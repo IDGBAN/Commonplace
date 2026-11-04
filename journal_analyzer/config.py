@@ -137,6 +137,9 @@ class RollupsConfig(BaseModel):
     linked_notes_chars: int = Field(default=6000, ge=0)
     # room for long entries' longer summaries in each digest; the rest get one line
     entry_details_chars: int = Field(default=8000, ge=0)
+    # `journal watch` writes the week and month digests of what it indexed, at
+    # most this often; 0 leaves them to `journal rollup`
+    watch_refresh_minutes: float = Field(default=0, ge=0)
 
 
 class InsightsConfig(BaseModel):
@@ -191,6 +194,15 @@ class MetricsConfig(BaseModel):
         return [k.strip().casefold() for k in v if k.strip()]
 
 
+class ThemesConfig(BaseModel):
+    # how many themes `journal themes --refresh` looks for; 0 picks from how much you've written
+    count: int = Field(default=0, ge=0, le=40)
+    # a theme with fewer entries than this is folded into the others
+    min_entries: int = Field(default=5, ge=2)
+    # entries written since the last refresh, as a share of all, before themes say they're out of date
+    stale_share: float = Field(default=0.2, ge=0, le=1)
+
+
 class ProfileConfig(BaseModel):
     enabled: bool = True
     # a note about yourself, from the vault root; it overrides what's inferred
@@ -231,6 +243,50 @@ class NotesConfig(BaseModel):
         return [name for name in (" ".join(n.casefold().split()) for n in v) if name]
 
 
+class HistoryConfig(BaseModel):
+    # keep your questions and their answers; off unless you turn it on
+    enabled: bool = False
+    # empty means next to the cache, e.g. journal-history.db
+    path: Path | None = None
+    # the newest questions kept; older ones are deleted
+    keep: int = Field(default=500, ge=1)
+    # questions older than this many days are deleted; 0 leaves it to `keep`
+    forget_after_days: int = Field(default=0, ge=0)
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _path(cls, v: object) -> Path | None:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return _expand(Path(str(v)))
+
+
+class McpConfig(BaseModel):
+    # entry and note text; false leaves summaries, digests and numbers
+    raw_text: bool = True
+    # entries tagged with any of these, and notes tagged in their file, are left out
+    exclude_tags: list[str] = Field(default_factory=list)
+    # notes of these kinds (their folder, like people) are left out
+    exclude_kinds: list[str] = Field(default_factory=list)
+    # only these tools; empty means all of them
+    tools: list[str] = Field(default_factory=list)
+
+    @field_validator("exclude_tags")
+    @classmethod
+    def _tags(cls, v: list[str]) -> list[str]:
+        return [name for name in (_tag_name(t) for t in v) if name]
+
+    @field_validator("exclude_kinds")
+    @classmethod
+    def _kinds(cls, v: list[str]) -> list[str]:
+        return [k.strip().casefold() for k in v if k.strip()]
+
+    @field_validator("tools")
+    @classmethod
+    def _tools(cls, v: list[str]) -> list[str]:
+        return [t.strip() for t in v if t.strip()]
+
+
 class Config(BaseModel):
     vault: VaultConfig
     ollama: OllamaConfig = OllamaConfig()
@@ -243,6 +299,16 @@ class Config(BaseModel):
     tags: TagsConfig = TagsConfig()
     metrics: MetricsConfig = MetricsConfig()
     profile: ProfileConfig = ProfileConfig()
+    mcp: McpConfig = McpConfig()
+    history: HistoryConfig = HistoryConfig()
+    themes: ThemesConfig = ThemesConfig()
+
+    @model_validator(mode="after")
+    def _history_outside_vault(self) -> Config:
+        # nothing is ever written to the vault
+        if self.history.path and self.history.path.is_relative_to(self.vault.path):
+            raise ValueError("[history] path has to be outside the vault")
+        return self
 
 
 def load_config(path: Path | str | None = None) -> Config:

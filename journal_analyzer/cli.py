@@ -29,6 +29,7 @@ from . import (
     embedder,
     export,
     fields,
+    history,
     ingester,
     insights,
     links,
@@ -43,6 +44,7 @@ from . import (
     rollups,
     serialize,
     store,
+    themes,
     unlinked,
 )
 from .config import Config, load_config
@@ -64,6 +66,7 @@ LINKED_WITH_SHOWN = 8
 class ExportFormat(StrEnum):
     json = "json"
     markdown = "markdown"
+    csv = "csv"
 
 
 ConfigOpt = Annotated[
@@ -338,6 +341,13 @@ def init(config: ConfigOpt = None) -> None:
 
 @app.command()
 def index(
+    paths: Annotated[
+        list[Path] | None,
+        typer.Argument(
+            help="Only these files or folders, from the vault root or the current folder.",
+            show_default=False,
+        ),
+    ] = None,
     config: ConfigOpt = None,
     vault: Annotated[
         Path | None, typer.Option(help="Override the vault path from config.")
@@ -359,17 +369,23 @@ def index(
         with _guard():
             cfg = _with_vault(load_config(config), vault)
             if not db.cache_has_data(cfg):
+                targets = ingester.resolve_targets(cfg, None, paths) if paths else None
                 _print_plan(
-                    ingester.plan_backfill(cfg, None, force=force), cfg.vault.path, cache=False
+                    ingester.plan_backfill(cfg, None, force=force, targets=targets),
+                    cfg.vault.path, cache=False,
                 )
                 return
             with closing(db.connect_readonly(cfg)) as conn:
+                targets = ingester.resolve_targets(cfg, conn, paths) if paths else None
                 _print_plan(
-                    ingester.plan_backfill(cfg, conn, force=force), cfg.vault.path, cache=True
+                    ingester.plan_backfill(cfg, conn, force=force, targets=targets),
+                    cfg.vault.path, cache=True,
                 )
         return
     with _guard(), _open(config) as (cfg, conn):
-        ingester.run_backfill(_memo(_with_vault(cfg, vault), no_memo), conn, force=force)
+        cfg = _memo(_with_vault(cfg, vault), no_memo)
+        targets = ingester.resolve_targets(cfg, conn, paths) if paths else None
+        ingester.run_backfill(cfg, conn, force=force, targets=targets)
 
 
 def _with_vault(cfg: Config, vault: Path | None) -> Config:
@@ -390,8 +406,9 @@ def _print_plan(plan: ingester.BackfillPlan, vault: Path, cache: bool) -> None:
         console.print("[dim]There's no cache yet, so every file counts as new.[/dim]")
     notes = sum(1 for f in plan.files if f.kind is not None)
     console.print(
-        f"Files found     : {len(plan.files)} ({len(plan.files) - notes} journal, "
-        f"{notes} notes), {plan.ignored} ignored"
+        f"Files {'named' if plan.targeted else 'found'}     : {len(plan.files)} "
+        f"({len(plan.files) - notes} journal, {notes} notes)"
+        + ("" if plan.targeted else f", {plan.ignored} ignored")
     )
     by_status = {s: sum(1 for f in plan.files if f.status == s) for s in (
         "new", "changed", "retry", "switching", "forced", "unchanged")}
@@ -512,6 +529,13 @@ def _print_reading(conn: sqlite3.Connection, answer: Answer) -> None:
         )
     elif not entries and not notes:
         console.print("Nothing matched, so the model read nothing.")
+    if answer.quotes:
+        table = Table(title="What those days say, by the question's words", show_header=False)
+        table.add_column("Date", style="cyan", no_wrap=True)
+        table.add_column("Quote")
+        for day, quote in sorted(answer.quotes.items()):
+            table.add_row(day, escape(f"“{quote}”"))
+        console.print(table)
     if entries:
         console.print(_entry_table(conn, entries, title="Entries it read", longer=True))
     if notes:
@@ -548,8 +572,12 @@ def ask(
                 question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status),
                 since=date_from, until=date_to, only=only, on_text=stream,
             )
+        kept = history.record(
+            cfg, question, result, "ask", history.new_conversation(),
+            scope=history.scope_text(conn, only, date_from, date_to),
+        )
         if as_json:
-            _emit({"question": question, **serialize.answer_json(conn, result)})
+            _emit({"question": question, **serialize.answer_json(conn, result), "history_id": kept})
             return
         assert stream is not None
         _print_answer(conn, result, "answered by stage", streamed=stream.started)
@@ -604,7 +632,7 @@ def rollup(
     ] = None,
     only: Annotated[
         str | None,
-        typer.Option("--only", help="Comma list of profile, month, year, note, week. Default all."),
+        typer.Option("--only", help="Comma list of profile, month, year, note, week, range. Default all."),
     ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="List what would be written, without Ollama.")
@@ -627,20 +655,23 @@ def rollup(
     console.print(
         f"Generated {counts['week']} week, {counts['month']} month, "
         f"{counts['year']} year and {counts['note']} relationship rollups."
+        + (f" Rewrote {_count(counts['range'], 'span digest')}." if counts["range"] else "")
         + (" Your profile was rewritten." if counts["profile"] else "")
     )
 
 
-def _parse_period(value: str) -> tuple[str, str, date, date]:
+def _parse_period(value: str, ranges: bool = False) -> tuple[str, str, date, date]:
+    """With `ranges`, a span of days like 2024-03-02..2024-03-11 too."""
     try:
-        return store.parse_period(value)
-    except ValueError:
-        pass
-    console.print(
-        f"[red]'{escape(value)}' isn't a period. Use a year (2024), a month (2024-03) "
-        "or an ISO week (2024-W10).[/red]"
+        return store.parse_period(value, ranges=ranges)
+    except ValueError as exc:
+        if ranges and ".." in value:
+            _fail(f"{str(exc)[0].upper()}{str(exc)[1:]}.")
+    _fail(
+        f"'{value}' isn't a period. Use a year (2024), a month (2024-03)"
+        + (", an ISO week (2024-W10) or a span of days (2024-03-02..2024-03-11)." if ranges
+           else " or an ISO week (2024-W10).")
     )
-    raise typer.Exit(1)
 
 
 def _when(stamp: str | None) -> str:
@@ -652,21 +683,12 @@ def _when(stamp: str | None) -> str:
         return stamp
 
 
-def _period_title(kind: str, key: str, start: date) -> str:
-    if kind == "month":
-        return start.strftime("%B %Y")
-    if kind == "week":
-        year, week = key.split("-W")
-        return f"Week {int(week)} of {year}"
-    return key
-
-
 @app.command(name="digest")
 def digest_cmd(
     period: Annotated[
         str,
         typer.Argument(
-            help="A year (2024), month (2024-03) or ISO week (2024-W10).",
+            help="A year (2024), month (2024-03), ISO week (2024-W10) or span of days (2024-03-02..2024-03-11).",
             autocompletion=completion.periods,
         ),
     ],
@@ -678,16 +700,24 @@ def digest_cmd(
     as_json: JsonOpt = False,
     no_memo: NoMemoOpt = False,
 ) -> None:
-    """Show the digest for one week, month or year."""
+    """Show the digest for one week, month, year or span of days."""
     OUT.as_json = as_json
-    kind, key, start, end = _parse_period(period)
-    title = _period_title(kind, key, start)
+    kind, key, start, end = _parse_period(period, ranges=True)
+    title = store.period_title(kind, key)
     with _guard(), _open(config) as (cfg, conn):
         members = store.entries_in_range(conn, start, end)
         row = store.get_rollup(conn, kind, key)
         if not members and row is None:
             _fail(f"No entries in {title} ({start} to {end}).", red=False)
-        if refresh:
+        if refresh and kind == "range":
+            with redirect_stdout(sys.stderr) if as_json else nullcontext():
+                if row is not None and not row["stale"]:
+                    console.print("[dim]Already up to date.[/dim]")
+                else:
+                    console.print("[dim]Writing 1 digest...[/dim]")
+                    rollups.write_range(cfg, conn, OllamaClient(_memo(cfg, no_memo)), key)
+            row = store.get_rollup(conn, kind, key)
+        elif refresh:
             kinds = ("month", "year") if kind == "year" else (kind,)
             plan = rollups.plan_rollups(cfg, conn, kinds, True, start, end)
             # progress goes to stderr when stdout is the JSON
@@ -736,11 +766,16 @@ def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     with _guard(), _open(config) as (cfg, conn):
         s = store.stats(conn)
         kept = memo.stats(cfg)
+        asked = history.stats(cfg)
         if as_json:
             _emit({
                 **asdict(s),
                 "memo": None if kept is None else {
                     "path": str(memo.memo_path(cfg)), "results": kept[0], "bytes": kept[1],
+                },
+                "history": None if asked is None else {
+                    "path": str(history.history_path(cfg)), "questions": asked[0], "bytes": asked[1],
+                    "enabled": cfg.history.enabled,
                 },
                 "db_path": str(cfg.db.path),
                 "db_bytes": cfg.db.path.stat().st_size if cfg.db.path.exists() else 0,
@@ -771,6 +806,12 @@ def stats(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             )
         elif not cfg.db.memo:
             console.print("Model memo      : off")
+        if asked is not None:
+            console.print(
+                f"Question history: {_count(asked[0], 'question')}, {asked[1] / BYTES_PER_MB:.2f} MB "
+                f"({escape(str(history.history_path(cfg)))})"
+                + ("" if cfg.history.enabled else ", and history is off: 'journal history --clear' deletes it")
+            )
         for row in store.errored_files(conn):
             console.print(
                 f"  [red]error[/red] {escape(row['path'])}: "
@@ -1480,10 +1521,6 @@ def metric(
     console.print(table)
 
 
-def _months_between(start: date, end: date) -> int:
-    return (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day)
-
-
 @app.command()
 def lapsed(
     config: ConfigOpt = None,
@@ -1519,7 +1556,7 @@ def lapsed(
         _emit({
             "anchor": anchor, "min": min_links, "quiet_months": quiet,
             "notes": [
-                {**asdict(r), "months_quiet": _months_between(date.fromisoformat(r.last), anchor)}
+                {**asdict(r), "months_quiet": store.months_between(date.fromisoformat(r.last), anchor)}
                 for r in rows[:limit]
             ],
         })
@@ -1540,7 +1577,7 @@ def lapsed(
     table.add_column("Last linked", no_wrap=True)
     table.add_column("Quiet for", justify="right", no_wrap=True)
     for r in rows[:limit]:
-        months = _months_between(date.fromisoformat(r.last), anchor)
+        months = store.months_between(date.fromisoformat(r.last), anchor)
         table.add_row(
             escape(r.title), escape(r.kind), str(r.count),
             f"{r.busiest_year} ({r.busiest_count})", r.last, _count(months, "month"),
@@ -1605,20 +1642,12 @@ def profile_cmd(
                     rewritten = profile.update(cfg, conn, client, rebuild=rebuild or rescan)
                 if not rewritten:
                     console.print("[dim]Nothing new to add.[/dim]")
+        if as_json:
+            _emit(profile.to_json(conn, cfg, limit))
+            return
         found_profile = profile.current(conn)
         counts = profile.summary_counts(conn)
-        fact_rows = profile.facts_json(conn, limit) if facts or as_json else []
-    if as_json:
-        _emit({
-            "profile": None if found_profile is None else {
-                "text": found_profile.text, "names": found_profile.names,
-                "updated_at": found_profile.updated_at,
-            },
-            "note": cfg.profile.note or None,
-            **counts,
-            "recent_facts": fact_rows,
-        })
-        return
+        fact_rows = profile.facts_json(conn, limit) if facts else []
     if facts:
         if not fact_rows:
             console.print("No facts yet. 'journal profile --update' reads your entries for them.")
@@ -1718,31 +1747,18 @@ def similar(
     OUT.as_json = as_json
     d = _parse_date(day, "DATE")
     with _guard(), _open(config) as (_, conn):
-        day_rows = store.entries_in_range(conn, d, d)
-        if not day_rows:
+        rows = store.similar_to_day(conn, d, limit)
+        if rows is None:
             _fail(f"No indexed entry on {d}.", red=False)
-        day_ids = {r["id"] for r in day_rows}
-        seen: dict[int, None] = {}
-        for r in day_rows:
-            for eid in store.similar_entry_ids(conn, r["id"], limit + len(day_rows)):
-                if eid not in day_ids:
-                    seen.setdefault(eid, None)
-        ids = list(seen)[:limit]
         if as_json:
-            found = store.entries_by_ids(conn, ids)
-            order = {eid: i for i, eid in enumerate(ids)}
-            found.sort(key=lambda r: order[r["id"]])
-            _emit({"date": d, "entries": serialize.entry_briefs(conn, found)})
+            _emit({"date": d, "entries": serialize.entry_briefs(conn, rows)})
             return
-        if not ids:
+        if not rows:
             console.print(
                 "No similar entries found. If the entry is new, run 'journal index' "
                 "so it gets embedded."
             )
             return
-        rows = store.entries_by_ids(conn, ids)
-        order = {eid: i for i, eid in enumerate(ids)}
-        rows.sort(key=lambda r: order[r["id"]])
         console.print(f"[bold]Entries similar to {d}:[/bold]")
         console.print(_entry_table(conn, rows))
 
@@ -1797,7 +1813,7 @@ def export_cmd(
         bool, typer.Option("--include-raw", help="Include full entry text.")
     ] = False,
 ) -> None:
-    """Export entries as JSON or Markdown."""
+    """Export entries as JSON, Markdown or CSV."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag, group)
@@ -1807,17 +1823,20 @@ def export_cmd(
     if not entries:
         console.print("No entries in the requested range.")
         raise typer.Exit(1)
-    text = (
-        export.to_json(entries)
-        if fmt is ExportFormat.json
-        else export.to_markdown(entries)
-    )
-    written = _write_out(cfg, out, text)
+    if fmt is ExportFormat.csv:
+        # print ends the last row itself
+        text = export.to_csv(entries) if out is not None else export.to_csv(entries).removesuffix("\n")
+        # Excel reads a CSV file without one in the ANSI code page
+        bom = out is not None
+    else:
+        text = export.to_json(entries) if fmt is ExportFormat.json else export.to_markdown(entries)
+        bom = False
+    written = _write_out(cfg, out, text, bom=bom)
     if written is not None:
         console.print(f"Wrote {len(entries)} entries to {escape(str(written))}")
 
 
-def _write_out(cfg: Config, out: Path | None, text: str) -> Path | None:
+def _write_out(cfg: Config, out: Path | None, text: str, bom: bool = False) -> Path | None:
     """Print to stdout, or write to a file outside the vault."""
     if out is None:
         # plain print so rich doesn't read markup or rewrap the text
@@ -1831,7 +1850,7 @@ def _write_out(cfg: Config, out: Path | None, text: str) -> Path | None:
         raise typer.Exit(1)
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        out.write_text(text, encoding="utf-8-sig" if bom else "utf-8")
     except OSError as exc:
         console.print(f"[red]Could not write {escape(str(out))}: {escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
@@ -1931,30 +1950,253 @@ def _print_comparison(cfg: Config, result: compare.Comparison) -> None:
 
 @app.command(name="review")
 def review_cmd(
-    year: Annotated[
-        int | None, typer.Argument(help="The year, e.g. 2025. Default: the latest year you wrote in.")
+    period: Annotated[
+        str | None,
+        typer.Argument(
+            help="A year (2025), month (2025-03) or ISO week (2025-W10). Default: the latest year you wrote in.",
+            autocompletion=completion.periods,
+            show_default=False,
+        ),
     ] = None,
     config: ConfigOpt = None,
     out: Annotated[
         Path | None,
         typer.Option("--out", help="Write the Markdown to this file instead of stdout."),
     ] = None,
+    as_json: JsonOpt = False,
 ) -> None:
-    """A year in review as Markdown: mood, best and hardest days, people, tags."""
+    """A year, month or week in review as Markdown: mood, best and hardest days, people, tags."""
+    OUT.as_json = as_json
+    if as_json and out is not None:
+        _fail("--out writes Markdown. Leave out --json, or send the JSON to a file with >.")
+    if period is not None:
+        _parse_period(period)
     with _guard(), _open(config) as (cfg, conn):
-        if year is None:
+        if period is None:
             _, last = store.date_bounds(conn, None, None)
             if last is None:
-                console.print("No entries indexed yet. Run 'journal index' first.")
-                raise typer.Exit(1)
-            year = int(last[:4])
-        built = review.build(cfg, conn, year)
-    if built is None:
-        console.print(f"No entries in {year}.")
-        raise typer.Exit(1)
+                _fail("No entries indexed yet. Run 'journal index' first.", red=False)
+            period = last[:4]
+        built = review.build(cfg, conn, period)
+        kind, key, _, _ = store.parse_period(period)
+        if built is None:
+            _fail(f"No entries in {store.period_title(kind, key)}.", red=False)
+        if as_json:
+            _emit(review.to_json(conn, built))
+            return
     written = _write_out(cfg, out, review.to_markdown(built))
     if written is not None:
-        console.print(f"Wrote the {year} review to {escape(str(written))}")
+        console.print(f"Wrote the {built.title} review to {escape(str(written))}")
+
+
+def _themes_note(found: themes.Status) -> str:
+    made = f"Worked out {_when(found.made_at)} from {_count(found.grouped, 'entry', 'entries')}"
+    if found.placed:
+        made += f"; {_count(found.placed, 'entry', 'entries')} written since go with the nearest theme"
+    return made + "."
+
+
+@app.command(name="themes")
+def themes_cmd(
+    theme_id: Annotated[
+        int | None, typer.Argument(help="Show this theme: what it's about, when, and its entries.", show_default=False)
+    ] = None,
+    config: ConfigOpt = None,
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Group the entries again and name the groups (one fast-model call each).")
+    ] = False,
+    count: Annotated[
+        int | None,
+        typer.Option("--count", min=2, max=40, help="How many themes to look for with --refresh. Default: [themes] count.", show_default=False),
+    ] = None,
+    as_json: JsonOpt = False,
+    no_memo: NoMemoOpt = False,
+) -> None:
+    """Threads that run through the journal, found from what the entries are about."""
+    OUT.as_json = as_json
+    if count is not None and not refresh:
+        _fail("--count only goes with --refresh.")
+    with _guard(), _open(config) as (cfg, conn):
+        if refresh:
+            try:
+                with redirect_stdout(sys.stderr) if as_json else nullcontext(), _working("Grouping your entries...") as status:
+                    done = themes.refresh(
+                        cfg, conn, OllamaClient(_memo(cfg, no_memo)), count, on_step=_show_stage(status),
+                    )
+            except themes.ThemesError as exc:
+                _fail(str(exc), red=False)
+            with redirect_stdout(sys.stderr) if as_json else nullcontext():
+                console.print(f"Found {_count(done.themes, 'theme')} in {_count(done.entries, 'entry', 'entries')}.")
+                if done.naming_error:
+                    console.print(
+                        f"[yellow]Named {done.named} of them before the model stopped answering "
+                        f"({escape(done.naming_error)}). 'journal themes --refresh' names the rest "
+                        "once Ollama is back; the ones named already come from the memo.[/yellow]"
+                    )
+        found = themes.status(conn, cfg)
+        if theme_id is not None:
+            shown = themes.detail(conn, theme_id)
+            if shown is None:
+                _fail(f"There's no theme {theme_id}. 'journal themes' lists them.", red=False)
+            if as_json:
+                _emit({
+                    **themes.theme_json(shown.theme),
+                    "central": serialize.entry_briefs(conn, shown.central),
+                    "newest": serialize.entry_briefs(conn, shown.newest),
+                    "tags": [{"name": n, "entries": c} for n, c in shown.tags],
+                    "notes": [{"id": i, "title": t, "kind": k, "entries": c} for i, t, k, c in shown.notes],
+                    "status": themes.status_json(found),
+                })
+                return
+            t = shown.theme
+            console.print(f"[bold cyan]{escape(t.label)}[/bold cyan]")
+            if t.about:
+                console.print(escape(t.about))
+            console.print(
+                f"[dim]{_count(t.entries, 'entry', 'entries')}, {t.first} .. {t.last}, "
+                f"average mood {_mood_str(t.mood)}[/dim]"
+            )
+            years: dict[str, int] = {}
+            for month, n in t.months.items():
+                years[month[:4]] = years.get(month[:4], 0) + n
+            top = max(years.values(), default=1)
+            for year, n in years.items():
+                console.print(f"  {year}  [cyan]{'█' * max(1, round(n / top * MOOD_BAR_WIDTH))}[/cyan] {n}")
+            if shown.tags:
+                console.print(f"\n[bold]Tags[/bold]  {escape(', '.join(f'{n} ({c})' for n, c in shown.tags))}")
+            if shown.notes:
+                console.print(f"[bold]Notes[/bold] {escape(', '.join(f'{t} ({c})' for _, t, _, c in shown.notes))}")
+            console.print()
+            console.print(_entry_table(conn, shown.central, title="Closest to its middle"))
+            return
+        listed = themes.overview(conn)
+        if as_json:
+            _emit({"status": themes.status_json(found), "themes": [themes.theme_json(t) for t in listed]})
+            return
+        if not listed:
+            console.print(
+                "No themes yet. 'journal themes --refresh' groups your entries by what they're about "
+                "(no model needed for that) and names each group with one call to the fast model."
+            )
+            return
+        table = Table(title="Themes, biggest first")
+        table.add_column("#", justify="right", style="cyan")
+        table.add_column("Theme")
+        table.add_column("Entries", justify="right")
+        table.add_column("First .. last", no_wrap=True)
+        table.add_column("Busiest month", no_wrap=True)
+        table.add_column("Mood", justify="right")
+        for t in listed:
+            busiest = max(t.months.items(), key=lambda kv: (kv[1], kv[0]), default=None)
+            table.add_row(
+                str(t.id), escape(t.label), str(t.entries), f"{t.first} .. {t.last}",
+                f"{busiest[0]} ({busiest[1]})" if busiest else "-", _mood_str(t.mood),
+            )
+        console.print(table)
+        console.print(f"[dim]{escape(_themes_note(found))} 'journal themes N' shows one.[/dim]")
+        if found.stale:
+            console.print("[yellow]That's a lot written since; 'journal themes --refresh' groups them again.[/yellow]")
+
+
+_HISTORY_OFF = (
+    "History is off, so no questions are kept. Set [history] enabled = true in "
+    "config.toml to keep them."
+)
+
+
+@app.command(name="history")
+def history_cmd(
+    kept_id: Annotated[
+        int | None, typer.Argument(help="Show this question and its answer again.", show_default=False)
+    ] = None,
+    config: ConfigOpt = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="How many questions to list.")] = 20,
+    delete: Annotated[
+        int | None, typer.Option("--delete", help="Forget this question and its answer for good.", show_default=False)
+    ] = None,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Delete the whole history file, and everything in it, for good.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Don't ask before --clear.")] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Your earlier questions and answers, kept with [history] enabled = true."""
+    OUT.as_json = as_json
+    with _guard():
+        cfg = load_config(config)
+        path = history.history_path(cfg)
+        if clear:
+            if not path.is_file():
+                if as_json:
+                    _emit({"cleared": 0, "path": str(path)})
+                else:
+                    console.print("There's no history file, so there's nothing to delete.")
+                return
+            if not yes:
+                if as_json:
+                    _fail("--clear with --json needs --yes, since there's no one to ask.")
+                if not typer.confirm(f"Delete {path} and every question in it, for good?"):
+                    raise typer.Exit(1)
+            try:
+                held = history.clear(cfg)
+            except OSError as exc:
+                _fail(f"Couldn't delete {path}: {exc}. Is 'journal browse' or 'journal chat' still running?")
+            if as_json:
+                _emit({"cleared": held, "path": str(path)})
+            else:
+                what = "" if held is None else f", and the {_count(held, 'question')} in it"
+                console.print(f"Deleted {path}{what}.")
+            return
+        if delete is not None:
+            if not history.delete(cfg, delete):
+                _fail(f"There's no question {delete} in your history.", red=False)
+            if as_json:
+                _emit({"deleted": delete})
+            else:
+                console.print(f"Forgot question {delete} and its answer.")
+            return
+        if kept_id is not None:
+            found = history.get(cfg, kept_id)
+            if found is None:
+                _fail(f"There's no question {kept_id} in your history.", red=False)
+            if as_json:
+                _emit(found.as_json())
+                return
+            console.print(f"[bold cyan]{escape(found.question)}[/bold cyan]")
+            details = [f"asked {_when(found.asked_at)} in journal {found.source}"]
+            if found.scope:
+                details.append(f"only {found.scope}")
+            console.print(f"[dim]{escape('; '.join(details))}[/dim]")
+            if found.standalone:
+                console.print(f"[dim]read as: {escape(found.standalone)}[/dim]")
+            console.print()
+            console.print(escape(found.answer))
+            console.print(f"[dim](answered by stage: {found.stage})[/dim]")
+            return
+        rows = history.recent(cfg, limit)
+        if as_json:
+            _emit({
+                "enabled": cfg.history.enabled, "path": str(path),
+                "questions": [r.as_json() for r in rows],
+            })
+            return
+        if not rows:
+            console.print(_HISTORY_OFF if not cfg.history.enabled else "No questions kept yet.")
+            return
+        table = Table(title="Questions you asked, newest first")
+        table.add_column("#", justify="right", style="cyan")
+        table.add_column("When", no_wrap=True)
+        table.add_column("Question")
+        table.add_column("From")
+        for r in rows:
+            table.add_row(str(r.id), _when(r.asked_at), escape(r.question), r.source)
+        console.print(table)
+        console.print("[dim]'journal history N' shows one again; --delete N forgets one, --clear all of them.[/dim]")
+        if not cfg.history.enabled:
+            console.print(
+                "[yellow]History is off, so nothing new is kept, but these still are. "
+                "'journal history --clear' deletes them.[/yellow]"
+            )
 
 
 @app.command(name="insights")
@@ -1984,12 +2226,23 @@ def chat(
     about: AboutOpt = None,
     tag: TagOpt = None,
     group: GroupOpt = None,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", help="Pick up your last chat from the history ([history] enabled = true)."),
+    ] = False,
 ) -> None:
     """Ask questions with follow-ups. The filters apply to every question."""
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag, group)
-        _chat_loop(cfg, conn, OllamaClient(cfg), date_from, date_to, only)
+        earlier: list[history.Kept] = []
+        if resume:
+            if not cfg.history.enabled:
+                _fail(_HISTORY_OFF, red=False)
+            earlier = history.last_conversation(cfg, "chat")
+            if not earlier:
+                console.print("[dim]There's no earlier chat in your history, so this starts fresh.[/dim]")
+        _chat_loop(cfg, conn, OllamaClient(cfg), date_from, date_to, only, earlier)
 
 
 def _chat_loop(
@@ -1999,12 +2252,21 @@ def _chat_loop(
     since: date | None = None,
     until: date | None = None,
     only: store.EntryFilter | None = None,
+    earlier: list[history.Kept] | None = None,
 ) -> None:
     console.print(
         "Follow-ups like 'what about the month after that?' work. Type 'sources' to "
         "see what the last answer read, and 'exit' or Ctrl-D to quit."
     )
-    history: list[tuple[str, str]] = []
+    turns: list[tuple[str, str]] = [(k.standalone or k.question, k.answer) for k in earlier or []]
+    del turns[: -query.CHAT_HISTORY_TURNS]
+    conversation = earlier[-1].conversation if earlier else history.new_conversation()
+    if earlier:
+        console.print(
+            f"[dim]Picking up from {_when(earlier[-1].asked_at)}, after "
+            f"\"{escape(earlier[-1].question)}\".[/dim]"
+        )
+    scope = history.scope_text(conn, only, since, until)
     last: Answer | None = None
     while True:
         try:
@@ -2025,10 +2287,10 @@ def _chat_loop(
             continue
         stream: _Streamed | None = None
         try:
-            with _working("Resolving your follow-up..." if history else "Thinking...") as status:
+            with _working("Resolving your follow-up..." if turns else "Thinking...") as status:
                 stream = _Streamed(status)
                 standalone = query.contextualize_question(
-                    question, history, cfg, client, profile.names(conn, cfg)
+                    question, turns, cfg, client, profile.names(conn, cfg)
                 )
                 result = query.answer(
                     standalone, cfg, conn, client, on_stage=_show_stage(status),
@@ -2047,9 +2309,10 @@ def _chat_loop(
             continue
         _print_answer(conn, result, "stage", streamed=stream.started)
         last = result
+        history.record(cfg, question, result, "chat", conversation, standalone, scope)
         # keep the rewritten question so the next follow-up can build on it
-        history.append((standalone, result.text))
-        del history[: -query.CHAT_HISTORY_TURNS]
+        turns.append((standalone, result.text))
+        del turns[: -query.CHAT_HISTORY_TURNS]
 
 
 @app.command()

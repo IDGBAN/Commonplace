@@ -541,7 +541,8 @@ def test_ask_streams_its_steps_then_the_answer(browser, journal, fake_client):
     assert answer["body"] == "You hiked Bear Mountain with John on 2024-01-15."
     assert answer["stage"] == "fast_summary"
     first = entry_id(journal, "2024-01-15")
-    assert {"date": "2024-01-15", "id": first, "section": None} in answer["sources"]["dates"]
+    assert {"date": "2024-01-15", "id": first, "section": None,
+            "quote": "Hiked Bear Mountain with John Doe."} in answer["sources"]["dates"]
     assert {e["id"] for e in answer["entries"]} == {first, entry_id(journal, "2024-01-16")}
     assert "Sources:" in answer["text"]
 
@@ -652,3 +653,56 @@ def test_entry_pages_carry_the_longer_summary(browser, journal):
     assert browser.get(f"/api/entries/{first}")["details"] is None
     store.save_entry_details(journal, first, "A longer account of the hike.")
     assert browser.get(f"/api/entries/{first}")["details"] == "A longer account of the hike."
+
+
+def test_ask_can_be_kept_to_a_note_tag_group_or_dates(browser, journal, fake_client):
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "Only the hike."
+    john = note_id(journal, "John Doe")
+    events = _events(browser.request(f"/api/ask?q=what+happened&note={john}"))
+    answer = events[-1][1]
+    assert events[-1][0] == "answer"
+    assert [e["date"] for e in answer["entries"]] == ["2024-01-15"]
+
+    events = _events(browser.request("/api/ask?q=what+happened&tag=rain"))
+    assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-16"]
+
+    events = _events(browser.request("/api/ask?q=what+happened&group=relationship%3Dfriend"))
+    assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-15"]
+
+    events = _events(browser.request("/api/ask?q=what+happened&from=2024-01-16&to=2024-01-31"))
+    assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-16"]
+
+
+def test_a_scope_that_finds_nothing_is_refused_before_streaming(browser, journal):
+    assert "no indexed note" in browser.get("/api/ask?q=hi&note=99999", status=404)["error"]
+    assert "must be a note's id" in browser.get("/api/ask?q=hi&note=john", status=400)["error"]
+    assert "tagged 'nope'" in browser.get("/api/ask?q=hi&tag=nope", status=404)["error"]
+    assert "property and a value" in browser.get("/api/ask?q=hi&group=relationship", status=400)["error"]
+    assert "No note's relationship" in browser.get("/api/ask?q=hi&group=relationship%3Denemy", status=404)["error"]
+    assert "is after" in browser.get("/api/ask?q=hi&from=2024-02-01&to=2024-01-01", status=400)["error"]
+    assert "a date like" in browser.get("/api/ask?q=hi&from=yesterday", status=400)["error"]
+
+
+def test_compare_sets_two_periods_side_by_side(browser, journal):
+    add_entry(journal, date(2023, 12, 20), mood=3.0, tags=["rain"], path="/vault/2023-12-20.md")
+    both = browser.get("/api/compare?first=2023-12&second=2024-01")
+    assert (both["a"]["label"], both["b"]["label"]) == ("2023-12", "2024-01")
+    assert both["periods"]["2024-01"] == {"kind": "month", "key": "2024-01", "title": "January 2024"}
+    assert both["b"]["writing"]["entries"] == 2
+    before = browser.get("/api/compare?first=2024-01")
+    assert (before["a"]["label"], before["b"]["label"]) == ("2023-12", "2024-01")
+    assert "isn't a period" in browser.get("/api/compare?first=spring", status=400)["error"]
+    assert "No entries in 1990 or 1991" in browser.get("/api/compare?first=1991", status=404)["error"]
+
+
+def test_review_pages_have_the_same_review_as_the_command(browser, journal, config):
+    from journal_analyzer import review
+
+    page = browser.get("/api/review/2024-01")
+    expected = json.loads(json.dumps(review.to_json(journal, review.build(config, journal, "2024-01"))))
+    assert {k: v for k, v in page.items() if k != "mood_scale"} == expected
+    assert page["title"] == "January 2024" and page["mood_scale"] == 10
+    assert browser.get("/api/review/2024-w03")["key"] == "2024-W03"
+    assert "No entries in 1999" in browser.get("/api/review/1999", status=404)["error"]
+    assert "isn't a period" in browser.get("/api/review/someday", status=400)["error"]

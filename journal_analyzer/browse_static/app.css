@@ -31,6 +31,22 @@
   --m7: #3e8d82;
   --m8: #1f6a61;
 
+  /* amounts, like a number you keep or words written: one blue, light to dark */
+  --q0: #8fabd6;
+  --q1: #7897c9;
+  --q2: #6184bc;
+  --q3: #4b71af;
+  --q4: #345ea1;
+  --q5: #1d4b94;
+  --q6: #013886;
+  --metric: #345ea1;
+
+  /* the note map's kinds: three slots that stay apart in every pair, and gray for the rest */
+  --k1: #2a78d6;
+  --k2: #eb6834;
+  --k3: #1baf7a;
+  --k-other: #9a9d99;
+
   --read: "Sitka Text", "Iowan Old Style", Charter, "Bitstream Charter", Cambria, Georgia, serif;
   --display: "Sitka Heading", "Sitka Display", "Iowan Old Style", Charter, Cambria, Georgia, serif;
   --gloss: "Bahnschrift SemiCondensed", Bahnschrift, "DIN Alternate", "Avenir Next Condensed",
@@ -68,6 +84,18 @@
     --m6: #3f8378;
     --m7: #51a396;
     --m8: #71c4b5;
+    --q0: #374d71;
+    --q1: #465f87;
+    --q2: #55719d;
+    --q3: #6584b5;
+    --q4: #7597cd;
+    --q5: #85abe5;
+    --q6: #96bffe;
+    --metric: #5b86cb;
+    --k1: #3987e5;
+    --k2: #d95926;
+    --k3: #199e70;
+    --k-other: #6b7076;
     color-scheme: dark;
   }
 }
@@ -96,6 +124,18 @@
   --m6: #3f8378;
   --m7: #51a396;
   --m8: #71c4b5;
+  --q0: #374d71;
+  --q1: #465f87;
+  --q2: #55719d;
+  --q3: #6584b5;
+  --q4: #7597cd;
+  --q5: #85abe5;
+  --q6: #96bffe;
+  --metric: #5b86cb;
+  --k1: #3987e5;
+  --k2: #d95926;
+  --k3: #199e70;
+  --k-other: #6b7076;
   color-scheme: dark;
 }
 
@@ -108,6 +148,13 @@
 .m6 { --mood: var(--m6); }
 .m7 { --mood: var(--m7); }
 .m8 { --mood: var(--m8); }
+.q0 { --mood: var(--q0); }
+.q1 { --mood: var(--q1); }
+.q2 { --mood: var(--q2); }
+.q3 { --mood: var(--q3); }
+.q4 { --mood: var(--q4); }
+.q5 { --mood: var(--q5); }
+.q6 { --mood: var(--q6); }
 
 *, *::before, *::after { box-sizing: border-box; }
 
@@ -417,6 +464,8 @@ a.fact:hover { background: var(--paper-raised); }
 
 .chart { display: block; width: 100%; height: auto; overflow: visible; }
 .chart .bar { fill: var(--mood); }
+.chart .bar.metric { fill: var(--metric); }
+.chart .zero { stroke: var(--ink-faint); stroke-width: 1; }
 .chart a:hover .bar, .chart a:focus .bar { fill: var(--ink); }
 .chart .baseline { stroke: var(--pencil); stroke-dasharray: 3 3; stroke-width: 1; }
 .chart .axis { fill: var(--ink-faint); font: 11px var(--gloss); }
@@ -575,7 +624,14 @@ table.links td:first-child { white-space: nowrap; }
 .turn-read summary { cursor: pointer; color: var(--pencil); font-size: 0.9rem; width: fit-content; }
 .turn-read[open] summary { margin-bottom: 0.8rem; }
 .turn-read .note-grid { margin-bottom: 0.8rem; }
+.turn-quotes { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.55rem; max-width: var(--measure); }
+.turn-quotes li { display: grid; grid-template-columns: 7.5rem 1fr; gap: 0.8rem; align-items: baseline; }
+.turn-quotes .line-date { color: var(--pencil); font-size: 0.86rem; white-space: nowrap; }
+.turn-quotes q { font: 0.98rem/1.55 var(--read); overflow-wrap: anywhere; }
 .ask-box { max-width: 52rem; }
+.ask-scope { max-width: 52rem; margin-bottom: 0.6rem; }
+.ask-scope:empty { display: none; }
+.ask-here { margin-bottom: 0; }
 .ask-box button:disabled { opacity: 0.45; pointer-events: none; }
 .ask-foot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: 52rem; }
 .ask-foot .section-note { margin: 0; }
@@ -619,4 +675,41 @@ code { font: 0.88em var(--mono); background: var(--paper-sunk); padding: 0.05rem
   .page > * { animation: none; }
   .turn-answer.writing::after { animation: none; }
   body.is-loading .topbar::after { animation: none; width: 100%; opacity: 0.5; }
+}
+
+.colour-by { display: flex; align-items: center; gap: 0.6rem; margin: 0.2rem 0 0.9rem; flex-wrap: wrap; }
+.colour-by select { max-width: 100%; }
+.split-line { max-width: var(--measure); margin: 0 0 0.5rem; line-height: 1.55; }
+.chart-pair { display: grid; gap: 1.2rem; }
+.chart-pair h3 { margin: 0 0 0.3rem; font: 600 0.8rem/1.3 var(--gloss); color: var(--ink-faint); letter-spacing: 0.02em; }
+ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.45rem; max-width: var(--measure); line-height: 1.5; }
+
+.map-wrap .note-map { display: block; width: 100%; min-width: 640px; height: auto; }
+.note-map .map-edge { stroke: var(--ink-faint); stroke-opacity: 0.45; stroke-linecap: round; }
+.note-map circle { stroke: var(--paper); stroke-width: 2; }
+.note-map .k1, .map-swatch.k1 { fill: var(--k1); background: var(--k1); }
+.note-map .k2, .map-swatch.k2 { fill: var(--k2); background: var(--k2); }
+.note-map .k3, .map-swatch.k3 { fill: var(--k3); background: var(--k3); }
+.note-map .k-other, .map-swatch.k-other { fill: var(--k-other); background: var(--k-other); }
+.note-map text { fill: var(--ink); font: 12px var(--gloss); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; display: none; pointer-events: none; }
+.note-map .labelled text, .note-map .map-node:hover text, .note-map .map-node:focus text { display: inline; }
+.note-map .map-node:focus { outline: none; }
+.note-map .map-node:focus circle, .note-map .map-node:hover circle { stroke: var(--ink); }
+.note-map.focusing .map-node:not(.near), .note-map.focusing .map-edge:not(.near) { opacity: 0.18; }
+.note-map.focusing .map-node.near text { display: inline; }
+.note-map.focusing .map-edge.near { stroke-opacity: 0.9; }
+.map-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; align-items: center; margin: 0 0 0.6rem; font-size: 0.86rem; color: var(--ink-soft); }
+.map-legend > span { display: inline-flex; align-items: center; gap: 0.4rem; }
+.map-swatch { width: 0.75rem; height: 0.75rem; border-radius: 50%; display: inline-block; }
+
+.theme-rows { display: grid; gap: 0.55rem; margin-bottom: 0.8rem; }
+.theme-row { display: grid; grid-template-columns: minmax(9rem, 15rem) 1fr; gap: 0.9rem; align-items: center; }
+.theme-name { min-width: 0; overflow-wrap: anywhere; line-height: 1.35; }
+.theme-name .quiet { font-size: 0.8rem; display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }
+.theme-strip { height: 22px; }
+.theme-years { display: flex; color: var(--ink-faint); font: 0.75rem var(--gloss); }
+.theme-years span { flex-basis: 0; min-width: 0; overflow: hidden; }
+@media (max-width: 760px) {
+  .theme-row { grid-template-columns: 1fr; gap: 0.3rem; }
+  .theme-rows > .theme-row:first-child > div:first-child { display: none; }
 }

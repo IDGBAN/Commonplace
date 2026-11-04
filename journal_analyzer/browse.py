@@ -24,7 +24,22 @@ from importlib import resources
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import db, fields, links, parser, profile, query, serialize, store, unlinked
+from . import (
+    compare,
+    db,
+    fields,
+    history,
+    insights,
+    links,
+    parser,
+    profile,
+    query,
+    review,
+    serialize,
+    store,
+    themes,
+    unlinked,
+)
 from .config import Config
 from .models import JournalError
 from .ollama_client import OllamaClient
@@ -45,6 +60,13 @@ COOCCURRING_LIMIT = 12
 LINKED_WITH_LIMIT = 12
 GROUP_VALUES_LIMIT = 30
 PROFILE_FACTS_LIMIT = 300
+# highest and lowest days shown on a metric's page
+METRIC_DAYS_SHOWN = 5
+# the note map: how many notes by default and at most, and how many entries
+# two of them have to share to be joined
+MAP_NOTES = 40
+MAP_NOTES_MAX = 150
+MAP_MIN_SHARED = 2
 _MAX_ROWID = 2**63 - 1
 _OTHER_SITES = frozenset({"cross-site", "same-site"})
 _NO_ENTRY = "There is no indexed entry with that id."
@@ -286,6 +308,12 @@ def entry(req: Request, entry_id: str) -> Json:
              "stale": bool(rollup["stale"]) if rollup else False,
              "summary": rollup["summary"] if rollup else None}
         )
+    # spans of days only exist once someone asks for one
+    digests.extend(
+        {"type": "range", "key": r["period_key"], "exists": True, "stale": bool(r["stale"]),
+         "summary": r["summary"]}
+        for r in store.range_rollups_overlapping(conn, day, day)
+    )
     frontmatter = store.file_frontmatter(conn, row["file_path"])
     reading = store.entry_reading(conn, row["id"])
     own_mood = fields.frontmatter_mood(frontmatter, req.config)
@@ -451,7 +479,7 @@ def tag(req: Request, name: str) -> Json:
 
 
 def digests(req: Request) -> Json:
-    grouped: dict[str, list[Json]] = {"year": [], "month": [], "week": []}
+    grouped: dict[str, list[Json]] = {"year": [], "month": [], "week": [], "range": []}
     for row in store.all_rollups(req.conn):
         grouped.setdefault(row["period_type"], []).append(serialize.rollup_json(row))
     notes = [
@@ -488,6 +516,179 @@ def digest(req: Request, period_type: str, period_key: str) -> Json:
         "digest": serialize.rollup_json(row) if row else None,
         "entries": serialize.entry_briefs(conn, members),
     }
+
+
+def _mean(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 2) if values else None
+
+
+def metrics(req: Request) -> Json:
+    rows = store.metric_keys(req.conn)
+    return {
+        "metrics": [{**dict(r), "yes_no": store.metric_is_yes_no(req.conn, r["key"])} for r in rows],
+    }
+
+
+def metric(req: Request, key: str) -> Json:
+    conn, cfg = req.conn, req.config
+    name = key.strip().casefold()
+    found = next((r for r in store.metric_keys(conn) if r["key"] == name), None)
+    if found is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No entry records '{name}'.")
+    split = insights.mood_split(store.metric_mood_pairs(conn, name, None, None))
+    least = cfg.insights.min_sample_size
+    highest = store.entries_by_metric(conn, name, METRIC_DAYS_SHOWN, highest=True)
+    lowest = store.entries_by_metric(conn, name, METRIC_DAYS_SHOWN, highest=False)
+    return {
+        **dict(found),
+        "yes_no": store.metric_is_yes_no(conn, name),
+        "mood_scale": cfg.indexing.mood_scale_max,
+        "baseline_mood": store.overall_mood(conn, None, None)[0],
+        "months": [dict(r) for r in store.monthly_metric(conn, name, None, None)],
+        "mood_months": [dict(r) for r in store.monthly_mood_with_metric(conn, name)],
+        # too few days on a side and the averages say little, as in journal insights
+        "split": {
+            "yes_no": split.yes_no, "median": split.median,
+            "low": {"mood": _mean(split.low), "days": len(split.low)},
+            "high": {"mood": _mean(split.high), "days": len(split.high)},
+            "enough": len(split.low) >= least and len(split.high) >= least,
+        } if split else None,
+        "highest": [
+            {**b, "value": r["value"]} for b, r in zip(serialize.entry_briefs(conn, highest), highest, strict=True)
+        ],
+        "lowest": [
+            {**b, "value": r["value"]} for b, r in zip(serialize.entry_briefs(conn, lowest), lowest, strict=True)
+        ],
+        "days": [{"date": r["date"], "id": r["id"], "value": r["value"]} for r in store.metric_days(conn, name)],
+    }
+
+
+def _period_param(req: Request, key: str) -> tuple[str, str, date, date]:
+    raw = req.params.get(key, "").strip()
+    try:
+        return store.parse_period(raw)
+    except ValueError:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"'{raw}' isn't a period. Use a year (2024), a month (2024-03) or an ISO week (2024-W10).",
+        ) from None
+
+
+def comparison(req: Request) -> Json:
+    """?first= and, optionally, ?second=; without it, the period just before the first."""
+    kind, key, start, end = _period_param(req, "first")
+    if req.params.get("second", "").strip():
+        _, other, other_start, other_end = _period_param(req, "second")
+        periods = ((key, start, end), (other, other_start, other_end))
+    else:
+        periods = (compare.previous(kind, start), (key, start, end))
+    result = compare.compare(req.conn, *periods)
+    if not result.a.writing.entries and not result.b.writing.entries:
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No entries in {result.a.label} or {result.b.label}.")
+    titles = {}
+    for label in (result.a.label, result.b.label):
+        k, normal, _, _ = store.parse_period(label)
+        titles[label] = {"kind": k, "key": normal, "title": store.period_title(k, normal)}
+    return {
+        **asdict(result),
+        "periods": titles,
+        "mood_scale": req.config.indexing.mood_scale_max,
+        "min_count": compare.MIN_COUNT,
+    }
+
+
+def review_page(req: Request, period: str) -> Json:
+    try:
+        kind, key, _, _ = store.parse_period(period)
+    except ValueError:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"'{period}' isn't a period. Use a year (2024), a month (2024-03) or an ISO week (2024-W10).",
+        ) from None
+    built = review.build(req.config, req.conn, key)
+    if built is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No entries in {store.period_title(kind, key)}.")
+    return {**review.to_json(req.conn, built), "mood_scale": req.config.indexing.mood_scale_max}
+
+
+def graph(req: Request) -> Json:
+    """The notes linked most, and which of them turn up in the same entries."""
+    date_from, date_to = req.day("from"), req.day("to")
+    kind = req.params.get("kind", "").strip() or None
+    nodes, edges = store.note_graph(
+        req.conn,
+        req.number("limit", MAP_NOTES, 1, MAP_NOTES_MAX),
+        req.number("min", MAP_MIN_SHARED, 1, 1000),
+        date_from, date_to, kind,
+    )
+    return {
+        "nodes": [dict(r) for r in nodes],
+        "edges": [dict(r) for r in edges],
+        "kinds": [dict(r) for r in store.notes_by_kind(req.conn)],
+        "min_shared": req.number("min", MAP_MIN_SHARED, 1, 1000),
+    }
+
+
+def themes_page(req: Request) -> Json:
+    placed = themes.membership(req.conn)
+    listed = themes.overview(req.conn, placed)
+    # entries each month, so a theme's month can be shown as its share of it
+    totals: dict[str, int] = {}
+    for r in store.entry_days(req.conn):
+        totals[r["entry_date"][:7]] = totals.get(r["entry_date"][:7], 0) + 1
+    return {
+        "status": themes.status_json(themes.status(req.conn, req.config)),
+        "themes": [themes.theme_json(t) for t in listed],
+        "month_totals": dict(sorted(totals.items())),
+        "mood_scale": req.config.indexing.mood_scale_max,
+    }
+
+
+def theme_page(req: Request, theme_id: str) -> Json:
+    missing = "There's no theme with that number. Themes are numbered again at each refresh."
+    shown = themes.detail(req.conn, _row_id(theme_id, missing))
+    if shown is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, missing)
+    return {
+        **themes.theme_json(shown.theme),
+        "central": serialize.entry_briefs(req.conn, shown.central),
+        "newest": serialize.entry_briefs(req.conn, shown.newest),
+        "tags": [{"name": n, "entries": c} for n, c in shown.tags],
+        "notes": [{"id": i, "title": t, "kind": k, "entries": c} for i, t, k, c in shown.notes],
+        "baseline_mood": store.overall_mood(req.conn, None, None)[0],
+        "mood_scale": req.config.indexing.mood_scale_max,
+    }
+
+
+HISTORY_LISTED = 30
+
+
+def history_list(req: Request) -> Json:
+    return {
+        "enabled": req.config.history.enabled,
+        "items": [
+            {k: v for k, v in kept.as_json().items() if k not in ("answer", "sources")}
+            for kept in history.recent(req.config, HISTORY_LISTED)
+        ],
+    }
+
+
+def history_item(req: Request, kept_id: str) -> Json:
+    missing = "There's no question with that number in your history."
+    found = history.get(req.config, _row_id(kept_id, missing))
+    if found is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, missing)
+    # ids change when files are indexed again, so they're looked up now
+    dates = []
+    for d in found.sources.get("dates", []):
+        day = date.fromisoformat(d["date"])
+        rows = store.entries_in_range(req.conn, day, day)
+        dates.append({**d, "id": rows[0]["id"] if rows else None})
+    notes = []
+    for title in found.sources.get("notes", []):
+        matches = store.find_notes(req.conn, title)
+        notes.append({"title": title, "id": matches[0]["id"] if matches else None})
+    return {**found.as_json(), "sources": {"dates": dates, "notes": notes}}
 
 
 def profile_page(req: Request) -> Json:
@@ -584,6 +785,29 @@ def _ask_params(params: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
     return question, history
 
 
+def _ask_scope(req: Request) -> tuple[store.EntryFilter | None, date | None, date | None]:
+    """?note=, ?tag=, ?group= and ?from=/?to= keep an answer to some entries,
+    like --about, --tag, --group, --since and --until on `journal ask`."""
+    note_ids: tuple[int, ...] = ()
+    raw_note = req.params.get("note", "").strip()
+    if raw_note:
+        if not raw_note.isdigit():
+            raise ApiError(HTTPStatus.BAD_REQUEST, "'note' must be a note's id.")
+        rows = store.notes_by_ids(req.conn, [_row_id(raw_note, _NO_NOTE)])
+        if not rows:
+            raise ApiError(HTTPStatus.NOT_FOUND, _NO_NOTE)
+        note_ids = (rows[0]["id"],)
+    tag = req.params.get("tag", "").strip().lstrip("#").strip().lower() or None
+    if tag and not store.tag_exists(req.conn, tag):
+        raise ApiError(HTTPStatus.NOT_FOUND, f"No indexed entry is tagged '{tag}'.")
+    group = _group_param(req)
+    date_from, date_to = req.day("from"), req.day("to")
+    if date_from and date_to and date_from > date_to:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"'from' ({date_from}) is after 'to' ({date_to}).")
+    only = store.EntryFilter(tag, note_ids, group[0] if group else None, tuple(group[1]) if group else ())
+    return only or None, date_from, date_to
+
+
 Handler = Callable[..., Json]
 
 _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
@@ -596,9 +820,18 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/tags"), tags),
     (re.compile(r"/api/tags/(.+)"), tag),
     (re.compile(r"/api/digests"), digests),
-    (re.compile(r"/api/digests/(week|month|year)/([^/]+)"), digest),
+    (re.compile(r"/api/digests/(week|month|year|range)/([^/]+)"), digest),
     (re.compile(r"/api/files"), files),
     (re.compile(r"/api/profile"), profile_page),
+    (re.compile(r"/api/metrics"), metrics),
+    (re.compile(r"/api/compare"), comparison),
+    (re.compile(r"/api/graph"), graph),
+    (re.compile(r"/api/themes"), themes_page),
+    (re.compile(r"/api/themes/(\d+)"), theme_page),
+    (re.compile(r"/api/history"), history_list),
+    (re.compile(r"/api/history/(\d+)"), history_item),
+    (re.compile(r"/api/review/([^/]+)"), review_page),
+    (re.compile(r"/api/metrics/(.+)"), metric),
     (re.compile(r"/api/search"), search),
 ]
 
@@ -676,10 +909,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _ask(self, query_string: str) -> None:
         params = {k: v[-1] for k, v in parse_qs(query_string).items()}
+        config = self.server.config
         try:
-            question, history = _ask_params(params)
+            question, turns = _ask_params(params)
+            with closing(db.connect_readonly(config)) as conn:
+                only, since, until = _ask_scope(Request(config, conn, params, self.server.make_client))
+                scope = history.scope_text(conn, only, since, until)
         except ApiError as exc:
             self._send_json(exc.status, {"error": str(exc)})
+            return
+        except JournalError as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+        except sqlite3.Error as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"The cache couldn't be read: {exc}"})
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -692,25 +935,33 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event}\ndata: {body}\n\n".encode())
             self.wfile.flush()
 
-        config = self.server.config
         try:
             try:
                 with closing(db.connect_readonly(config)) as conn:
                     client = self.server.make_client(config)
                     standalone = question
-                    if history:
+                    if turns:
                         send("stage", {"text": "Resolving your follow-up..."})
                         standalone = query.contextualize_question(
-                            question, history, config, client, profile.names(conn, config)
+                            question, turns, config, client, profile.names(conn, config)
                         )
                         if standalone != question:
                             send("rewritten", {"question": standalone})
                     result = query.answer(
                         standalone, config, conn, client,
                         on_stage=lambda stage: send("stage", {"text": stage}),
+                        since=since, until=until, only=only,
                         on_text=lambda text: send("text", {"text": text}),
                     )
-                    send("answer", {"question": standalone, **serialize.answer_json(conn, result)})
+                    asked = params.get("conversation", "")
+                    kept = history.record(
+                        config, question, result, "browse",
+                        asked if history.valid_conversation(asked) else history.new_conversation(),
+                        standalone, scope,
+                    )
+                    send("answer", {
+                        "question": standalone, **serialize.answer_json(conn, result), "history_id": kept,
+                    })
             except JournalError as exc:
                 send("problem", {"error": str(exc)})
             except sqlite3.Error as exc:

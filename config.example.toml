@@ -78,6 +78,11 @@ note_min_mentions = 8
 note_entries_per_year = 30         # entries per year that go into one; busier years are sampled
 linked_notes_chars = 6000          # room for linked notes in each digest's prompt; 0 sends none
 entry_details_chars = 8000         # room for long entries' longer summaries in each digest; the rest get one line
+# `journal watch` writes the week and month digests of the days it indexes,
+# when nothing is queued and at most this often. Each digest is a call to
+# the precise model, so on a CPU 30 or more is kinder. 0 leaves them to
+# `journal rollup`.
+watch_refresh_minutes = 0
 
 [insights]
 # `journal insights` only reports a tag, person or weekly/seasonal pattern once
@@ -100,6 +105,12 @@ known_in_prompt = 40              # most used tags shown to the model when it ta
 # means every numeric property; ignore leaves some out, e.g. ["week"].
 keys = []
 ignore = []
+
+[themes]
+# `journal themes --refresh` groups entries close in meaning into themes.
+count = 0                         # how many to look for; 0 picks about sqrt(entries / 4), 3 to 15
+min_entries = 5                   # a theme with fewer entries is folded into the others
+stale_share = 0.2                 # once this share of entries came after the last refresh, it says so
 
 [profile]
 # A short profile of you, kept from your entries and given to answers, digests,
@@ -132,3 +143,23 @@ learned_alias_ignore = []         # link text that should never count as a name,
 # Properties whose values group notes for `journal insights`, e.g.
 # ["relationship"]. Empty means every property two notes have in common.
 group_keys = []
+
+[mcp]
+# What `journal mcp` lets a connected app see. An app that sends it to a
+# hosted model sends that much of your journal with it.
+raw_text = true                   # entry and note text; false leaves summaries, digests and numbers
+# Entries with any of these tags (inline, in frontmatter or from the model)
+# and notes with one in their file are left out of every tool, along with
+# the digests and profile written from them.
+exclude_tags = []                 # e.g. ["therapy", "health"]
+exclude_kinds = []                # kinds of note (their folder) to leave out, e.g. ["health"]
+tools = []                        # only these tools, e.g. ["search", "day", "mood"]; empty means all
+
+[history]
+# Keep your questions and their answers so you can read them again and pick a
+# chat back up. Off unless you turn it on. They go in a file of their own,
+# and `journal history --clear` deletes it.
+enabled = false
+path = ""                         # empty puts journal-history.db next to the cache; never inside the vault
+keep = 500                        # the newest questions kept; older ones are deleted
+forget_after_days = 0             # also delete questions older than this; 0 leaves it to keep

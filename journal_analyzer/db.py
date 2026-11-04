@@ -320,6 +320,24 @@ CREATE TRIGGER IF NOT EXISTS photos_fts_ad AFTER DELETE ON entry_photos BEGIN
   INSERT INTO photos_fts(photos_fts, rowid, description) VALUES ('delete', old.id, old.description);
 END;
 
+-- Groups of entries close in meaning, found by `journal themes --refresh`.
+-- They're made again from scratch each time, so their ids don't last. An
+-- entry indexed since has no row here and goes to the nearest centroid.
+CREATE TABLE IF NOT EXISTS themes (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT,
+  about      TEXT,
+  centroid   BLOB NOT NULL,
+  named_from TEXT NOT NULL DEFAULT '[]',
+  made_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entry_themes (
+  entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+  theme_id INTEGER NOT NULL REFERENCES themes(id) ON DELETE CASCADE,
+  distance REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entry_themes_theme ON entry_themes(theme_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
   title,
   aliases,

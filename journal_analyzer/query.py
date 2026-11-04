@@ -17,7 +17,7 @@ from typing import Any
 
 from rich.console import Console
 
-from . import context, db, embedder, parser, profile, store
+from . import context, db, embedder, parser, profile, quotes, store, themes
 from .config import Config
 from .models import Answer, AnswerStage, QueryPlan
 from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
@@ -34,6 +34,11 @@ WEEK_DIGEST_MIN_DAYS = 10
 MAX_WEEK_DIGESTS = 9
 # more months than this and we send year digests instead
 MAX_MONTH_DIGESTS = 14
+# digests of spans of days, like a trip, that share the most days with the question
+MAX_RANGE_DIGESTS = 3
+# themes with the most entries in a narrative question's dates, or a range this long
+MAX_THEME_LINES = 5
+THEME_MIN_DAYS = 28
 # the reranker can only reorder what retrieval found, so fetch extra
 RERANK_CANDIDATE_POOL = 25
 # 60 is the k from the original RRF paper
@@ -264,11 +269,14 @@ def _finalize(
     read_entries: Iterable[int] = (),
     read_notes: Iterable[int] = (),
     cited_parts: dict[str, str] | None = None,
+    quoted: dict[str, str] | None = None,
 ) -> Answer:
-    """`cited_parts` is the heading of the part of a cited day that matched, by ISO date."""
+    """`cited_parts` is the heading of the part of a cited day that matched,
+    and `quoted` the sentence of it the answer likely drew on, both by ISO date."""
     dates = sorted(set(cited_dates))
     notes = sorted(set(cited_notes), key=str.casefold)
     parts = {d: h for d, h in (cited_parts or {}).items() if h and date.fromisoformat(d) in dates}
+    kept = {d: q for d, q in (quoted or {}).items() if date.fromisoformat(d) in dates}
     body = text.rstrip()
     links = [
         f"[[{d.isoformat()}#{parts[d.isoformat()]}]]" if d.isoformat() in parts else f"[[{d.isoformat()}]]"
@@ -282,6 +290,7 @@ def _finalize(
         cited_dates=dates,
         cited_parts=parts,
         cited_notes=notes,
+        quotes=kept,
         stage_used=stage,
         read_entry_ids=list(dict.fromkeys(read_entries)),
         read_note_ids=list(dict.fromkeys(read_notes)),
@@ -710,7 +719,37 @@ def _learned_names(conn: sqlite3.Connection, notes: list[sqlite3.Row]) -> dict[i
     return {note_id: [r["name"] for r in rows] for note_id, rows in found.items()}
 
 
+def _range_digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
+    if not (plan.date_from and plan.date_to):
+        return []
+    lo, hi = plan.date_from, plan.date_to
+
+    def shared(row: sqlite3.Row) -> int:
+        start, end = store.period_bounds("range", row["period_key"])
+        return (min(end, hi) - max(start, lo)).days + 1
+
+    rows = sorted(store.range_rollups_overlapping(conn, lo, hi), key=lambda r: (-shared(r), r["period_key"]))
+    return [
+        f"- [{store.period_title('range', r['period_key'])}] {r['summary']}"
+        for r in rows[:MAX_RANGE_DIGESTS]
+    ]
+
+
+def _theme_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
+    spans = bool(plan.date_from and plan.date_to and (plan.date_to - plan.date_from).days >= THEME_MIN_DAYS)
+    if plan.intent != "narrative" and not spans:
+        return []
+    return [
+        f"- [theme] {t.name}: {t.about or 'no description'} ({n} of its {t.entries} entries fall here)"
+        for t, n in themes.in_range(conn, plan.date_from, plan.date_to, MAX_THEME_LINES)
+    ]
+
+
 def _digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
+    return _range_digest_lines(plan, conn) + _period_digest_lines(plan, conn) + _theme_lines(plan, conn)
+
+
+def _period_digest_lines(plan: QueryPlan, conn: sqlite3.Connection) -> list[str]:
     # An unbounded narrative question covers the whole journal.
     if plan.intent != "narrative" and not (plan.date_from and plan.date_to):
         return []
@@ -1054,6 +1093,9 @@ def answer(
             text="No journal entries or reference notes matched the question.",
             stage_used="retrieval_empty",
         )
+    wanted = quotes.terms(
+        [*search_keywords(question), *search_keywords(" ".join(plan.keywords + plan.entities))]
+    )
 
     if not plan.needs_raw_text:
         on_stage("Answering from summaries...")
@@ -1068,6 +1110,7 @@ def answer(
                 read_entries=[r["id"] for r in candidates],
                 read_notes=[r["id"] for r in notes],
                 cited_parts=_cited_parts(candidates, found_parts),
+                quoted=quotes.for_days(candidates, wanted, found_parts),
             )
 
     on_stage("Re-reading the full entries...")
@@ -1086,6 +1129,7 @@ def answer(
         read_entries=[r["id"] for r in used],
         read_notes=[r["id"] for r in used_notes],
         cited_parts=_cited_parts(used, found_parts),
+        quoted=quotes.for_days(used, wanted, found_parts),
     )
 
 

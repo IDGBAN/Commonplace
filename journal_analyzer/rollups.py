@@ -104,6 +104,7 @@ def _prune_orphan_rollups(
     keep = {("week", k) for k in groups["week"]}
     keep |= {("month", k) for k in groups["month"]}
     keep |= {("year", k[:4]) for k in groups["month"]}
+    keep |= {("range", r["period_key"]) for r in store.range_rollups_overlapping(conn) if _range_members(conn, r["period_key"])}
     doomed = [
         (r["period_type"], r["period_key"])
         for r in conn.execute("SELECT period_type, period_key FROM rollups")
@@ -186,6 +187,23 @@ def _write_period(
     store.upsert_rollup(
         conn, period_type, period_key, summary, json.dumps(dominant), avg_mood, len(members)
     )
+
+
+def _range_members(conn: sqlite3.Connection, key: str) -> list[sqlite3.Row]:
+    try:
+        start, end = store.period_bounds("range", key)
+    except ValueError:
+        return []
+    return store.entries_in_range(conn, start, end)
+
+
+def write_range(config: Config, conn: sqlite3.Connection, client: OllamaClient, key: str) -> bool:
+    """Writes the digest of a span of days, like 2024-03-02..2024-03-11. False if no entry is in it."""
+    members = _range_members(conn, key)
+    if not members:
+        return False
+    _write_period("range", key, members, config, conn, client)
+    return True
 
 
 def _write_year(
@@ -325,8 +343,9 @@ def _write_note_digest(
 # The profile goes first because every digest is written with it. Weeks go
 # last: most answers read months and years (weeks only cover spans of a few
 # weeks), and a run can take hours, so if it gets stopped those should
-# already be done. Years need their months written first.
-ORDER = ("profile", "month", "year", "note", "week")
+# already be done. Years need their months written first. Spans of days are
+# only ever written when asked for, so a run only rewrites the ones there are.
+ORDER = ("profile", "month", "year", "note", "week", "range")
 Reason = Literal["missing", "stale", "rebuild"]
 
 
@@ -408,6 +427,12 @@ def plan_rollups(
                 if reason:
                     planned.append(PlannedDigest("note", note["link_key"], note["title"], reason))
             continue
+        if kind == "range":
+            for row in store.range_rollups_overlapping(conn, since, until):
+                reason = _reason(row, only_stale)
+                if reason:
+                    planned.append(PlannedDigest("range", row["period_key"], row["period_key"], reason))
+            continue
         keys = sorted({k[:4] for k in groups["month"]}) if kind == "year" else sorted(groups[kind])
         for key in keys:
             if not _overlaps(kind, key, since, until):
@@ -416,6 +441,59 @@ def plan_rollups(
             if reason:
                 planned.append(PlannedDigest(kind, key, key, reason))
     return planned
+
+
+# what `journal watch` keeps up to date; years are written from months, so
+# they're left to `journal rollup`
+WATCH_KINDS = ("month", "week")
+_KEY_FN = {"month": store.month_key, "week": store.week_key}
+
+
+def _due_for_days(
+    conn: sqlite3.Connection, groups: dict[str, dict[str, list[sqlite3.Row]]], days: set[date]
+) -> list[tuple[str, str]]:
+    due = []
+    for kind in WATCH_KINDS:
+        for key in sorted({_KEY_FN[kind](d) for d in days}, reverse=True):
+            if key in groups[kind] and _reason(store.get_rollup(conn, kind, key), only_stale=True):
+                due.append((kind, key))
+    # spans someone asked for, never new ones
+    if days:
+        for row in reversed(store.range_rollups_overlapping(conn, min(days), max(days))):
+            start, end = store.period_bounds("range", row["period_key"])
+            if row["stale"] and any(start <= d <= end for d in days):
+                due.append(("range", row["period_key"]))
+    return due
+
+
+def refresh_days(
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    days: set[date],
+    keep_going: Callable[[], bool] = lambda: True,
+) -> tuple[list[tuple[str, str]], set[date]]:
+    """Writes the month and week digests of these days that are missing or
+    out of date, months first and newest first, one at a time while
+    keep_going() says to. Returns the ones written and the days whose
+    digests are still due."""
+    groups = _entry_periods(conn)
+    written = []
+    for kind, key in _due_for_days(conn, groups, days):
+        if not keep_going():
+            break
+        if kind == "range":
+            if not write_range(config, conn, client, key):
+                continue
+        else:
+            _write_period(kind, key, groups[kind][key], config, conn, client)
+        written.append((kind, key))
+    still = set(_due_for_days(conn, groups, days))
+    spans = [store.period_bounds(kind, key) for kind, key in still if kind == "range"]
+    return written, {
+        d for d in days
+        if any((k, _KEY_FN[k](d)) in still for k in WATCH_KINDS) or any(a <= d <= b for a, b in spans)
+    }
 
 
 def generate_rollups(
@@ -462,6 +540,8 @@ def generate_rollups(
                 written = _write_note_digest(item.key, config, conn, client)
             elif item.kind == "year":
                 written = _write_year(item.key, config, conn, client, groups["month"])
+            elif item.kind == "range":
+                written = write_range(config, conn, client, item.key)
             else:
                 _write_period(item.kind, item.key, groups[item.kind][item.key], config, conn, client)
                 written = True

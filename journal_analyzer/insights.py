@@ -125,35 +125,51 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
-def _metric_finding(
-    key: str, pairs: list[tuple[float, float]], threshold: float, min_count: int
-) -> Finding | None:
+@dataclass(frozen=True)
+class MoodSplit:
+    """Moods on either side of a metric: days without and with a yes/no one,
+    or below and at or above its median."""
+
+    yes_no: bool
+    median: float | None
+    low: list[float]
+    high: list[float]
+
+
+def mood_split(pairs: list[tuple[float, float]]) -> MoodSplit | None:
+    """`pairs` is (value, mood). None if the values don't differ."""
     values = sorted({v for v, _ in pairs})
     if len(values) < 2:
         return None
     if set(values) <= {0.0, 1.0}:
         # a yes/no property, like exercise: true
-        yes = [m for v, m in pairs if v == 1.0]
-        no = [m for v, m in pairs if v == 0.0]
-        if len(yes) < min_count or len(no) < min_count:
-            return None
-        diff = _mean(yes) - _mean(no)
+        return MoodSplit(True, None, [m for v, m in pairs if v == 0.0], [m for v, m in pairs if v == 1.0])
+    ordered = sorted(v for v, _ in pairs)
+    median = ordered[len(ordered) // 2]
+    return MoodSplit(
+        False, median, [m for v, m in pairs if v < median], [m for v, m in pairs if v >= median]
+    )
+
+
+def _metric_finding(
+    key: str, pairs: list[tuple[float, float]], threshold: float, min_count: int
+) -> Finding | None:
+    split = mood_split(pairs)
+    if split is None or len(split.low) < min_count or len(split.high) < min_count:
+        return None
+    no, yes = split.low, split.high
+    diff = _mean(yes) - _mean(no)
+    if split.yes_no:
         text = (
             f"Days with '{key}': average mood {_mean(yes):.1f}, against "
             f"{_mean(no):.1f} on days without ({len(yes)} and {len(no)} entries)"
         )
     else:
-        ordered = sorted(v for v, _ in pairs)
-        median = ordered[len(ordered) // 2]
-        low = [m for v, m in pairs if v < median]
-        high = [m for v, m in pairs if v >= median]
-        if len(low) < min_count or len(high) < min_count:
-            return None
-        diff = _mean(high) - _mean(low)
+        assert split.median is not None
         text = (
-            f"Days with '{key}' below its median of {median:g}: average mood "
-            f"{_mean(low):.1f}, against {_mean(high):.1f} at or above it "
-            f"({len(low)} and {len(high)} entries)"
+            f"Days with '{key}' below its median of {split.median:g}: average mood "
+            f"{_mean(no):.1f}, against {_mean(yes):.1f} at or above it "
+            f"({len(no)} and {len(yes)} entries)"
         )
     if abs(diff) < threshold:
         return None
