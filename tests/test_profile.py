@@ -59,6 +59,8 @@ def test_scan_reads_entries_in_batches_and_keeps_facts_with_their_day(conn, conf
     [fact] = store.profile_facts(conn, 10)
     assert (fact["entry_date"], fact["category"], fact["fact"]) == ("2024-01-01", "preferences", "I drink tea, not coffee.")
     assert profile.pending_entries(conn) == []  # the empty entry is never read
+    # a batch can list more facts than an extraction has fields
+    assert fake_client.reply_tokens["ScannedFacts"] == profile.SCAN_REPLY_TOKENS
 
 
 def test_scan_drops_facts_for_days_not_in_the_batch_and_repeats(conn, config, fake_client):
@@ -253,7 +255,8 @@ def test_your_own_note_goes_in_unless_it_is_private(tmp_path, fake_client):
     fake_client.structured["ProfileDigest"] = lambda model, messages: sent.append(messages[-1]["content"]) or ProfileDigest(profile="p")
     assert profile.needs_update(conn, cfg)
     assert profile.update(cfg, conn, fake_client)
-    assert "The note I keep about myself:\npronouns: she/her\n\nI'm a nurse." in sent[0]
+    # first, so the part of the prompt that stays the same is at its start
+    assert sent[0].startswith("The note I keep about myself:\npronouns: she/her\n\nI'm a nurse.")
     assert "draft" not in sent[0]
     note.write_text("I'm a nurse. #private", encoding="utf-8")
     assert profile.update(cfg, conn, fake_client)

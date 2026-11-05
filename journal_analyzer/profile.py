@@ -79,8 +79,8 @@ entries have none, so an empty list is a normal answer. Give each fact the \
 date of the entry it came from."""
 
 _FOLD_PROMPT = """You keep a short profile of the person who writes a journal, \
-written in their own first person (I, me, my). You get the profile so far, \
-any note they wrote about themselves, and new facts taken from their journal \
+written in their own first person (I, me, my). You get any note they wrote \
+about themselves, the profile so far, and new facts taken from their journal \
 in date order. Rewrite the profile to take in the new facts. When facts \
 disagree, the later one wins; mention a change only when it says something \
 ("I used to run, now I swim"). Keep what lasts and drop one-offs. Their own \
@@ -237,6 +237,7 @@ def scan(
                 {"role": "user", "content": text},
             ],
             schema=ScannedFacts,
+            reply_tokens=SCAN_REPLY_TOKENS,
         )
         by_date: dict[str, sqlite3.Row] = {}
         for r in batch:
@@ -353,13 +354,14 @@ def update(
         # a base that ran long would leave the reply no room to grow
         so_far = _shorten(config, conn, client, so_far)
         lines = [f"- {f['entry_date']} [{f['category']}] {f['fact']}" for f in chunk]
-        parts = [
+        # the note leads since it's the same in every chunk, and Ollama skips
+        # re-reading a prompt's start when it matches the last one
+        parts = [f"The note I keep about myself:\n{me}"] if me else []
+        parts += [
             f"Profile so far:\n{so_far or '(none yet)'}",
             f"Names so far: {names_so_far or '(none yet)'}",
+            "New facts, oldest first:\n" + ("\n".join(lines) or "(none)"),
         ]
-        if me:
-            parts.append(f"The note I keep about myself:\n{me}")
-        parts.append("New facts, oldest first:\n" + ("\n".join(lines) or "(none)"))
         digest = client.chat_structured(
             model=config.ollama.precise_model,
             messages=[
