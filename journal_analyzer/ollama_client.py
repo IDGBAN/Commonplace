@@ -37,6 +37,11 @@ RETRY_BACKOFF_SECONDS = 0.5
 # Real JSON replies are a few hundred tokens. One this long is a model stuck
 # in a loop.
 STRUCTURED_MAX_TOKENS = 1024
+# Reasoning counts against num_predict and the window just like the reply.
+# This is the room a thinking model gets for it. A JSON reply that's still
+# thinking when it runs out is asked for again without thinking, so this caps
+# how long a structured call can take.
+THINK_TOKENS = 2048
 
 # The window a prompt gets unless it needs more. It's always sent: Ollama's
 # own default is whatever its app's context length setting says, up to 256k,
@@ -165,6 +170,10 @@ def _options(
     return opts
 
 
+def _reply_room(reply_tokens: int, thinking: bool) -> int:
+    return reply_tokens + (THINK_TOKENS if thinking else 0)
+
+
 def _memo_options(opts: dict[str, Any]) -> dict[str, Any]:
     # the window only changes the reply when a prompt wouldn't fit, and then
     # it's raised to fit, so a different window setting still gives the same one
@@ -185,7 +194,8 @@ class OllamaClient:
             host=config.ollama.host,
             timeout=config.ollama.request_timeout_seconds,
         )
-        self._context_lengths: dict[str, int | None] = {}
+        self._shown: dict[str, Any] = {}
+        self._can_think: dict[str, bool] = {}
         self._memo = memo.open_for(config)
         self._weights: dict[str, str] | None = None
 
@@ -266,14 +276,37 @@ class OllamaClient:
             return roles.precise_model_think
         return None
 
+    def _thinking(self, model: str, think: bool | None) -> bool:
+        """Whether the reply will have reasoning in it, which needs room."""
+        if think is not None:
+            return think
+        if model not in self._can_think:
+            # left to the model, and the ones that can think do unless told
+            # not to; when Ollama can't say, room is kept in case
+            capabilities = None
+            with contextlib.suppress(JournalError):
+                capabilities = getattr(self._show(model), "capabilities", None)
+            self._can_think[model] = (
+                not isinstance(capabilities, list) or "thinking" in capabilities
+            )
+        return self._can_think[model]
+
+    def _show(self, model: str) -> Any:
+        if model not in self._shown:
+            self._shown[model] = self._call(model, partial(self._client.show, model))
+        return self._shown[model]
+
     def chat(
         self,
         model: str,
         messages: list[dict[str, str]],
         options: dict[str, Any] | None = None,
     ) -> str:
-        opts = _options(messages, options, self._fixed_ctx(model))
         think = self._think(model)
+        opts = _options(
+            messages, options, self._fixed_ctx(model),
+            _reply_room(REPLY_TOKENS, self._thinking(model, think)),
+        )
         key = None
         # only replies that come out the same every time are worth keeping
         if self._memo is not None and opts.get("temperature") == 0:
@@ -306,8 +339,11 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
     ) -> str:
         """Like chat, handing each piece of the reply to on_text as it arrives."""
-        opts = _options(messages, options, self._fixed_ctx(model))
         think = self._think(model)
+        opts = _options(
+            messages, options, self._fixed_ctx(model),
+            _reply_room(REPLY_TOKENS, self._thinking(model, think)),
+        )
         parts: list[str] = []
         visible = ThinkFilter()
         try:
@@ -399,14 +435,13 @@ class OllamaClient:
         reply_tokens: int,
     ) -> T:
         convo = list(messages)
-        last_error: Exception | None = None
-        for _ in range(2):
+        thinking = self._thinking(model, think)
+        retried = False
+        while True:
+            room = _reply_room(reply_tokens, thinking)
             # per attempt, since the retry also carries the bad reply
-            opts = _options(
-                convo, options, self._fixed_ctx(model), max(REPLY_TOKENS, reply_tokens)
-            )
-            if think is False:
-                opts.setdefault("num_predict", reply_tokens)
+            opts = _options(convo, options, self._fixed_ctx(model), max(REPLY_TOKENS, room))
+            opts.setdefault("num_predict", room)
             response = self._call(
                 model,
                 partial(
@@ -419,23 +454,32 @@ class OllamaClient:
                 ),
             )
             # some models put a think block before the JSON anyway
-            content = strip_thinking(response["message"]["content"])
+            content = strip_thinking(response["message"]["content"] or "")
             try:
                 return schema.model_validate_json(content)
             except ValidationError as exc:
                 last_error = exc
-                convo = [
-                    *convo,
-                    {"role": "assistant", "content": content},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your previous response failed schema validation: "
-                            f"{exc}. Respond again with ONLY valid JSON matching "
-                            "the schema."
-                        ),
-                    },
-                ]
+            if thinking and (not content or response.get("done_reason") == "length"):
+                # it ran out of room while thinking, so there's no JSON to
+                # correct, and the same request would only do it again
+                thinking = False
+                think = False
+                continue
+            if retried:
+                break
+            retried = True
+            convo = [
+                *convo,
+                {"role": "assistant", "content": content},
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response failed schema validation: "
+                        f"{last_error}. Respond again with ONLY valid JSON matching "
+                        "the schema."
+                    ),
+                },
+            ]
         raise StructuredOutputError(
             f"Model '{model}' failed to produce valid {schema.__name__} JSON "
             f"after a retry: {last_error}"
@@ -444,8 +488,11 @@ class OllamaClient:
     def describe_image(self, model: str, prompt: str, image: bytes) -> str:
         """What a vision model says about one image. Kept in the memo by the image's bytes."""
         messages = [{"role": "user", "content": prompt}]
-        opts = _options(messages, None, self._fixed_ctx(model))
         think = self._think(model)
+        opts = _options(
+            messages, None, self._fixed_ctx(model),
+            _reply_room(REPLY_TOKENS, self._thinking(model, think)),
+        )
         key = None
         if self._memo is not None:
             key = self._memo_key(
@@ -498,10 +545,5 @@ class OllamaClient:
         return [m["model"] for m in data["models"]]
 
     def context_length(self, model: str) -> int | None:
-        if model not in self._context_lengths:
-            info = self._call(model, partial(self._client.show, model)).modelinfo or {}
-            self._context_lengths[model] = next(
-                (int(v) for k, v in info.items() if k.endswith(".context_length")),
-                None,
-            )
-        return self._context_lengths[model]
+        info = self._show(model).modelinfo or {}
+        return next((int(v) for k, v in info.items() if k.endswith(".context_length")), None)

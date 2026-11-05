@@ -20,8 +20,8 @@ def _client(tmp_path, monkeypatch, inner):
     return ollama_client.OllamaClient(make_config(tmp_path))
 
 
-def _reply(content: str) -> dict:
-    return {"message": {"content": content}}
+def _reply(content: str, done_reason: str = "stop") -> dict:
+    return {"message": {"content": content}, "done_reason": done_reason}
 
 
 def test_strip_thinking_removes_reasoning_block():
@@ -172,7 +172,9 @@ def test_models_outside_the_two_roles_are_left_alone(tmp_path, monkeypatch):
     assert inner.chat.call_args.kwargs["think"] is None
 
 
-def test_json_replies_are_capped_only_when_the_model_is_not_reasoning(tmp_path, monkeypatch):
+def test_json_replies_are_capped_with_room_for_reasoning_when_the_model_thinks(
+    tmp_path, monkeypatch
+):
     inner = MagicMock()
     inner.chat.return_value = _reply('{"summary": "ok"}')
     client = _client(tmp_path, monkeypatch, inner)
@@ -180,7 +182,81 @@ def test_json_replies_are_capped_only_when_the_model_is_not_reasoning(tmp_path, 
     options = inner.chat.call_args.kwargs["options"]
     assert options["num_predict"] == ollama_client.STRUCTURED_MAX_TOKENS
     client.chat_structured("fake-precise", [], Extraction)
-    assert "num_predict" not in inner.chat.call_args.kwargs["options"]
+    options = inner.chat.call_args.kwargs["options"]
+    assert options["num_predict"] == (
+        ollama_client.STRUCTURED_MAX_TOKENS + ollama_client.THINK_TOKENS
+    )
+
+
+def test_a_model_left_to_itself_that_cannot_think_gets_no_room_for_it(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.show.return_value.capabilities = ["completion"]
+    inner.chat.return_value = _reply('{"summary": "ok"}')
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat_structured("fake-precise", [], Extraction)
+    assert inner.chat.call_args.kwargs["options"]["num_predict"] == ollama_client.STRUCTURED_MAX_TOKENS
+    assert inner.chat.call_args.kwargs["think"] is None
+    inner.show.return_value.capabilities = ["completion", "thinking"]
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat_structured("fake-precise", [{"role": "user", "content": "new"}], Extraction)
+    options = inner.chat.call_args.kwargs["options"]
+    assert options["num_predict"] > ollama_client.STRUCTURED_MAX_TOKENS
+
+
+def test_json_lost_to_reasoning_is_asked_for_again_without_it(tmp_path, monkeypatch):
+    # thinking used up the reply, so there was no JSON to correct
+    inner = MagicMock()
+    inner.chat.side_effect = [_reply("", "length"), _reply('{"summary": "ok"}')]
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    assert client.chat_structured("fake-precise", [], Extraction).summary == "ok"
+    first, second = inner.chat.call_args_list
+    assert (first.kwargs["think"], second.kwargs["think"]) == (True, False)
+    assert second.kwargs["options"]["num_predict"] == ollama_client.STRUCTURED_MAX_TOKENS
+    assert second.kwargs["messages"] == []
+
+
+def test_an_empty_reply_after_reasoning_is_asked_for_again_without_it(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.side_effect = [_reply(""), _reply('{"summary": "ok"}')]
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    assert client.chat_structured("fake-precise", [], Extraction).summary == "ok"
+    assert inner.chat.call_args.kwargs["think"] is False
+
+
+def test_dropping_the_reasoning_still_leaves_the_usual_retry(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.side_effect = [
+        _reply("", "length"), _reply("not json"), _reply('{"summary": "ok"}'),
+    ]
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    assert client.chat_structured("fake-precise", [], Extraction).summary == "ok"
+    assert inner.chat.call_count == 3
+    inner.chat.side_effect = [_reply("", "length"), _reply("no"), _reply("still no")]
+    with pytest.raises(StructuredOutputError):
+        client.chat_structured("fake-precise", [{"role": "user", "content": "again"}], Extraction)
+    assert inner.chat.call_count == 6
+
+
+def test_a_reply_cut_off_without_reasoning_gets_the_usual_retry(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.side_effect = [_reply('{"summ', "length"), _reply('{"summary": "ok"}')]
+    client = _client(tmp_path, monkeypatch, inner)
+    assert client.chat_structured("fake-fast", [], Extraction).summary == "ok"
+    assert inner.chat.call_args.kwargs["think"] is False
+    assert inner.chat.call_args.kwargs["messages"][-2]["content"] == '{"summ'
+
+
+def test_a_thinking_model_gets_room_in_the_window_to_think(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.return_value = _reply("ok")
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    client.chat("fake-precise", _long(6_000))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 8192
+    client.chat("fake-fast", _long(6_000))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 8192
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=False)
+    client.chat("fake-precise", _long(6_000))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == ollama_client.DEFAULT_NUM_CTX
 
 
 def _long(chars: int) -> list[dict[str, str]]:
@@ -191,6 +267,7 @@ def test_prompts_that_fit_still_say_which_window_they_want(tmp_path, monkeypatch
     # Ollama's own default can be set as high as 256k tokens, which is a lot of
     # memory for a prompt this size
     inner = MagicMock()
+    inner.show.return_value.capabilities = ["completion"]
     inner.chat.return_value = _reply("ok")
     _client(tmp_path, monkeypatch, inner).chat("m", _long(6_000))
     assert inner.chat.call_args.kwargs["options"]["num_ctx"] == ollama_client.DEFAULT_NUM_CTX
