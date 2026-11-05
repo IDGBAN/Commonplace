@@ -216,6 +216,20 @@ def test_json_lost_to_reasoning_is_asked_for_again_without_it(tmp_path, monkeypa
     assert second.kwargs["messages"] == []
 
 
+def test_a_call_can_turn_thinking_off_for_itself(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.return_value = _reply('{"summary": "ok"}')
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    client.chat_structured("fake-precise", [], Extraction, think=False)
+    sent = inner.chat.call_args.kwargs
+    assert sent["think"] is False
+    assert sent["options"]["num_predict"] == ollama_client.STRUCTURED_MAX_TOKENS
+    # kept apart in the memo from the same call with thinking on
+    client.chat_structured("fake-precise", [], Extraction)
+    assert inner.chat.call_args.kwargs["think"] is True
+    assert inner.chat.call_count == 2
+
+
 def test_once_reasoning_runs_out_the_same_task_skips_it_for_the_rest_of_the_run(
     tmp_path, monkeypatch
 ):

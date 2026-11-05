@@ -410,12 +410,15 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         memo_key: object = None,
         reply_tokens: int | None = None,
+        think: bool | None = None,
     ) -> T:
         """`memo_key` stands in for the messages when the memo is checked, for
         callers whose prompt carries something that shouldn't count.
         `reply_tokens` replaces STRUCTURED_MAX_TOKENS for a schema whose
-        answer runs long."""
-        think = self._think(model)
+        answer runs long. `think`, when given, overrides the model's
+        *_model_think setting for this call."""
+        if think is None:
+            think = self._think(model)
         json_schema = _require_every_field(schema)
         key = None
         if self._memo is not None:

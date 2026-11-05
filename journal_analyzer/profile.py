@@ -3,8 +3,9 @@
 Two steps. The fast model reads entries a few at a time and pulls out lasting
 facts about the writer (names, likes, habits, traits and so on), each kept
 with the date of its entry. The precise model then folds new facts into the
-profile, later facts winning when they disagree. A note the writer keeps
-about themselves, if config names one, overrides anything inferred.
+profile, without thinking first, later facts winning when they disagree. A
+note the writer keeps about themselves, if config names one, overrides
+anything inferred.
 
 The profile goes to the steps that write for the person: answers, digests,
 insights and writing prompts. The question router and follow-up rewriting
@@ -52,6 +53,10 @@ PROFILE_SECTIONS = 9
 WORDS_PER_SENTENCE = 12
 # a profile this far over max_words anyway gets one pass that only shortens it
 SHORTEN_OVER = 1.25
+# Rewriting the profile doesn't think, whatever precise_model_think says. On a
+# CPU a 27B model thought through all the room it had on one rewrite without
+# getting to the profile, half an hour for nothing.
+REWRITE_THINKS = False
 ME_NOTE_CHARS = 6000
 
 Category = Literal[
@@ -308,6 +313,7 @@ def _shorten(config: Config, conn: sqlite3.Connection, client: OllamaClient, tex
         ],
         schema=ShortProfile,
         reply_tokens=_reply_tokens(config),
+        think=REWRITE_THINKS,
     )
     shorter = reply.profile.strip()
     kept = shorter if shorter and len(shorter.split()) < len(text.split()) else text
@@ -370,6 +376,7 @@ def update(
             ],
             schema=ProfileDigest,
             reply_tokens=_reply_tokens(config),
+            think=REWRITE_THINKS,
         )
         so_far = digest.profile.strip() or so_far
         names_so_far = digest.names.strip() or names_so_far

@@ -61,6 +61,8 @@ def test_scan_reads_entries_in_batches_and_keeps_facts_with_their_day(conn, conf
     assert profile.pending_entries(conn) == []  # the empty entry is never read
     # a batch can list more facts than an extraction has fields
     assert fake_client.reply_tokens["ScannedFacts"] == profile.SCAN_REPLY_TOKENS
+    # the scan is the fast model's, so its own setting decides
+    assert fake_client.think["ScannedFacts"] is None
 
 
 def test_scan_drops_facts_for_days_not_in_the_batch_and_repeats(conn, config, fake_client):
@@ -99,6 +101,7 @@ def test_update_folds_new_facts_into_the_profile(conn, config, fake_client):
     assert profile.update(config, conn, fake_client)
     [(model, messages)] = seen
     assert model == config.ollama.precise_model
+    assert fake_client.think["ProfileDigest"] is False
     assert f"at most {config.profile.max_words // 108} short sentences" in messages[0]["content"]
     assert "Profile so far:\n(none yet)" in messages[-1]["content"]
     assert "- 2024-01-01 [preferences] I drink tea." in messages[-1]["content"]
@@ -149,6 +152,25 @@ def test_a_profile_over_its_word_limit_still_fits_in_the_reply(conn, config, fak
     assert profile.current(conn).text == long_profile
 
 
+def test_the_profile_is_written_without_thinking_even_when_answers_think(
+    conn, config, fake_client, monkeypatch
+):
+    _entries(conn)
+    fake_client.structured["ScannedFacts"] = _facts_for(("Tea", "preferences", "I drink tea."))
+    profile.scan(config, conn, fake_client, profile.pending_entries(conn))
+    config.ollama.precise_model_think = True
+    inner = MagicMock()
+    inner.chat.return_value = {
+        "message": {"content": ProfileDigest(names="Al.", profile="I drink tea.").model_dump_json()},
+    }
+    monkeypatch.setattr(ollama, "Client", lambda **kwargs: inner)
+    assert profile.update(config, conn, OllamaClient(config))
+    sent = inner.chat.call_args.kwargs
+    assert sent["think"] is False
+    # no room kept for reasoning that won't happen
+    assert sent["options"]["num_predict"] == profile._reply_tokens(config)
+
+
 def _words(n: int, word: str = "walked") -> str:
     return " ".join([word] * n)
 
@@ -173,6 +195,7 @@ def test_a_profile_that_runs_long_is_shortened_after_the_fold(conn, config, fake
     assert profile.update(config, conn, fake_client)
     [(model, messages)] = sent
     assert model == config.ollama.precise_model
+    assert fake_client.think["ShortProfile"] is False
     # models don't count words, but they do keep to a number of sentences
     assert "at most 2 short sentences" in messages[0]["content"] and messages[-1]["content"] == _words(200)
     found = profile.current(conn)

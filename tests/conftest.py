@@ -55,6 +55,8 @@ class FakeOllamaClient:
         self.structured_calls: list[tuple[str, str]] = []
         # the reply_tokens each schema was last asked for with
         self.reply_tokens: dict[str, int | None] = {}
+        # and the think override, None when the call left it to the config
+        self.think: dict[str, bool | None] = {}
         self.embed_calls: list[str] = []
         self.embed_options: list[dict | None] = []
         self.context_lengths: dict[str, int] = {}
@@ -77,9 +79,10 @@ class FakeOllamaClient:
         return full
 
     def chat_structured(self, model, messages, schema: type[BaseModel], options=None, memo_key=None,
-                        reply_tokens=None):
+                        reply_tokens=None, think=None):
         self.structured_calls.append((model, schema.__name__))
         self.reply_tokens[schema.__name__] = reply_tokens
+        self.think[schema.__name__] = think
         source = self.structured[schema.__name__]
         result = source(model, messages) if callable(source) else source
         assert isinstance(result, schema)
