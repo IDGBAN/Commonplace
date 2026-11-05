@@ -26,6 +26,8 @@ frontmatter_mood_max = 10
 host = "http://localhost:11434"
 fast_model = "llama3.2:3b"
 precise_model = "qwen3:14b"
+# Thinking before answering. On a CPU it makes every precise-model call
+# (answers, digests, the profile) several times slower.
 fast_model_think = false
 precise_model_think = true
 # The fast model always gets this window, so Ollama loads it once at that size
