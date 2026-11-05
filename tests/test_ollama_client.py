@@ -283,6 +283,31 @@ def test_a_long_prompt_gets_a_window_it_fits_in(tmp_path, monkeypatch):
     assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 32768
 
 
+def test_a_window_only_grows_within_a_run(tmp_path, monkeypatch):
+    # Ollama reloads the model for every new window size
+    inner = MagicMock()
+    inner.show.return_value.capabilities = ["completion"]
+    inner.chat.return_value = _reply("ok")
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat("m", _long(30_000))
+    client.chat("m", _long(100))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 16384
+    client.chat("fake-fast", _long(100))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == 8192
+    fresh = _client(tmp_path, monkeypatch, inner)
+    fresh.chat("m", _long(101))
+    assert inner.chat.call_args.kwargs["options"]["num_ctx"] == ollama_client.DEFAULT_NUM_CTX
+
+
+def test_asking_again_without_thinking_keeps_the_loaded_window(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.side_effect = [_reply("", "length"), _reply('{"summary": "ok"}')]
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    client.chat_structured("fake-precise", _long(6_000), Extraction)
+    first, second = (c.kwargs["options"]["num_ctx"] for c in inner.chat.call_args_list)
+    assert first == second == 8192
+
+
 def test_an_explicit_window_is_kept(tmp_path, monkeypatch):
     inner = MagicMock()
     inner.chat.return_value = _reply("ok")

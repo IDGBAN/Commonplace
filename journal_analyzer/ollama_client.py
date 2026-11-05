@@ -196,6 +196,8 @@ class OllamaClient:
         )
         self._shown: dict[str, Any] = {}
         self._can_think: dict[str, bool] = {}
+        # the biggest window each model has been sent by this client
+        self._windows: dict[str, int] = {}
         self._memo = memo.open_for(config)
         self._weights: dict[str, str] | None = None
 
@@ -262,8 +264,20 @@ class OllamaClient:
                 raise self._rejected(model, exc) from exc
         raise AssertionError("unreachable")
 
-    def _fixed_ctx(self, model: str) -> int:
-        return fixed_window(self._config, model)
+    def _sized(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict[str, Any] | None,
+        reply_tokens: int,
+    ) -> dict[str, Any]:
+        # Ollama reloads a model whenever its window changes, which on a CPU
+        # takes from half a minute to several, and a reload also throws away
+        # the prompt it has already read. So a window only grows in a run.
+        smallest = max(fixed_window(self._config, model), self._windows.get(model, 0))
+        opts = _options(messages, options, smallest, reply_tokens)
+        self._windows[model] = max(smallest, int(opts["num_ctx"]))
+        return opts
 
     def window(self, model: str) -> int:
         return context_window(self._config, model)
@@ -303,9 +317,8 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
     ) -> str:
         think = self._think(model)
-        opts = _options(
-            messages, options, self._fixed_ctx(model),
-            _reply_room(REPLY_TOKENS, self._thinking(model, think)),
+        opts = self._sized(
+            model, messages, options, _reply_room(REPLY_TOKENS, self._thinking(model, think))
         )
         key = None
         # only replies that come out the same every time are worth keeping
@@ -340,9 +353,8 @@ class OllamaClient:
     ) -> str:
         """Like chat, handing each piece of the reply to on_text as it arrives."""
         think = self._think(model)
-        opts = _options(
-            messages, options, self._fixed_ctx(model),
-            _reply_room(REPLY_TOKENS, self._thinking(model, think)),
+        opts = self._sized(
+            model, messages, options, _reply_room(REPLY_TOKENS, self._thinking(model, think))
         )
         parts: list[str] = []
         visible = ThinkFilter()
@@ -440,7 +452,7 @@ class OllamaClient:
         while True:
             room = _reply_room(reply_tokens, thinking)
             # per attempt, since the retry also carries the bad reply
-            opts = _options(convo, options, self._fixed_ctx(model), max(REPLY_TOKENS, room))
+            opts = self._sized(model, convo, options, max(REPLY_TOKENS, room))
             opts.setdefault("num_predict", room)
             response = self._call(
                 model,
@@ -489,9 +501,8 @@ class OllamaClient:
         """What a vision model says about one image. Kept in the memo by the image's bytes."""
         messages = [{"role": "user", "content": prompt}]
         think = self._think(model)
-        opts = _options(
-            messages, None, self._fixed_ctx(model),
-            _reply_room(REPLY_TOKENS, self._thinking(model, think)),
+        opts = self._sized(
+            model, messages, None, _reply_room(REPLY_TOKENS, self._thinking(model, think))
         )
         key = None
         if self._memo is not None:
