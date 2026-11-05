@@ -198,6 +198,8 @@ class OllamaClient:
         self._can_think: dict[str, bool] = {}
         # the biggest window each model has been sent by this client
         self._windows: dict[str, int] = {}
+        # (model, schema) pairs that ran out of room while thinking
+        self._overthought: set[tuple[str, str]] = set()
         self._memo = memo.open_for(config)
         self._weights: dict[str, str] | None = None
 
@@ -448,6 +450,11 @@ class OllamaClient:
     ) -> T:
         convo = list(messages)
         thinking = self._thinking(model, think)
+        # calls for one schema in a run are the same task (a profile rebuild
+        # makes one per chunk), and a model that thought past its room on one
+        # will on the next, so those go straight to answering
+        if thinking and (model, schema.__name__) in self._overthought:
+            thinking, think = False, False
         retried = False
         while True:
             room = _reply_room(reply_tokens, thinking)
@@ -474,8 +481,8 @@ class OllamaClient:
             if thinking and (not content or response.get("done_reason") == "length"):
                 # it ran out of room while thinking, so there's no JSON to
                 # correct, and the same request would only do it again
-                thinking = False
-                think = False
+                self._overthought.add((model, schema.__name__))
+                thinking, think = False, False
                 continue
             if retried:
                 break

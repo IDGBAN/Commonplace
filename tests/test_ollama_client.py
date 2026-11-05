@@ -12,6 +12,7 @@ from journal_analyzer.models import (
     OllamaUnavailableError,
     StructuredOutputError,
 )
+from journal_analyzer.themes import ThemeName
 
 
 def _client(tmp_path, monkeypatch, inner):
@@ -215,6 +216,24 @@ def test_json_lost_to_reasoning_is_asked_for_again_without_it(tmp_path, monkeypa
     assert second.kwargs["messages"] == []
 
 
+def test_once_reasoning_runs_out_the_same_task_skips_it_for_the_rest_of_the_run(
+    tmp_path, monkeypatch
+):
+    inner = MagicMock()
+    inner.chat.side_effect = [
+        _reply("", "length"), _reply('{"summary": "one"}'), _reply('{"summary": "two"}'),
+        _reply('{"name": "x", "about": "y"}'),
+    ]
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    client.chat_structured("fake-precise", [{"role": "user", "content": "1"}], Extraction)
+    assert client.chat_structured(
+        "fake-precise", [{"role": "user", "content": "2"}], Extraction
+    ).summary == "two"
+    assert [c.kwargs["think"] for c in inner.chat.call_args_list] == [True, False, False]
+    client.chat_structured("fake-precise", [], ThemeName)
+    assert inner.chat.call_args.kwargs["think"] is True
+
+
 def test_an_empty_reply_after_reasoning_is_asked_for_again_without_it(tmp_path, monkeypatch):
     inner = MagicMock()
     inner.chat.side_effect = [_reply(""), _reply('{"summary": "ok"}')]
@@ -232,8 +251,9 @@ def test_dropping_the_reasoning_still_leaves_the_usual_retry(tmp_path, monkeypat
     assert client.chat_structured("fake-precise", [], Extraction).summary == "ok"
     assert inner.chat.call_count == 3
     inner.chat.side_effect = [_reply("", "length"), _reply("no"), _reply("still no")]
+    fresh = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
     with pytest.raises(StructuredOutputError):
-        client.chat_structured("fake-precise", [{"role": "user", "content": "again"}], Extraction)
+        fresh.chat_structured("fake-precise", [{"role": "user", "content": "again"}], Extraction)
     assert inner.chat.call_count == 6
 
 
