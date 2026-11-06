@@ -5,6 +5,7 @@ import hashlib
 import itertools
 import json
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator
 from functools import partial
@@ -53,6 +54,8 @@ REPLY_TOKENS = 1024
 CHARS_PER_TOKEN_ESTIMATE = 3
 # role markers etc.
 MESSAGE_OVERHEAD_TOKENS = 8
+# how often a streamed call asks Ollama whether the model has finished loading
+LOAD_POLL_SECONDS = 2.0
 
 _CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError)
 # qwen3 and similar models leave their <think> block in the content
@@ -68,7 +71,8 @@ def strip_thinking(text: str) -> str:
 
 
 class ThinkFilter:
-    """Drops <think>...</think> from text that arrives a piece at a time."""
+    """Drops <think>...</think> from text that arrives a piece at a time,
+    keeping what it dropped for take_hidden()."""
 
     _OPEN = "<think>"
     _CLOSE = "</think>"
@@ -76,6 +80,16 @@ class ThinkFilter:
     def __init__(self) -> None:
         self._buffer = ""
         self._inside = False
+        self._hidden: list[str] = []
+
+    @property
+    def inside(self) -> bool:
+        return self._inside
+
+    def take_hidden(self) -> str:
+        hidden = "".join(self._hidden)
+        self._hidden = []
+        return hidden
 
     @staticmethod
     def _partial_tag(text: str, tag: str) -> int:
@@ -95,8 +109,10 @@ class ThinkFilter:
                 end = lowered.find(self._CLOSE)
                 if end == -1:
                     keep = self._partial_tag(self._buffer, self._CLOSE)
+                    self._hidden.append(self._buffer[: len(self._buffer) - keep])
                     self._buffer = self._buffer[len(self._buffer) - keep:] if keep else ""
                     break
+                self._hidden.append(self._buffer[:end])
                 self._buffer = self._buffer[end + len(self._CLOSE):].lstrip()
                 self._inside = False
                 continue
@@ -352,20 +368,38 @@ class OllamaClient:
         messages: list[dict[str, str]],
         on_text: Callable[[str], None],
         options: dict[str, Any] | None = None,
+        on_phase: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> str:
-        """Like chat, handing each piece of the reply to on_text as it arrives."""
+        """Like chat, handing each piece of the reply to on_text as it arrives.
+
+        on_phase hears "loading" or "reading" before the reply starts (Ollama
+        loading the model, then reading the prompt) and "thinking" when the
+        model starts reasoning. on_thinking gets that reasoning, which the
+        reply itself leaves out.
+        """
         think = self._think(model)
         opts = self._sized(
             model, messages, options, _reply_room(REPLY_TOKENS, self._thinking(model, think))
         )
+        phase = on_phase or (lambda _phase: None)
         parts: list[str] = []
         visible = ThinkFilter()
+        thought = False
         try:
-            stream = iter(self._first_chunk(model, messages, opts, think))
+            with self._until_it_starts(model, int(opts["num_ctx"]), phase):
+                stream = iter(self._first_chunk(model, messages, opts, think))
             for chunk in stream:
-                content = chunk["message"]["content"] or ""
+                message = chunk["message"]
+                content = message["content"] or ""
                 parts.append(content)
                 shown = visible.feed(content)
+                reasoning = (message.get("thinking") or "") + visible.take_hidden()
+                if (reasoning or visible.inside) and not thought:
+                    thought = True
+                    phase("thinking")
+                if reasoning and on_thinking:
+                    on_thinking(reasoning)
                 if shown:
                     on_text(shown)
         except (*_CONNECT_ERRORS, httpx.HTTPError) as exc:
@@ -376,6 +410,52 @@ class OllamaClient:
         if tail:
             on_text(tail)
         return strip_thinking("".join(parts))
+
+    @contextlib.contextmanager
+    def _until_it_starts(
+        self, model: str, window: int, on_phase: Callable[[str], None]
+    ) -> Iterator[None]:
+        """Says "loading" until Ollama has the model in memory at this window,
+        then "reading" until the reply starts."""
+        if self._loaded(model, window) is not False:
+            on_phase("reading")
+            yield
+            return
+        on_phase("loading")
+        started = threading.Event()
+
+        def watch() -> None:
+            while not started.wait(LOAD_POLL_SECONDS):
+                loaded = self._loaded(model, window)
+                if loaded is None:
+                    return
+                if loaded:
+                    on_phase("reading")
+                    return
+
+        watcher = threading.Thread(target=watch, daemon=True)
+        watcher.start()
+        try:
+            yield
+        finally:
+            started.set()
+            # so its last word can't land after the reply has started
+            watcher.join()
+
+    def _loaded(self, model: str, window: int) -> bool | None:
+        """Whether Ollama has the model loaded at this window, None if it can't say."""
+        try:
+            running = self._client.ps()
+        except (*_CONNECT_ERRORS, httpx.HTTPError, ollama.ResponseError):
+            return None
+        models = getattr(running, "models", None)
+        if not isinstance(models, list):
+            return None
+        for m in models:
+            if same_model(str(getattr(m, "model", "") or getattr(m, "name", "")), model):
+                size = getattr(m, "context_length", None)
+                return not isinstance(size, int) or size >= window
+        return False
 
     def _first_chunk(
         self,

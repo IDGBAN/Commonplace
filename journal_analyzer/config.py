@@ -68,6 +68,8 @@ class OllamaConfig(BaseModel):
     # not much benefit, so it's off for the fast model.
     fast_model_think: bool | None = False
     precise_model_think: bool | None = None
+    # print a thinking model's reasoning as it streams, before the answer
+    show_thinking: bool = False
     # A fixed window means Ollama loads the model once at that size instead
     # of reloading whenever a prompt needs more room. 0 means 4096, raised
     # only for prompts that need it.

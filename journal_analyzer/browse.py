@@ -952,6 +952,7 @@ class _Handler(BaseHTTPRequestHandler):
                         on_stage=lambda stage: send("stage", {"text": stage}),
                         since=since, until=until, only=only,
                         on_text=lambda text: send("text", {"text": text}),
+                        on_thinking=lambda text: send("thinking", {"text": text}),
                     )
                     asked = params.get("conversation", "")
                     kept = history.record(

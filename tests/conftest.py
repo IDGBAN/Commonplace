@@ -34,6 +34,8 @@ class FakeOllamaClient:
     # callables taking (model, messages)
     def __init__(self):
         self.chat_response = "canned answer"
+        # reasoning chat_stream hands to on_thinking before the reply, if any
+        self.thinking_response = ""
         self.structured: dict[str, object] = {
             "Extraction": Extraction(
                 mood_score=7.0,
@@ -70,10 +72,17 @@ class FakeOllamaClient:
             return self.chat_response(model, messages)
         return self.chat_response
 
-    def chat_stream(self, model, messages, on_text, options=None):
+    def chat_stream(self, model, messages, on_text, options=None, on_phase=None, on_thinking=None):
         # the same reply as chat, handed over a word at a time
         full = self.chat(model, messages, options)
         self.streamed_calls.append(model)
+        if on_phase:
+            on_phase("reading")
+        if self.thinking_response:
+            if on_phase:
+                on_phase("thinking")
+            if on_thinking:
+                on_thinking(self.thinking_response)
         for piece in re.findall(r"\s*\S+", full):
             on_text(piece)
         return full

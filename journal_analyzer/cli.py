@@ -483,17 +483,42 @@ def _source_link(label: str, path: str | None) -> Text:
 
 
 class _Streamed:
-    """Prints an answer as the model writes it, once the spinner is out of the way."""
+    """Prints an answer as the model writes it, once the spinner is out of the way,
+    and the model's reasoning before it when that's shown."""
 
     def __init__(self, status: Status):
         self.status = status
         self.started = False
+        self._thinking = False
 
     def __call__(self, text: str) -> None:
         if not self.started:
+            self._end_thinking()
             self.status.stop()
             self.started = True
         console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
+
+    def think(self, text: str) -> None:
+        if self.started:
+            return
+        if not self._thinking:
+            self.status.stop()
+            self._thinking = True
+        console.print(text, end="", style="dim italic", markup=False, highlight=False, soft_wrap=True)
+
+    def stage(self, text: str) -> None:
+        if self.started:
+            return
+        # a fast answer that thought and then gave up hands over to the precise model
+        if self._thinking and not text.startswith("Thinking"):
+            self._end_thinking()
+            self.status.start()
+        self.status.update(f"[dim]{escape(text)}[/dim]")
+
+    def _end_thinking(self) -> None:
+        if self._thinking:
+            console.print("\n")
+            self._thinking = False
 
 
 def _print_answer(
@@ -569,8 +594,10 @@ def ask(
         with _working("Thinking...") as status:
             stream = None if as_json else _Streamed(status)
             result = query.answer(
-                question, cfg, conn, OllamaClient(cfg), on_stage=_show_stage(status),
+                question, cfg, conn, OllamaClient(cfg),
+                on_stage=_show_stage(status) if stream is None else stream.stage,
                 since=date_from, until=date_to, only=only, on_text=stream,
+                on_thinking=stream.think if stream is not None else None,
             )
         kept = history.record(
             cfg, question, result, "ask", history.new_conversation(),
@@ -2293,8 +2320,9 @@ def _chat_loop(
                     question, turns, cfg, client, profile.names(conn, cfg)
                 )
                 result = query.answer(
-                    standalone, cfg, conn, client, on_stage=_show_stage(status),
+                    standalone, cfg, conn, client, on_stage=stream.stage,
                     since=since, until=until, only=only, on_text=stream,
+                    on_thinking=stream.think,
                 )
         except JournalError as exc:
             if stream is not None and stream.started:

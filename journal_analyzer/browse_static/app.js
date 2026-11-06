@@ -2057,8 +2057,15 @@ async function askQuestion(question) {
       throw new Error(data.error || `The question couldn't be asked (${response.status}).`);
     }
     await readEvents(response, (event, data) => {
-      if (event === "stage") turn.stage = data.text;
-      else if (event === "text") turn.partial = (turn.partial || "") + data.text;
+      if (event === "stage") {
+        turn.stage = data.text;
+        if (turn.thinking) turn.thinkingPaused = true;
+      } else if (event === "thinking") {
+        // a fast answer that thought and gave up, then the precise model's own
+        const gap = turn.thinkingPaused ? "\n\n" : "";
+        turn.thinking = (turn.thinking || "") + gap + data.text;
+        turn.thinkingPaused = false;
+      } else if (event === "text") turn.partial = (turn.partial || "") + data.text;
       else if (event === "rewritten") turn.rewritten = data.question;
       else if (event === "answer") Object.assign(turn, { status: "done", answer: data });
       else if (event === "problem") Object.assign(turn, { status: "failed", error: data.error });
@@ -2107,10 +2114,23 @@ function sourceChips(answer) {
         : h("span", { class: "chip ghost" }, n.title))));
 }
 
+// what a thinking model reasoned before answering, with [ollama] show_thinking on
+function thinkingView(turn) {
+  if (!turn.thinking) return null;
+  const open = turn.thinkingOpen ?? (turn.status === "running" && !turn.partial);
+  // a click on the summary, since toggle also fires when a redraw opens it
+  const remember = (e) => { turn.thinkingOpen = !e.currentTarget.parentElement.open; };
+  return h("details", { class: "turn-read turn-thinking", open },
+    h("summary", { onclick: remember },
+      turn.status === "running" && !turn.partial ? "Its thinking so far" : "Its thinking"),
+    h("div", { class: "turn-thinking-text" }, turn.thinking));
+}
+
 function turnView(turn, scale, index) {
   const parts = [h("p", { class: "turn-q" }, turn.question)];
   if (turn.scope) parts.push(h("p", { class: "turn-rewrite" }, `${turn.scope.label}.`));
   if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, turn.rewritten)));
+  if (turn.status !== "failed") parts.push(thinkingView(turn));
   if (turn.status === "running") {
     if (turn.partial) parts.push(h("div", { class: "turn-answer writing" }, turn.partial));
     parts.push(h("div", { class: "turn-running" },

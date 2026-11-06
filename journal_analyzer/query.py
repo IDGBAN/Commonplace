@@ -350,6 +350,10 @@ def _filter_facts(conn: sqlite3.Connection, only: store.EntryFilter | None) -> l
     return facts
 
 
+def _no_progress(_stage: str) -> None:
+    pass
+
+
 def _answer_aggregate(
     question: str,
     plan: QueryPlan,
@@ -360,6 +364,8 @@ def _answer_aggregate(
     only: store.EntryFilter | None = None,
     on_text: TextSink | None = None,
     writer: str = "",
+    on_stage: Callable[[str], None] = _no_progress,
+    on_thinking: TextSink | None = None,
 ) -> Answer:
     mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
     tag_rows = store.top_tags(
@@ -404,6 +410,8 @@ def _answer_aggregate(
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         on_text,
+        _phases(on_stage, "fast", "Putting the numbers into words..."),
+        on_thinking,
     ).strip()
     cited = [date.fromisoformat(d) for d in (lo, hi) if d]
     return _finalize(
@@ -900,10 +908,29 @@ def _chat(
     messages: list[dict[str, str]],
     options: dict[str, Any],
     on_text: TextSink | None,
+    on_phase: Callable[[str], None] | None = None,
+    on_thinking: TextSink | None = None,
 ) -> str:
     if on_text is None:
         return client.chat(model=model, messages=messages, options=options)
-    return client.chat_stream(model, messages, _TrimStart(on_text), options=options)
+    return client.chat_stream(
+        model, messages, _TrimStart(on_text), options=options,
+        on_phase=on_phase, on_thinking=on_thinking,
+    )
+
+
+def _phases(on_stage: Callable[[str], None], role: str, reading: str) -> Callable[[str], None]:
+    """Stage lines for a streamed call, so a long wait says what it's waiting on."""
+    said = {
+        "loading": f"Loading the {role} model into memory...",
+        "reading": reading,
+        "thinking": "Thinking before it answers...",
+    }
+    return lambda phase: on_stage(said[phase]) if phase in said else None
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
 
 
 def _fast_attempt(
@@ -913,6 +940,8 @@ def _fast_attempt(
     client: OllamaClient,
     on_text: TextSink | None = None,
     writer: str = "",
+    on_stage: Callable[[str], None] = _no_progress,
+    on_thinking: TextSink | None = None,
 ) -> str | None:
     hold = _HoldUntilAnswer(on_text) if on_text else None
     response = _chat(
@@ -937,6 +966,8 @@ def _fast_attempt(
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         hold,
+        _phases(on_stage, "fast", "Answering from summaries..."),
+        on_thinking,
     ).strip()
     if hold is not None:
         hold.finish(response)
@@ -955,6 +986,8 @@ def _precise_reanalysis(
     on_text: TextSink | None = None,
     conn: sqlite3.Connection | None = None,
     writer: str = "",
+    on_stage: Callable[[str], None] = _no_progress,
+    on_thinking: TextSink | None = None,
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     note_blocks: list[str] = []
     used_notes: list[sqlite3.Row] = []
@@ -1009,6 +1042,12 @@ def _precise_reanalysis(
         "\n\n(Note: some lower-ranked entries or notes were omitted to fit the "
         "context budget.)" if truncated else ""
     )
+    words = sum(len(block.split()) for block in note_blocks + entry_blocks)
+    read = _count(len(used), "entry", "entries")
+    if used_notes:
+        read += f" and {_count(len(used_notes), 'note', 'notes')}"
+    reading = f"Re-reading {read} in full, about {words:,} words..."
+    on_stage(reading)
     text = _chat(
         client,
         config.ollama.precise_model,
@@ -1033,14 +1072,12 @@ def _precise_reanalysis(
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         on_text,
+        _phases(on_stage, "precise", reading),
+        on_thinking,
     ).strip() + omitted
     if on_text and omitted:
         on_text(omitted)
     return text, [row for row, _ in used], used_notes
-
-
-def _no_progress(_stage: str) -> None:
-    pass
 
 
 def answer(
@@ -1054,11 +1091,15 @@ def answer(
     until: date | None = None,
     only: store.EntryFilter | None = None,
     on_text: TextSink | None = None,
+    on_thinking: TextSink | None = None,
 ) -> Answer:
     """`since`, `until` and `only` are what the person asked for, so they
     override whatever the router reads into the question. With `on_text`, the
-    answer is handed over piece by piece as the model writes it."""
+    answer is handed over piece by piece as the model writes it, and with
+    `on_thinking` so is the model's reasoning, if [ollama] show_thinking is on."""
     today = today or date.today()
+    if not config.ollama.show_thinking:
+        on_thinking = None
     writer = profile.context(conn, config)
     on_stage("Working out what you're asking...")
     plan = _plan(question, config, client, today, profile.names(conn, config))
@@ -1071,7 +1112,8 @@ def answer(
     if plan.intent == "aggregate":
         on_stage("Putting the numbers into words...")
         return _answer_aggregate(
-            question, plan, config, conn, client, named, only, on_text, writer
+            question, plan, config, conn, client, named, only, on_text, writer,
+            on_stage, on_thinking,
         )
 
     on_stage("Searching entries and notes...")
@@ -1100,7 +1142,9 @@ def answer(
     if not plan.needs_raw_text:
         on_stage("Answering from summaries...")
         context = _summary_context(candidates, notes, plan, config, conn, about, found_parts)
-        fast_answer = _fast_attempt(question, context, config, client, on_text, writer)
+        fast_answer = _fast_attempt(
+            question, context, config, client, on_text, writer, on_stage, on_thinking
+        )
         if fast_answer is not None:
             return _finalize(
                 fast_answer,
@@ -1113,13 +1157,14 @@ def answer(
                 quoted=quotes.for_days(candidates, wanted, found_parts),
             )
 
-    on_stage("Re-reading the full entries...")
     text, used, used_notes = _precise_reanalysis(
         question, candidates, notes, config, client,
         digests=_relationship_digests(conn, config, about),
         on_text=on_text,
         conn=conn,
         writer=writer,
+        on_stage=on_stage,
+        on_thinking=on_thinking,
     )
     return _finalize(
         text,

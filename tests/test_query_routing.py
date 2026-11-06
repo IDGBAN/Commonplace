@@ -275,12 +275,18 @@ def test_each_stage_is_announced_as_it_starts(conn, config, fake_client):
     )
     stages: list[str] = []
     query.answer("q", config, conn, fake_client, today=TODAY, on_stage=stages.append)
-    assert stages == [
+    assert stages[:3] == [
         "Working out what you're asking...",
         "Searching entries and notes...",
         "Answering from summaries...",
-        "Re-reading the full entries...",
     ]
+    # how much it's reading, since that's most of the wait
+    assert stages[3:] == ["Re-reading 1 entry in full, about 6 words..."]
+    stages.clear()
+    query.answer("q", config, conn, fake_client, today=TODAY, on_stage=stages.append,
+                 on_text=lambda _t: None)
+    # a streamed answer says so again as the call starts reading
+    assert stages[-2:] == ["Re-reading 1 entry in full, about 6 words..."] * 2
 
 
 def test_search_keywords_keep_words_that_start_with_an_accent():

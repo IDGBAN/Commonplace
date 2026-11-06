@@ -624,6 +624,12 @@ table.links td:first-child { white-space: nowrap; }
 .turn-read summary { cursor: pointer; color: var(--pencil); font-size: 0.9rem; width: fit-content; }
 .turn-read[open] summary { margin-bottom: 0.8rem; }
 .turn-read .note-grid { margin-bottom: 0.8rem; }
+.turn-thinking { margin: 0 0 0.8rem; }
+.turn-thinking-text {
+  font: italic 0.92rem/1.6 var(--read); color: var(--ink-soft); white-space: pre-wrap;
+  overflow-wrap: anywhere; max-width: var(--measure); max-height: 24rem; overflow-y: auto;
+  padding-left: 0.8rem; border-left: 2px solid var(--rule);
+}
 .turn-quotes { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.55rem; max-width: var(--measure); }
 .turn-quotes li { display: grid; grid-template-columns: 7.5rem 1fr; gap: 0.8rem; align-items: baseline; }
 .turn-quotes .line-date { color: var(--pencil); font-size: 0.86rem; white-space: nowrap; }
