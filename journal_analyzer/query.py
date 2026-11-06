@@ -25,6 +25,11 @@ from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
 console = Console(stderr=True)
 
 TOP_K = 8
+# shown when the model ends without writing anything
+NO_ANSWER = (
+    "The model stopped without writing an answer. Asking again usually works; if it "
+    "keeps happening, try precise_model_think = false in config.toml."
+)
 # roughly 24-32k tokens; the client raises num_ctx to fit
 MAX_RAW_CONTEXT_CHARS = 96_000
 # ranges wider than this also get month digests
@@ -277,7 +282,7 @@ def _finalize(
     notes = sorted(set(cited_notes), key=str.casefold)
     parts = {d: h for d, h in (cited_parts or {}).items() if h and date.fromisoformat(d) in dates}
     kept = {d: q for d, q in (quoted or {}).items() if date.fromisoformat(d) in dates}
-    body = text.rstrip()
+    body = text.rstrip() or NO_ANSWER
     links = [
         f"[[{d.isoformat()}#{parts[d.isoformat()]}]]" if d.isoformat() in parts else f"[[{d.isoformat()}]]"
         for d in dates
@@ -437,7 +442,9 @@ _RERANK_WARNED = False
 def _get_ranker(model_name: str) -> Any:
     if model_name not in _RANKER_CACHE:
         from flashrank import Ranker
-        _RANKER_CACHE[model_name] = Ranker(model_name=model_name)
+        # it calls logging.basicConfig at this level, and at INFO every
+        # request to Ollama gets logged over the answer
+        _RANKER_CACHE[model_name] = Ranker(model_name=model_name, log_level="WARNING")
     return _RANKER_CACHE[model_name]
 
 
@@ -898,7 +905,7 @@ class _HoldUntilAnswer:
         self._sink(self._held)
 
     def finish(self, full: str) -> None:
-        if self.passing is None and not _INSUFFICIENT_RE.match(full):
+        if self.passing is None and self._held.strip() and not _INSUFFICIENT_RE.match(full):
             self._sink(self._held)
 
 
@@ -925,6 +932,7 @@ def _phases(on_stage: Callable[[str], None], role: str, reading: str) -> Callabl
         "loading": f"Loading the {role} model into memory...",
         "reading": reading,
         "thinking": "Thinking before it answers...",
+        "answering": "Out of room to think, so answering without it...",
     }
     return lambda phase: on_stage(said[phase]) if phase in said else None
 
@@ -971,7 +979,8 @@ def _fast_attempt(
     ).strip()
     if hold is not None:
         hold.finish(response)
-    if _INSUFFICIENT_RE.match(response):
+    # nothing at all is no answer either, so the precise model gets a go
+    if not response or _INSUFFICIENT_RE.match(response):
         return None
     return response
 

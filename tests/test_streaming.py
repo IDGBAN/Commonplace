@@ -135,6 +135,79 @@ def test_a_model_loaded_at_a_smaller_window_still_has_to_load(tmp_path, monkeypa
     assert phases == ["reading"]
 
 
+def _thinking_client(tmp_path, monkeypatch, inner):
+    monkeypatch.setattr(ollama, "Client", lambda **kwargs: inner)
+    cfg = make_config(tmp_path)
+    cfg.ollama.precise_model_think = True
+    return ollama_client.OllamaClient(cfg)
+
+
+def test_thinking_past_its_room_is_stopped_and_answered_without(tmp_path, monkeypatch):
+    # the model would think until the window filled and never answer
+    monkeypatch.setattr(ollama_client, "THINK_TOKENS", 3)
+    closed = []
+
+    def overthinks():
+        try:
+            while True:
+                yield {"message": {"content": "", "thinking": "and yet "}}
+        finally:
+            closed.append(True)
+
+    inner = MagicMock()
+    inner.chat.side_effect = [overthinks(), _chunks("Short ", "answer.")]
+    client = _thinking_client(tmp_path, monkeypatch, inner)
+    phases, shown = [], []
+    reply = client.chat_stream("fake-precise", [], shown.append, on_phase=phases.append)
+    assert reply == "Short answer." and "".join(shown) == "Short answer."
+    assert closed == [True]  # the request was ended, so Ollama stops writing
+    first, second = inner.chat.call_args_list
+    assert (first.kwargs["think"], second.kwargs["think"]) == (True, False)
+    # same window, so Ollama keeps the model loaded and the prompt it already read
+    assert first.kwargs["options"]["num_ctx"] == second.kwargs["options"]["num_ctx"]
+    assert phases == ["reading", "thinking", "answering"]
+
+
+def test_thinking_that_ends_without_an_answer_is_asked_again_without_it(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.side_effect = [
+        iter([{"message": {"content": "", "thinking": "hmm"}}, {"message": {"content": "  "}}]),
+        _chunks("An answer."),
+    ]
+    client = _thinking_client(tmp_path, monkeypatch, inner)
+    assert client.chat_stream("fake-precise", [], lambda _t: None) == "An answer."
+    assert inner.chat.call_args.kwargs["think"] is False
+
+
+def test_thinking_within_its_room_is_left_alone(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.return_value = iter([
+        {"message": {"content": "", "thinking": "brief"}}, {"message": {"content": "Done."}},
+    ])
+    client = _thinking_client(tmp_path, monkeypatch, inner)
+    assert client.chat_stream("fake-precise", [], lambda _t: None) == "Done."
+    assert inner.chat.call_count == 1
+
+
+def test_an_empty_reply_from_a_model_that_did_not_think_is_not_asked_again(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.return_value = _chunks("")
+    client = _client(tmp_path, monkeypatch, inner)
+    assert client.chat_stream("fake-fast", [], lambda _t: None) == ""
+    assert inner.chat.call_count == 1
+
+
+def test_a_whole_reply_that_thought_and_said_nothing_is_asked_again(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.side_effect = [
+        {"message": {"content": "", "thinking": "on and on"}},
+        {"message": {"content": "The digest."}},
+    ]
+    client = _thinking_client(tmp_path, monkeypatch, inner)
+    assert client.chat("fake-precise", [{"role": "user", "content": "q"}]) == "The digest."
+    assert [c.kwargs["think"] for c in inner.chat.call_args_list] == [True, False]
+
+
 def test_chat_stream_retries_a_refused_connection(tmp_path, monkeypatch):
     def refused():
         raise httpx.ConnectError("restarting")
@@ -223,6 +296,21 @@ def test_ask_prints_reasoning_dimmed_before_the_answer():
     assert captured.get() == "Hmm, the fifteenth.\n\nYes, hiking.\n\nYou hiked."
     # the spinner comes back between a fast try that gave up and the precise one
     assert status.start.call_count == 1 and status.stop.call_count == 3
+
+
+def test_an_empty_answer_says_so_instead_of_printing_nothing(
+    tmp_path, config, conn, fake_client, monkeypatch
+):
+    add_entry(conn, date(2024, 1, 15), summary="Hiked", path="/vault/2024-01-15.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = ""
+    monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
+    result = invoke_cli(tmp_path, config, "ask", "When?")
+    assert result.exit_code == 0, result.output
+    assert query.NO_ANSWER.split()[0] in result.output
+    assert result.output.count("Sources:") == 1
+    # an empty fast answer is no answer, so the precise model got a go too
+    assert fake_client.streamed_calls == [config.ollama.fast_model, config.ollama.precise_model]
 
 
 def test_ask_prints_the_streamed_answer_once(tmp_path, config, conn, fake_client, monkeypatch):

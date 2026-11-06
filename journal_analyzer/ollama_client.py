@@ -186,6 +186,10 @@ def _options(
     return opts
 
 
+def _nothing() -> None:
+    pass
+
+
 def _reply_room(reply_tokens: int, thinking: bool) -> int:
     return reply_tokens + (THINK_TOKENS if thinking else 0)
 
@@ -347,6 +351,18 @@ class OllamaClient:
             kept = self._memo.get_text(key)
             if kept is not None:
                 return kept
+        text = self._chat_once(model, messages, opts, think)
+        if not text and self._thinking(model, think):
+            # it thought until the window was full and never answered; the
+            # prompt is still in Ollama's cache, so this only costs the answer
+            text = self._chat_once(model, messages, opts, False)
+        if key is not None and self._memo is not None and text:
+            self._memo.put_text(key, "chat", model, text)
+        return text
+
+    def _chat_once(
+        self, model: str, messages: list[dict[str, str]], opts: dict[str, Any], think: bool | None
+    ) -> str:
         response = self._call(
             model,
             partial(
@@ -357,10 +373,7 @@ class OllamaClient:
                 think=think,
             ),
         )
-        text = strip_thinking(response["message"]["content"])
-        if key is not None and self._memo is not None:
-            self._memo.put_text(key, "chat", model, text)
-        return text
+        return strip_thinking(response["message"]["content"] or "")
 
     def chat_stream(
         self,
@@ -376,40 +389,81 @@ class OllamaClient:
         on_phase hears "loading" or "reading" before the reply starts (Ollama
         loading the model, then reading the prompt) and "thinking" when the
         model starts reasoning. on_thinking gets that reasoning, which the
-        reply itself leaves out.
+        reply itself leaves out. A model still thinking after THINK_TOKENS is
+        stopped and asked again without thinking, and on_phase hears
+        "answering" when that happens.
         """
         think = self._think(model)
-        opts = self._sized(
-            model, messages, options, _reply_room(REPLY_TOKENS, self._thinking(model, think))
-        )
+        thinking = self._thinking(model, think)
+        opts = self._sized(model, messages, options, _reply_room(REPLY_TOKENS, thinking))
         phase = on_phase or (lambda _phase: None)
+        text, answered = self._stream_once(
+            model, messages, opts, think, on_text, phase, on_thinking,
+            THINK_TOKENS if thinking else None,
+        )
+        if answered or not thinking:
+            return text
+        # Thinking used up its room, or ended without an answer. The model is
+        # still loaded at this window with the prompt read, so asking again
+        # without thinking only costs the answer.
+        phase("answering")
+        text, _ = self._stream_once(
+            model, messages, opts, False, on_text,
+            lambda p: None if p == "reading" else phase(p), on_thinking, None,
+        )
+        return text
+
+    def _stream_once(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        opts: dict[str, Any],
+        think: bool | None,
+        on_text: Callable[[str], None],
+        phase: Callable[[str], None],
+        on_thinking: Callable[[str], None] | None,
+        think_budget: int | None,
+    ) -> tuple[str, bool]:
+        """The reply, and False if it was stopped for thinking past think_budget
+        or thought without answering."""
         parts: list[str] = []
         visible = ThinkFilter()
-        thought = False
+        thought = 0
+        shown_any = False
+        stop: Callable[[], None] = _nothing
         try:
             with self._until_it_starts(model, int(opts["num_ctx"]), phase):
-                stream = iter(self._first_chunk(model, messages, opts, think))
+                stream, stop = self._first_chunk(model, messages, opts, think)
             for chunk in stream:
                 message = chunk["message"]
                 content = message["content"] or ""
                 parts.append(content)
                 shown = visible.feed(content)
                 reasoning = (message.get("thinking") or "") + visible.take_hidden()
-                if (reasoning or visible.inside) and not thought:
-                    thought = True
-                    phase("thinking")
+                if (reasoning or visible.inside) and not shown_any:
+                    if not thought:
+                        phase("thinking")
+                    # a chunk is about a token
+                    thought += 1
+                    if think_budget is not None and thought > think_budget:
+                        stop()
+                        return "", False
                 if reasoning and on_thinking:
                     on_thinking(reasoning)
                 if shown:
+                    shown_any = shown_any or bool(shown.strip())
                     on_text(shown)
         except (*_CONNECT_ERRORS, httpx.HTTPError) as exc:
             raise self._unavailable(exc) from exc
         except ollama.ResponseError as exc:
             raise self._rejected(model, exc) from exc
+        finally:
+            stop()
         tail = visible.flush()
         if tail:
+            shown_any = shown_any or bool(tail.strip())
             on_text(tail)
-        return strip_thinking("".join(parts))
+        return strip_thinking("".join(parts)), shown_any or not thought
 
     @contextlib.contextmanager
     def _until_it_starts(
@@ -463,23 +517,27 @@ class OllamaClient:
         messages: list[dict[str, str]],
         opts: dict[str, Any],
         think: bool | None,
-    ) -> Iterator[Any]:
+    ) -> tuple[Iterator[Any], Callable[[], None]]:
+        """The chunks, and a function that ends the request early, which makes
+        Ollama stop writing."""
         # The request only goes out when the first chunk is read, so that's
         # where a connection refused during a restart shows up and gets retried.
         for attempt in range(MAX_CONNECT_ATTEMPTS):
             stream = self._client.chat(
                 model=model, messages=messages, options=opts, think=think, stream=True
             )
+            close = getattr(stream, "close", None)
+            stop: Callable[[], None] = close if callable(close) else _nothing
             try:
                 first = next(iter(stream))
             except StopIteration:
-                return iter(())
+                return iter(()), stop
             except _CONNECT_ERRORS:
                 if attempt == MAX_CONNECT_ATTEMPTS - 1:
                     raise
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
-            return itertools.chain([first], stream)
+            return itertools.chain([first], stream), stop
         raise AssertionError("unreachable")
 
     def chat_structured(
