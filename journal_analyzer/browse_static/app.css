@@ -614,6 +614,9 @@ table.links td:first-child { white-space: nowrap; }
 .turn-rewrite { margin: -0.3rem 0 0.7rem; color: var(--ink-faint); font-size: 0.88rem; }
 .turn-running { display: flex; align-items: center; gap: 1rem; }
 .turn-running .search-status { margin: 0; }
+.turn-running { flex-wrap: wrap; }
+.reading-bar { display: inline-flex; align-items: center; gap: 0.5rem; color: var(--ink-faint); font-size: 0.86rem; }
+.reading-bar progress { width: 8rem; height: 0.5rem; accent-color: var(--pencil); }
 .turn-answer { font: 1.06rem/1.65 var(--read); white-space: pre-wrap; overflow-wrap: anywhere; max-width: var(--measure); }
 .turn-answer.writing::after { content: "▍"; color: var(--pencil); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }

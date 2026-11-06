@@ -144,7 +144,6 @@ def _thinking_client(tmp_path, monkeypatch, inner):
 
 def test_thinking_past_its_room_is_stopped_and_answered_without(tmp_path, monkeypatch):
     # the model would think until the window filled and never answer
-    monkeypatch.setattr(ollama_client, "THINK_TOKENS", 3)
     closed = []
 
     def overthinks():
@@ -157,6 +156,7 @@ def test_thinking_past_its_room_is_stopped_and_answered_without(tmp_path, monkey
     inner = MagicMock()
     inner.chat.side_effect = [overthinks(), _chunks("Short ", "answer.")]
     client = _thinking_client(tmp_path, monkeypatch, inner)
+    client._config.ollama.think_tokens = 256
     phases, shown = [], []
     reply = client.chat_stream("fake-precise", [], shown.append, on_phase=phases.append)
     assert reply == "Short answer." and "".join(shown) == "Short answer."
@@ -206,6 +206,70 @@ def test_a_whole_reply_that_thought_and_said_nothing_is_asked_again(tmp_path, mo
     client = _thinking_client(tmp_path, monkeypatch, inner)
     assert client.chat("fake-precise", [{"role": "user", "content": "q"}]) == "The digest."
     assert [c.kwargs["think"] for c in inner.chat.call_args_list] == [True, False]
+
+
+def _done(prompt_tokens, seconds):
+    return {"message": {"content": ""}, "done": True,
+            "prompt_eval_count": prompt_tokens, "prompt_eval_duration": int(seconds * 1e9)}
+
+
+def test_reading_speed_is_learned_from_what_ollama_reports_and_kept(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.show.return_value.capabilities = ["completion"]
+    messages = [{"role": "user", "content": "x" * 4000}]
+    inner.chat.return_value = iter([{"message": {"content": "Hi"}}, _done(1000, 125)])
+    client = _client(tmp_path, monkeypatch, inner)
+    assert client.reading_seconds("m", messages) is None  # never timed
+    client.chat_stream("m", messages, lambda _t: None)
+    # 4 characters a token, 8 tokens a second
+    assert client.reading_seconds("m", messages) == pytest.approx(125)
+    # kept with the memo, so the next run starts out knowing
+    later = _client(tmp_path, monkeypatch, inner)
+    assert later.reading_seconds("m:latest", messages) == pytest.approx(125)
+
+
+def test_a_prompt_mostly_read_from_ollamas_cache_teaches_nothing_wrong(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.show.return_value.capabilities = ["completion"]
+    long = [{"role": "user", "content": "x" * 4000}]
+    inner.chat.return_value = iter([{"message": {"content": "Hi"}}, _done(1000, 125)])
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat_stream("m", long, lambda _t: None)
+    # a follow-up that only read its last few tokens
+    inner.chat.return_value = iter([{"message": {"content": "Hi"}}, _done(20, 1)])
+    client.chat_stream("m", [*long, {"role": "user", "content": "and?"}], lambda _t: None)
+    # 200 of 4004 characters a token would be the cache talking
+    inner.chat.return_value = iter([{"message": {"content": "Hi"}}, _done(200, 25)])
+    client.chat_stream("m", [*long, {"role": "user", "content": "more"}], lambda _t: None)
+    assert client._speed("m")[0] == pytest.approx(4.0)
+    assert client._speed("m")[1] == pytest.approx(8.0)
+
+
+def test_reading_is_timed_against_how_long_it_took_before(tmp_path, monkeypatch):
+    monkeypatch.setattr(ollama_client, "LOAD_POLL_SECONDS", 0.01)
+    inner = MagicMock()
+    inner.show.return_value.capabilities = ["completion"]
+    inner.ps.return_value = _running(("m", 4096))
+    client = _client(tmp_path, monkeypatch, inner)
+    client._speeds["m"] = (4.0, 8.0)
+    ticks = threading.Event()
+    seen = []
+
+    def reading(elapsed, estimate):
+        seen.append((elapsed, estimate))
+        if len(seen) >= 3:
+            ticks.set()
+
+    def reply():
+        ticks.wait(5)
+        yield {"message": {"content": "Hi"}}
+
+    inner.chat.return_value = reply()
+    client.chat_stream("m", [{"role": "user", "content": "x" * 800}], lambda _t: None,
+                       on_reading=reading)
+    assert len(seen) >= 3
+    assert all(estimate == pytest.approx(25) for _, estimate in seen)
+    assert seen[0][0] < seen[-1][0]
 
 
 def test_chat_stream_retries_a_refused_connection(tmp_path, monkeypatch):
@@ -311,6 +375,21 @@ def test_an_empty_answer_says_so_instead_of_printing_nothing(
     assert result.output.count("Sources:") == 1
     # an empty fast answer is no answer, so the precise model got a go too
     assert fake_client.streamed_calls == [config.ollama.fast_model, config.ollama.precise_model]
+
+
+def test_the_reading_bar_says_how_far_and_how_long():
+    stages = []
+    show = query._reading_bar(stages.append, "Re-reading 2 entries in full, about 900 words...")
+    show(150, 600)
+    show(30, 60)
+    show(700, 600)
+    assert stages[0] == (
+        "Re-reading 2 entries in full, about 900 words... \u2588\u2588\u2588"
+        + "\u2591" * 9 + " 25%, about 8 minutes left"
+    )
+    assert stages[1].endswith(" 50%, under a minute left")
+    # it never claims to be done before the answer starts
+    assert stages[2].endswith("99%, taking longer than last time")
 
 
 def test_ask_prints_the_streamed_answer_once(tmp_path, config, conn, fake_client, monkeypatch):

@@ -185,7 +185,7 @@ def test_json_replies_are_capped_with_room_for_reasoning_when_the_model_thinks(
     client.chat_structured("fake-precise", [], Extraction)
     options = inner.chat.call_args.kwargs["options"]
     assert options["num_predict"] == (
-        ollama_client.STRUCTURED_MAX_TOKENS + ollama_client.THINK_TOKENS
+        ollama_client.STRUCTURED_MAX_TOKENS + client._config.ollama.think_tokens
     )
 
 

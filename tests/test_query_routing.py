@@ -337,3 +337,40 @@ def test_aggregate_answers_read_no_entry_text(tmp_path, fake_client):
     assert result.stage_used == "aggregate"
     assert result.read_entry_ids == []
     assert result.body == "Your mood averaged 7."
+
+
+def _kept(*sizes):
+    return [({"id": i}, "x" * size) for i, size in enumerate(sizes)]
+
+
+def _prompt(notes, entries):
+    return [{"role": "user", "content": "".join(b for _, b in notes + entries)}]
+
+
+def test_room_to_think_comes_from_the_least_relevant_notes_first(fake_client):
+    fake_client.think_tokens = 2048
+    # 14,500 tokens, which fit a 16384 window with a reply but no thinking
+    notes, entries = _kept(30000, 3000, 3000), _kept(6000, 1500)
+    kept_notes, kept_entries = query._make_room(fake_client, "m", _prompt, notes, entries)
+    # the big note stays whole
+    assert [b for _, b in kept_notes] == ["x" * 30000]
+    assert len(kept_entries) == 2  # dropping the two small notes made enough room
+
+
+def test_entries_go_once_only_the_most_relevant_note_is_left(fake_client):
+    fake_client.think_tokens = 2048
+    notes, entries = _kept(30000, 600), _kept(6000, 3000, 3000)
+    kept_notes, kept_entries = query._make_room(fake_client, "m", _prompt, notes, entries)
+    assert len(kept_notes) == 1
+    assert len(kept_entries) == 2
+
+
+def test_nothing_is_left_out_when_the_window_has_to_grow_anyway(fake_client):
+    fake_client.think_tokens = 2048
+    notes, entries = _kept(9000, 300), _kept(9000)
+    assert query._make_room(fake_client, "m", _prompt, notes, entries) == (notes, entries)
+
+
+def test_a_model_that_will_not_think_keeps_everything(fake_client):
+    notes, entries = _kept(3000, 900, 900), _kept(3000, 1200)
+    assert query._make_room(fake_client, "m", _prompt, notes, entries) == (notes, entries)

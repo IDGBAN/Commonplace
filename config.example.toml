@@ -33,6 +33,9 @@ precise_model_think = true
 # Print what a thinking model reasons before its answer, in journal ask,
 # journal chat and the browser. It can run to pages, so it's off by default.
 show_thinking = false
+# How long a thinking model may think before an answer, in tokens (256 and up).
+# More can mean better answers; on a CPU, 1000 tokens is several minutes.
+think_tokens = 2048
 # The fast model always gets this window, so Ollama loads it once at that size
 # and there's room for the notes an entry links to. 0 means 4096, raised only
 # for prompts that need more; the context length set in the Ollama app isn't

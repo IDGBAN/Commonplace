@@ -38,11 +38,6 @@ RETRY_BACKOFF_SECONDS = 0.5
 # Real JSON replies are a few hundred tokens. One this long is a model stuck
 # in a loop.
 STRUCTURED_MAX_TOKENS = 1024
-# Reasoning counts against num_predict and the window just like the reply.
-# This is the room a thinking model gets for it. A JSON reply that's still
-# thinking when it runs out is asked for again without thinking, so this caps
-# how long a structured call can take.
-THINK_TOKENS = 2048
 
 # The window a prompt gets unless it needs more. It's always sent: Ollama's
 # own default is whatever its app's context length setting says, up to 256k,
@@ -54,8 +49,14 @@ REPLY_TOKENS = 1024
 CHARS_PER_TOKEN_ESTIMATE = 3
 # role markers etc.
 MESSAGE_OVERHEAD_TOKENS = 8
-# how often a streamed call asks Ollama whether the model has finished loading
-LOAD_POLL_SECONDS = 2.0
+# how often a streamed call checks whether the model has loaded and updates
+# its reading estimate
+LOAD_POLL_SECONDS = 1.0
+# Reading speed is learned from what Ollama reports after each call. A call
+# that read fewer tokens than this was mostly served from Ollama's cache.
+MIN_TOKENS_TO_LEARN = 64
+# what a prompt's characters per token is taken to be until it's measured
+DEFAULT_CHARS_PER_TOKEN = 3.5
 
 _CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError)
 # qwen3 and similar models leave their <think> block in the content
@@ -190,10 +191,6 @@ def _nothing() -> None:
     pass
 
 
-def _reply_room(reply_tokens: int, thinking: bool) -> int:
-    return reply_tokens + (THINK_TOKENS if thinking else 0)
-
-
 def _memo_options(opts: dict[str, Any]) -> dict[str, Any]:
     # the window only changes the reply when a prompt wouldn't fit, and then
     # it's raised to fit, so a different window setting still gives the same one
@@ -220,6 +217,8 @@ class OllamaClient:
         self._windows: dict[str, int] = {}
         # (model, schema) pairs that ran out of room while thinking
         self._overthought: set[tuple[str, str]] = set()
+        # model -> (chars per token, tokens read per second), learned as it goes
+        self._speeds: dict[str, tuple[float, float] | None] = {}
         self._memo = memo.open_for(config)
         self._weights: dict[str, str] | None = None
 
@@ -304,6 +303,59 @@ class OllamaClient:
     def window(self, model: str) -> int:
         return context_window(self._config, model)
 
+    def planned_window(self, model: str, tokens: int) -> int:
+        """The window a call needing this many tokens would get, without sending one."""
+        window = max(fixed_window(self._config, model), self._windows.get(model, 0))
+        window = window or DEFAULT_NUM_CTX
+        while window < tokens:
+            window *= 2
+        return window
+
+    def think_room(self, model: str) -> int:
+        """The tokens a call to this model keeps for thinking, 0 if it won't think."""
+        return self._config.ollama.think_tokens if self._thinking(model, self._think(model)) else 0
+
+    def _room(self, reply_tokens: int, thinking: bool) -> int:
+        return reply_tokens + (self._config.ollama.think_tokens if thinking else 0)
+
+    def _speed(self, model: str) -> tuple[float, float] | None:
+        name = _canonical_model(model)
+        if name not in self._speeds:
+            self._speeds[name] = self._memo.get_speed(name) if self._memo is not None else None
+        return self._speeds[name]
+
+    def _learn(self, model: str, messages: list[dict[str, str]], response: Any) -> None:
+        """Keeps how fast the model read this prompt, from what Ollama reported."""
+        get = getattr(response, "get", None)
+        if not callable(get):
+            return
+        count, nanos = get("prompt_eval_count"), get("prompt_eval_duration")
+        if not isinstance(count, int) or not isinstance(nanos, int):
+            return
+        if count < MIN_TOKENS_TO_LEARN or nanos <= 0:
+            return
+        rate = count / (nanos / 1e9)
+        ratio = sum(len(m.get("content", "")) for m in messages) / count
+        old = self._speed(model)
+        # a ratio outside this means much of the prompt came from Ollama's cache
+        per_token = ratio if 2 <= ratio <= 6 else None
+        if old is not None:
+            rate = (old[1] + rate) / 2
+            per_token = (old[0] + per_token) / 2 if per_token else old[0]
+        speed = (per_token or DEFAULT_CHARS_PER_TOKEN, rate)
+        name = _canonical_model(model)
+        self._speeds[name] = speed
+        if self._memo is not None:
+            self._memo.put_speed(name, *speed)
+
+    def reading_seconds(self, model: str, messages: list[dict[str, str]]) -> float | None:
+        """How long the model took to read this much text last time, if it's been timed."""
+        speed = self._speed(model)
+        if speed is None:
+            return None
+        chars = sum(len(m.get("content", "")) for m in messages)
+        return chars / speed[0] / speed[1]
+
     def _think(self, model: str) -> bool | None:
         roles = self._config.ollama
         if model == roles.fast_model:
@@ -340,7 +392,7 @@ class OllamaClient:
     ) -> str:
         think = self._think(model)
         opts = self._sized(
-            model, messages, options, _reply_room(REPLY_TOKENS, self._thinking(model, think))
+            model, messages, options, self._room(REPLY_TOKENS, self._thinking(model, think))
         )
         key = None
         # only replies that come out the same every time are worth keeping
@@ -373,6 +425,7 @@ class OllamaClient:
                 think=think,
             ),
         )
+        self._learn(model, messages, response)
         return strip_thinking(response["message"]["content"] or "")
 
     def chat_stream(
@@ -383,23 +436,26 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         on_phase: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
+        on_reading: Callable[[float, float], None] | None = None,
     ) -> str:
         """Like chat, handing each piece of the reply to on_text as it arrives.
 
         on_phase hears "loading" or "reading" before the reply starts (Ollama
         loading the model, then reading the prompt) and "thinking" when the
         model starts reasoning. on_thinking gets that reasoning, which the
-        reply itself leaves out. A model still thinking after THINK_TOKENS is
-        stopped and asked again without thinking, and on_phase hears
-        "answering" when that happens.
+        reply itself leaves out. A model still thinking after [ollama]
+        think_tokens is stopped and asked again without thinking, and on_phase
+        hears "answering" when that happens. While the model reads, on_reading
+        hears every second how long it has been reading and how long the same
+        amount took before, when this model has been timed.
         """
         think = self._think(model)
         thinking = self._thinking(model, think)
-        opts = self._sized(model, messages, options, _reply_room(REPLY_TOKENS, thinking))
+        opts = self._sized(model, messages, options, self._room(REPLY_TOKENS, thinking))
         phase = on_phase or (lambda _phase: None)
         text, answered = self._stream_once(
             model, messages, opts, think, on_text, phase, on_thinking,
-            THINK_TOKENS if thinking else None,
+            self._config.ollama.think_tokens if thinking else None, on_reading,
         )
         if answered or not thinking:
             return text
@@ -409,7 +465,7 @@ class OllamaClient:
         phase("answering")
         text, _ = self._stream_once(
             model, messages, opts, False, on_text,
-            lambda p: None if p == "reading" else phase(p), on_thinking, None,
+            lambda p: None if p == "reading" else phase(p), on_thinking, None, None,
         )
         return text
 
@@ -423,6 +479,7 @@ class OllamaClient:
         phase: Callable[[str], None],
         on_thinking: Callable[[str], None] | None,
         think_budget: int | None,
+        on_reading: Callable[[float, float], None] | None = None,
     ) -> tuple[str, bool]:
         """The reply, and False if it was stopped for thinking past think_budget
         or thought without answering."""
@@ -431,10 +488,12 @@ class OllamaClient:
         thought = 0
         shown_any = False
         stop: Callable[[], None] = _nothing
+        last: Any = None
         try:
-            with self._until_it_starts(model, int(opts["num_ctx"]), phase):
+            with self._until_it_starts(model, messages, int(opts["num_ctx"]), phase, on_reading):
                 stream, stop = self._first_chunk(model, messages, opts, think)
             for chunk in stream:
+                last = chunk
                 message = chunk["message"]
                 content = message["content"] or ""
                 parts.append(content)
@@ -459,6 +518,8 @@ class OllamaClient:
             raise self._rejected(model, exc) from exc
         finally:
             stop()
+        # the last chunk carries what Ollama counted
+        self._learn(model, messages, last)
         tail = visible.flush()
         if tail:
             shown_any = shown_any or bool(tail.strip())
@@ -467,25 +528,36 @@ class OllamaClient:
 
     @contextlib.contextmanager
     def _until_it_starts(
-        self, model: str, window: int, on_phase: Callable[[str], None]
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        window: int,
+        on_phase: Callable[[str], None],
+        on_reading: Callable[[float, float], None] | None = None,
     ) -> Iterator[None]:
         """Says "loading" until Ollama has the model in memory at this window,
-        then "reading" until the reply starts."""
-        if self._loaded(model, window) is not False:
-            on_phase("reading")
+        then "reading" until the reply starts, timing the reading for on_reading."""
+        estimate = self.reading_seconds(model, messages) if on_reading else None
+        loaded = self._loaded(model, window)
+        reading_since = None if loaded is False else time.monotonic()
+        on_phase("loading" if reading_since is None else "reading")
+        if reading_since is not None and estimate is None:
             yield
             return
-        on_phase("loading")
         started = threading.Event()
 
         def watch() -> None:
+            since = reading_since
             while not started.wait(LOAD_POLL_SECONDS):
-                loaded = self._loaded(model, window)
-                if loaded is None:
-                    return
-                if loaded:
+                if since is None:
+                    # None means Ollama can't say, so it's taken as loaded
+                    if self._loaded(model, window) is False:
+                        continue
+                    since = time.monotonic()
                     on_phase("reading")
+                if estimate is None or on_reading is None:
                     return
+                on_reading(time.monotonic() - since, estimate)
 
         watcher = threading.Thread(target=watch, daemon=True)
         watcher.start()
@@ -598,7 +670,7 @@ class OllamaClient:
             thinking, think = False, False
         retried = False
         while True:
-            room = _reply_room(reply_tokens, thinking)
+            room = self._room(reply_tokens, thinking)
             # per attempt, since the retry also carries the bad reply
             opts = self._sized(model, convo, options, max(REPLY_TOKENS, room))
             opts.setdefault("num_predict", room)
@@ -613,6 +685,7 @@ class OllamaClient:
                     think=think,
                 ),
             )
+            self._learn(model, convo, response)
             # some models put a think block before the JSON anyway
             content = strip_thinking(response["message"]["content"] or "")
             try:
@@ -650,7 +723,7 @@ class OllamaClient:
         messages = [{"role": "user", "content": prompt}]
         think = self._think(model)
         opts = self._sized(
-            model, messages, None, _reply_room(REPLY_TOKENS, self._thinking(model, think))
+            model, messages, None, self._room(REPLY_TOKENS, self._thinking(model, think))
         )
         key = None
         if self._memo is not None:

@@ -36,6 +36,9 @@ class FakeOllamaClient:
         self.chat_response = "canned answer"
         # reasoning chat_stream hands to on_thinking before the reply, if any
         self.thinking_response = ""
+        # what think_room reports, and the elapsed/estimate pairs on_reading gets
+        self.think_tokens = 0
+        self.reading_ticks: list[tuple[float, float]] = []
         self.structured: dict[str, object] = {
             "Extraction": Extraction(
                 mood_score=7.0,
@@ -72,12 +75,16 @@ class FakeOllamaClient:
             return self.chat_response(model, messages)
         return self.chat_response
 
-    def chat_stream(self, model, messages, on_text, options=None, on_phase=None, on_thinking=None):
+    def chat_stream(self, model, messages, on_text, options=None, on_phase=None, on_thinking=None,
+                    on_reading=None):
         # the same reply as chat, handed over a word at a time
         full = self.chat(model, messages, options)
         self.streamed_calls.append(model)
         if on_phase:
             on_phase("reading")
+        if on_reading:
+            for elapsed, estimate in self.reading_ticks:
+                on_reading(elapsed, estimate)
         if self.thinking_response:
             if on_phase:
                 on_phase("thinking")
@@ -114,6 +121,15 @@ class FakeOllamaClient:
 
     def context_length(self, model):
         return self.context_lengths.get(model)
+
+    def think_room(self, model):
+        return self.think_tokens
+
+    def planned_window(self, model, tokens):
+        window = 4096
+        while window < tokens:
+            window *= 2
+        return window
 
 
 def make_config(

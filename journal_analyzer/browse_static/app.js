@@ -2114,6 +2114,22 @@ function sourceChips(answer) {
         : h("span", { class: "chip ghost" }, n.title))));
 }
 
+// The server draws the reading estimate as a text bar ("... ███░░ 25%, about 3
+// minutes left"). Here it's a progress element next to the status, so screen
+// readers hear the stage once instead of every second.
+const READING_BAR = /^(.*?) [\u2588\u2591]+ (\d+)%, (.*)$/;
+
+function stageView(stage) {
+  const m = READING_BAR.exec(stage || "");
+  if (!m) return [h("p", { class: "search-status", role: "status" }, stage)];
+  return [
+    h("p", { class: "search-status", role: "status" }, m[1]),
+    h("span", { class: "reading-bar" },
+      h("progress", { max: 100, value: m[2], "aria-label": "Estimated reading progress" }),
+      ` ${m[2]}%, ${m[3]}`),
+  ];
+}
+
 // what a thinking model reasoned before answering, with [ollama] show_thinking on
 function thinkingView(turn) {
   if (!turn.thinking) return null;
@@ -2134,7 +2150,7 @@ function turnView(turn, scale, index) {
   if (turn.status === "running") {
     if (turn.partial) parts.push(h("div", { class: "turn-answer writing" }, turn.partial));
     parts.push(h("div", { class: "turn-running" },
-      h("p", { class: "search-status", role: "status" }, turn.partial ? "Writing…" : turn.stage),
+      ...stageView(turn.partial ? "Writing…" : turn.stage),
       h("button", { class: "button", type: "button", onclick: () => ask.controller?.abort() }, "Cancel")));
   } else if (turn.status === "failed") {
     parts.push(h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't answer"), h("span", {}, turn.error)));

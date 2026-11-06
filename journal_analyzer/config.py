@@ -70,6 +70,9 @@ class OllamaConfig(BaseModel):
     precise_model_think: bool | None = None
     # print a thinking model's reasoning as it streams, before the answer
     show_thinking: bool = False
+    # Tokens a thinking model may think for before an answer or a JSON reply.
+    # Past it the model is stopped and asked again without thinking.
+    think_tokens: int = Field(default=2048, ge=256)
     # A fixed window means Ollama loads the model once at that size instead
     # of reloading whenever a prompt needs more room. 0 means 4096, raised
     # only for prompts that need it.

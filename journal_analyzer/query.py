@@ -20,11 +20,13 @@ from rich.console import Console
 from . import context, db, embedder, parser, profile, quotes, store, themes
 from .config import Config
 from .models import Answer, AnswerStage, QueryPlan
-from .ollama_client import SYNTHESIS_TEMPERATURE, OllamaClient
+from .ollama_client import REPLY_TOKENS, SYNTHESIS_TEMPERATURE, OllamaClient, prompt_tokens
 
 console = Console(stderr=True)
 
 TOP_K = 8
+# characters in the reading bar
+PROGRESS_WIDTH = 12
 # shown when the model ends without writing anything
 NO_ANSWER = (
     "The model stopped without writing an answer. Asking again usually works; if it "
@@ -359,6 +361,37 @@ def _no_progress(_stage: str) -> None:
     pass
 
 
+Kept = list[tuple[sqlite3.Row, str]]
+
+
+def _make_room(
+    client: OllamaClient,
+    model: str,
+    prompt: Callable[[Kept, Kept], list[dict[str, str]]],
+    notes: Kept,
+    entries: Kept,
+) -> tuple[Kept, Kept]:
+    """Leaves out the least relevant notes, then the least relevant entries,
+    until the prompt leaves the model room to think in the window it would
+    get anyway. Thinking gets cut off when the window runs out, and a whole
+    note it can do without costs the answer less than that. The most relevant
+    note and entry always stay; when they alone don't leave room, nothing is
+    left out and the window grows instead."""
+    think = client.think_room(model)
+    if not think:
+        return notes, entries
+    window = client.planned_window(model, prompt_tokens(prompt(notes, entries)) + REPLY_TOKENS)
+    kept_notes, kept_entries = list(notes), list(entries)
+    while prompt_tokens(prompt(kept_notes, kept_entries)) + REPLY_TOKENS + think > window:
+        if len(kept_notes) > 1:
+            kept_notes.pop()
+        elif len(kept_entries) > 1:
+            kept_entries.pop()
+        else:
+            return notes, entries
+    return kept_notes, kept_entries
+
+
 def _answer_aggregate(
     question: str,
     plan: QueryPlan,
@@ -417,6 +450,7 @@ def _answer_aggregate(
         on_text,
         _phases(on_stage, "fast", "Putting the numbers into words..."),
         on_thinking,
+        _reading_bar(on_stage, "Putting the numbers into words..."),
     ).strip()
     cited = [date.fromisoformat(d) for d in (lo, hi) if d]
     return _finalize(
@@ -917,12 +951,13 @@ def _chat(
     on_text: TextSink | None,
     on_phase: Callable[[str], None] | None = None,
     on_thinking: TextSink | None = None,
+    on_reading: Callable[[float, float], None] | None = None,
 ) -> str:
     if on_text is None:
         return client.chat(model=model, messages=messages, options=options)
     return client.chat_stream(
         model, messages, _TrimStart(on_text), options=options,
-        on_phase=on_phase, on_thinking=on_thinking,
+        on_phase=on_phase, on_thinking=on_thinking, on_reading=on_reading,
     )
 
 
@@ -939,6 +974,27 @@ def _phases(on_stage: Callable[[str], None], role: str, reading: str) -> Callabl
 
 def _count(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
+
+
+def _time_left(seconds: float) -> str:
+    if seconds < 60:
+        return "under a minute left"
+    return f"about {_count(round(seconds / 60), 'minute', 'minutes')} left"
+
+
+def _reading_bar(on_stage: Callable[[str], None], reading: str) -> Callable[[float, float], None]:
+    """A stage line with how far through the reading it likely is, from how
+    long the same amount took before."""
+
+    def show(elapsed: float, estimate: float) -> None:
+        share = min(elapsed / estimate, 0.99) if estimate > 0 else 0.99
+        filled = round(share * PROGRESS_WIDTH)
+        bar = "\u2588" * filled + "\u2591" * (PROGRESS_WIDTH - filled)
+        left = estimate - elapsed
+        when = _time_left(left) if left > 0 else "taking longer than last time"
+        on_stage(f"{reading} {bar} {share:.0%}, {when}")
+
+    return show
 
 
 def _fast_attempt(
@@ -976,6 +1032,7 @@ def _fast_attempt(
         hold,
         _phases(on_stage, "fast", "Answering from summaries..."),
         on_thinking,
+        _reading_bar(on_stage, "Answering from summaries..."),
     ).strip()
     if hold is not None:
         hold.finish(response)
@@ -998,8 +1055,7 @@ def _precise_reanalysis(
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
-    note_blocks: list[str] = []
-    used_notes: list[sqlite3.Row] = []
+    ranked_notes: list[tuple[sqlite3.Row, str]] = []
     note_chars = 0
     vault = config.vault.path
     learned = _learned_names(conn, notes) if conn is not None else {}
@@ -1012,11 +1068,10 @@ def _precise_reanalysis(
             if row["id"] in learned else ""
         )
         block = f"### Note: {note.header()}{written}{history}\n{note.raw_text}".rstrip()
-        if note_blocks and note_chars + len(block) > MAX_NOTE_CONTEXT_CHARS:
+        if ranked_notes and note_chars + len(block) > MAX_NOTE_CONTEXT_CHARS:
             continue
         block = block[:MAX_NOTE_CONTEXT_CHARS]
-        note_blocks.append(block)
-        used_notes.append(row)
+        ranked_notes.append((row, block))
         note_chars += len(block)
 
     budget = MAX_RAW_CONTEXT_CHARS - note_chars
@@ -1041,18 +1096,47 @@ def _precise_reanalysis(
             continue
         used.append((row, heading))
         total += cost
-    truncated = len(used) < len(candidates) or len(used_notes) < len(notes)
-    entry_blocks = [
+    ranked_entries = [
         # the first entry always gets in, so it alone can be over budget
-        (heading + row["raw_text"] + photo_text.get(row["id"], ""))[:budget]
-        for row, heading in sorted(used, key=lambda pair: pair[0]["entry_date"])
+        (row, (heading + row["raw_text"] + photo_text.get(row["id"], ""))[:budget])
+        for row, heading in used
     ]
+    system = (
+        "You answer questions about a personal journal from the "
+        "full entry texts and reference notes provided. Reference "
+        "notes describe the people, places and topics the journal "
+        "links to, and carry no dates. Each one names the file it "
+        "comes from; folder and file names can say what it is "
+        "about. Base the answer strictly on this material; mention "
+        f"the dates or [[note names]] it draws on. {_READER_VOICE} "
+        f"If it does not answer the question, say so.{writer}"
+    )
+
+    def prompt(
+        kept_notes: list[tuple[sqlite3.Row, str]], kept_entries: list[tuple[sqlite3.Row, str]]
+    ) -> list[dict[str, str]]:
+        by_date = sorted(kept_entries, key=lambda pair: pair[0]["entry_date"])
+        blocks = [b for _, b in kept_notes] + [b for _, b in by_date]
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Question: {question}\n\n" + "\n\n".join(blocks)},
+        ]
+
+    kept_notes, kept_entries = _make_room(
+        client, config.ollama.precise_model, prompt, ranked_notes, ranked_entries
+    )
+    used_notes = [row for row, _ in kept_notes]
+    read_rows = [row for row, _ in kept_entries]
+    messages = prompt(kept_notes, kept_entries)
+    truncated = len(read_rows) < len(candidates) or len(used_notes) < len(notes)
+    entry_blocks = [b for _, b in kept_entries]
+    note_blocks = [b for _, b in kept_notes]
     omitted = (
         "\n\n(Note: some lower-ranked entries or notes were omitted to fit the "
         "context budget.)" if truncated else ""
     )
     words = sum(len(block.split()) for block in note_blocks + entry_blocks)
-    read = _count(len(used), "entry", "entries")
+    read = _count(len(read_rows), "entry", "entries")
     if used_notes:
         read += f" and {_count(len(used_notes), 'note', 'notes')}"
     reading = f"Re-reading {read} in full, about {words:,} words..."
@@ -1060,33 +1144,16 @@ def _precise_reanalysis(
     text = _chat(
         client,
         config.ollama.precise_model,
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You answer questions about a personal journal from the "
-                    "full entry texts and reference notes provided. Reference "
-                    "notes describe the people, places and topics the journal "
-                    "links to, and carry no dates. Each one names the file it "
-                    "comes from; folder and file names can say what it is "
-                    "about. Base the answer strictly on this material; mention "
-                    f"the dates or [[note names]] it draws on. {_READER_VOICE} "
-                    f"If it does not answer the question, say so.{writer}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Question: {question}\n\n" + "\n\n".join(note_blocks + entry_blocks),
-            },
-        ],
+        messages,
         {"temperature": SYNTHESIS_TEMPERATURE},
         on_text,
         _phases(on_stage, "precise", reading),
         on_thinking,
+        _reading_bar(on_stage, reading),
     ).strip() + omitted
     if on_text and omitted:
         on_text(omitted)
-    return text, [row for row, _ in used], used_notes
+    return text, read_rows, used_notes
 
 
 def answer(

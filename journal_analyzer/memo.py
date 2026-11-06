@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS memo (
   vector     BLOB,
   created_at TEXT NOT NULL
 );
+-- how fast each model reads a prompt on this machine, for progress estimates
+CREATE TABLE IF NOT EXISTS speeds (
+  model             TEXT PRIMARY KEY,
+  chars_per_token   REAL NOT NULL,
+  tokens_per_second REAL NOT NULL,
+  updated_at        TEXT NOT NULL
+);
 """
 
 
@@ -92,6 +99,27 @@ class Memo:
         values = array("d")
         values.frombytes(row[0])
         return list(values)
+
+    def get_speed(self, model: str) -> tuple[float, float] | None:
+        """(chars per token, tokens read per second) last measured for a model."""
+        conn = self._db()
+        if conn is None:
+            return None
+        row = conn.execute(
+            "SELECT chars_per_token, tokens_per_second FROM speeds WHERE model = ?", (model,)
+        ).fetchone()
+        return (float(row[0]), float(row[1])) if row else None
+
+    def put_speed(self, model: str, chars_per_token: float, tokens_per_second: float) -> None:
+        conn = self._db()
+        if conn is None:
+            return
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO speeds(model, chars_per_token, tokens_per_second, "
+                "updated_at) VALUES (?, ?, ?, ?)",
+                (model, chars_per_token, tokens_per_second, datetime.now(UTC).isoformat()),
+            )
 
     def put_vector(self, key: str, model: str, vector: list[float]) -> None:
         self._put(key, "embed", model, None, array("d", vector).tobytes())
