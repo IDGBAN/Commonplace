@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -19,7 +20,7 @@ from rich.console import Console
 
 from . import context, db, embedder, parser, profile, quotes, store, themes
 from .config import Config
-from .models import Answer, AnswerStage, QueryPlan
+from .models import Answer, AnswerStage, QueryPlan, Timing
 from .ollama_client import REPLY_TOKENS, SYNTHESIS_TEMPERATURE, OllamaClient, prompt_tokens
 
 console = Console(stderr=True)
@@ -361,6 +362,58 @@ def _no_progress(_stage: str) -> None:
     pass
 
 
+def duration(seconds: float) -> str:
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    whole = round(seconds)
+    if whole < 3600:
+        return f"{whole // 60}m {whole % 60:02d}s"
+    return f"{whole // 3600}h {whole % 3600 // 60:02d}m"
+
+
+def timing_line(timings: Sequence[Timing]) -> str:
+    """"Took 4m 10s: searching 1.2s, precise model reading 3m 02s, ...", or empty."""
+    if not timings:
+        return ""
+    total = sum(t.seconds for t in timings)
+    # steps too short to notice would only crowd the line
+    shown = [f"{t.step} {duration(t.seconds)}" for t in timings if t.seconds >= 0.5]
+    return f"Took {duration(total)}" + (": " + ", ".join(shown) if shown else "") + "."
+
+
+def with_step(answer: Answer, step: str, seconds: float) -> Answer:
+    """The answer with a step that came before it, like rewriting a follow-up."""
+    first = Timing(step=step, seconds=round(seconds, 2))
+    return answer.model_copy(update={"timings": [first, *answer.timings]})
+
+
+class _Clock:
+    """How long each step of an answer takes, one step at a time."""
+
+    def __init__(self) -> None:
+        self.steps: list[Timing] = []
+        self._step: str | None = None
+        self._since = 0.0
+
+    def start(self, step: str) -> None:
+        if step == self._step:
+            return
+        now = time.monotonic()
+        if self._step is not None:
+            self.steps.append(Timing(step=self._step, seconds=round(now - self._since, 2)))
+        self._step, self._since = step, now
+
+    def stop(self) -> list[Timing]:
+        if self._step is not None:
+            self.steps.append(
+                Timing(step=self._step, seconds=round(time.monotonic() - self._since, 2))
+            )
+            self._step = None
+        return self.steps
+
+
 Kept = list[tuple[sqlite3.Row, str]]
 
 
@@ -404,6 +457,7 @@ def _answer_aggregate(
     writer: str = "",
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
+    clock: _Clock | None = None,
 ) -> Answer:
     mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
     tag_rows = store.top_tags(
@@ -448,9 +502,11 @@ def _answer_aggregate(
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         on_text,
-        _phases(on_stage, "fast", "Putting the numbers into words..."),
+        _phases(on_stage, "fast", "Putting the numbers into words...", clock),
         on_thinking,
         _reading_bar(on_stage, "Putting the numbers into words..."),
+        clock,
+        "fast",
     ).strip()
     cited = [date.fromisoformat(d) for d in (lo, hi) if d]
     return _finalize(
@@ -952,24 +1008,52 @@ def _chat(
     on_phase: Callable[[str], None] | None = None,
     on_thinking: TextSink | None = None,
     on_reading: Callable[[float, float], None] | None = None,
+    clock: _Clock | None = None,
+    role: str = "",
 ) -> str:
     if on_text is None:
+        # a streamed call's phases split it into steps; this one is a single step
+        if clock is not None:
+            clock.start(f"{role} model")
         return client.chat(model=model, messages=messages, options=options)
+    sink = on_text
+
+    def written(text: str) -> None:
+        if clock is not None and text.strip():
+            clock.start(f"{role} model writing")
+        sink(text)
+
     return client.chat_stream(
-        model, messages, _TrimStart(on_text), options=options,
+        model, messages, _TrimStart(written), options=options,
         on_phase=on_phase, on_thinking=on_thinking, on_reading=on_reading,
     )
 
 
-def _phases(on_stage: Callable[[str], None], role: str, reading: str) -> Callable[[str], None]:
-    """Stage lines for a streamed call, so a long wait says what it's waiting on."""
+def _phases(
+    on_stage: Callable[[str], None], role: str, reading: str, clock: _Clock | None = None
+) -> Callable[[str], None]:
+    """Stage lines for a streamed call, so a long wait says what it's waiting on,
+    and the steps it times."""
     said = {
         "loading": f"Loading the {role} model into memory...",
         "reading": reading,
         "thinking": "Thinking before it answers...",
         "answering": "Out of room to think, so answering without it...",
     }
-    return lambda phase: on_stage(said[phase]) if phase in said else None
+    steps = {
+        "loading": f"loading the {role} model",
+        "reading": f"{role} model reading",
+        "thinking": f"{role} model thinking",
+        "answering": f"{role} model answering without thinking",
+    }
+
+    def phase(name: str) -> None:
+        if clock is not None and name in steps:
+            clock.start(steps[name])
+        if name in said:
+            on_stage(said[name])
+
+    return phase
 
 
 def _count(n: int, one: str, many: str) -> str:
@@ -1006,6 +1090,7 @@ def _fast_attempt(
     writer: str = "",
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
+    clock: _Clock | None = None,
 ) -> str | None:
     hold = _HoldUntilAnswer(on_text) if on_text else None
     response = _chat(
@@ -1030,9 +1115,11 @@ def _fast_attempt(
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         hold,
-        _phases(on_stage, "fast", "Answering from summaries..."),
+        _phases(on_stage, "fast", "Answering from summaries...", clock),
         on_thinking,
         _reading_bar(on_stage, "Answering from summaries..."),
+        clock,
+        "fast",
     ).strip()
     if hold is not None:
         hold.finish(response)
@@ -1054,6 +1141,7 @@ def _precise_reanalysis(
     writer: str = "",
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
+    clock: _Clock | None = None,
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     ranked_notes: list[tuple[sqlite3.Row, str]] = []
     note_chars = 0
@@ -1147,9 +1235,11 @@ def _precise_reanalysis(
         messages,
         {"temperature": SYNTHESIS_TEMPERATURE},
         on_text,
-        _phases(on_stage, "precise", reading),
+        _phases(on_stage, "precise", reading, clock),
         on_thinking,
         _reading_bar(on_stage, reading),
+        clock,
+        "precise",
     ).strip() + omitted
     if on_text and omitted:
         on_text(omitted)
@@ -1172,12 +1262,36 @@ def answer(
     """`since`, `until` and `only` are what the person asked for, so they
     override whatever the router reads into the question. With `on_text`, the
     answer is handed over piece by piece as the model writes it, and with
-    `on_thinking` so is the model's reasoning, if [ollama] show_thinking is on."""
+    `on_thinking` so is the model's reasoning, if [ollama] show_thinking is on.
+    The answer's timings say how long each step took."""
+    clock = _Clock()
+    result = _answer(
+        question, config, conn, client, today, on_stage, since, until, only, on_text,
+        on_thinking, clock,
+    )
+    return result.model_copy(update={"timings": clock.stop()})
+
+
+def _answer(
+    question: str,
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    today: date | None,
+    on_stage: Callable[[str], None],
+    since: date | None,
+    until: date | None,
+    only: store.EntryFilter | None,
+    on_text: TextSink | None,
+    on_thinking: TextSink | None,
+    clock: _Clock,
+) -> Answer:
     today = today or date.today()
     if not config.ollama.show_thinking:
         on_thinking = None
     writer = profile.context(conn, config)
     on_stage("Working out what you're asking...")
+    clock.start("working out the question")
     plan = _plan(question, config, client, today, profile.names(conn, config))
     if since is not None or until is not None:
         plan = plan.model_copy(update={"date_from": since, "date_to": until})
@@ -1189,10 +1303,11 @@ def answer(
         on_stage("Putting the numbers into words...")
         return _answer_aggregate(
             question, plan, config, conn, client, named, only, on_text, writer,
-            on_stage, on_thinking,
+            on_stage, on_thinking, clock,
         )
 
     on_stage("Searching entries and notes...")
+    clock.start("searching")
     about = _named_notes(conn, plan, named)
     query_vector = _embed_question(question, config, conn, client)
     found_parts: dict[int, sqlite3.Row] = {}
@@ -1219,7 +1334,7 @@ def answer(
         on_stage("Answering from summaries...")
         context = _summary_context(candidates, notes, plan, config, conn, about, found_parts)
         fast_answer = _fast_attempt(
-            question, context, config, client, on_text, writer, on_stage, on_thinking
+            question, context, config, client, on_text, writer, on_stage, on_thinking, clock
         )
         if fast_answer is not None:
             return _finalize(
@@ -1241,6 +1356,7 @@ def answer(
         writer=writer,
         on_stage=on_stage,
         on_thinking=on_thinking,
+        clock=clock,
     )
     return _finalize(
         text,

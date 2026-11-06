@@ -87,6 +87,13 @@ class QueryPlan(BaseModel):
         return self
 
 
+class Timing(BaseModel):
+    """One step of answering a question and how long it took."""
+
+    step: str
+    seconds: float
+
+
 class Answer(BaseModel):
     text: str  # with the Sources line
     cited_dates: list[date] = Field(default_factory=list)
@@ -100,6 +107,8 @@ class Answer(BaseModel):
     # what the model was given, best first
     read_entry_ids: list[int] = Field(default_factory=list)
     read_note_ids: list[int] = Field(default_factory=list)
+    # in the order they happened
+    timings: list[Timing] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _body_defaults_to_text(self) -> Answer:

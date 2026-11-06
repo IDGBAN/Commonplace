@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 import webbrowser
 from collections.abc import Callable
 from contextlib import closing
@@ -940,11 +941,14 @@ class _Handler(BaseHTTPRequestHandler):
                 with closing(db.connect_readonly(config)) as conn:
                     client = self.server.make_client(config)
                     standalone = question
+                    rewriting = 0.0
                     if turns:
                         send("stage", {"text": "Resolving your follow-up..."})
+                        started = time.monotonic()
                         standalone = query.contextualize_question(
                             question, turns, config, client, profile.names(conn, config)
                         )
+                        rewriting = time.monotonic() - started
                         if standalone != question:
                             send("rewritten", {"question": standalone})
                     result = query.answer(
@@ -954,6 +958,8 @@ class _Handler(BaseHTTPRequestHandler):
                         on_text=lambda text: send("text", {"text": text}),
                         on_thinking=lambda text: send("thinking", {"text": text}),
                     )
+                    if turns:
+                        result = query.with_step(result, "reading your follow-up", rewriting)
                     asked = params.get("conversation", "")
                     kept = history.record(
                         config, question, result, "browse",

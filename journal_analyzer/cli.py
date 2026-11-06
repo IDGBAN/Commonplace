@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, nullcontext, redirect_stdout
 from dataclasses import asdict
@@ -541,6 +542,9 @@ def _print_answer(
         console.print()
         console.print(Text(" ").join([Text("Sources:"), *links]))
     console.print(f"[dim]({stage_label}: {answer.stage_used})[/dim]")
+    took = query.timing_line(answer.timings)
+    if took:
+        console.print(f"[dim]{escape(took)}[/dim]")
 
 
 def _print_reading(conn: sqlite3.Connection, answer: Answer) -> None:
@@ -2199,6 +2203,9 @@ def history_cmd(
             console.print()
             console.print(escape(found.answer))
             console.print(f"[dim](answered by stage: {found.stage})[/dim]")
+            took = query.timing_line(found.timings)
+            if took:
+                console.print(f"[dim]{escape(took)}[/dim]")
             return
         rows = history.recent(cfg, limit)
         if as_json:
@@ -2316,14 +2323,18 @@ def _chat_loop(
         try:
             with _working("Resolving your follow-up..." if turns else "Thinking...") as status:
                 stream = _Streamed(status)
+                started = time.monotonic()
                 standalone = query.contextualize_question(
                     question, turns, cfg, client, profile.names(conn, cfg)
                 )
+                rewriting = time.monotonic() - started
                 result = query.answer(
                     standalone, cfg, conn, client, on_stage=stream.stage,
                     since=since, until=until, only=only, on_text=stream,
                     on_thinking=stream.think,
                 )
+                if turns:
+                    result = query.with_step(result, "reading your follow-up", rewriting)
         except JournalError as exc:
             if stream is not None and stream.started:
                 console.print()

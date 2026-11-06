@@ -2130,6 +2130,33 @@ function stageView(stage) {
   ];
 }
 
+function duration(seconds) {
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const whole = Math.round(seconds);
+  if (whole < 3600) return `${Math.floor(whole / 60)}m ${String(whole % 60).padStart(2, "0")}s`;
+  return `${Math.floor(whole / 3600)}h ${String(Math.floor((whole % 3600) / 60)).padStart(2, "0")}m`;
+}
+
+// " in 4m 10s", for after "Answered from ..."
+function tookText(timings) {
+  if (!timings?.length) return "";
+  return ` in ${duration(timings.reduce((sum, t) => sum + t.seconds, 0))}`;
+}
+
+// `holder` remembers whether it was opened, since a turn is redrawn as others come in
+function timingsView(timings, holder = {}) {
+  const shown = (timings || []).filter((t) => t.seconds >= 0.5);
+  if (!shown.length) return null;
+  const remember = (e) => { holder.timingsOpen = !e.currentTarget.parentElement.open; };
+  return h("details", { class: "turn-read", open: holder.timingsOpen },
+    h("summary", { onclick: remember }, "How long each part took"),
+    h("table", { class: "turn-timings" },
+      h("tbody", {}, shown.map((t) => h("tr", {},
+        h("td", {}, t.step[0].toUpperCase() + t.step.slice(1)),
+        h("td", { class: "num" }, duration(t.seconds)))))));
+}
+
 // what a thinking model reasoned before answering, with [ollama] show_thinking on
 function thinkingView(turn) {
   if (!turn.thinking) return null;
@@ -2163,7 +2190,8 @@ function turnView(turn, scale, index) {
       h("div", { class: "turn-answer" }, a.body),
       sourceChips(a),
       sourceQuotes(a),
-      h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}.`),
+      h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}${tookText(a.timings)}.`),
+      timingsView(a.timings, turn),
       readCount ? h("details", { class: "turn-read" },
         h("summary", {}, `What it read: ${plural(a.entries.length, "entry", "entries")}, ${plural(a.notes.length, "note")}`),
         a.notes.length ? h("div", { class: "note-grid" }, a.notes.map((n) =>
@@ -2282,7 +2310,8 @@ async function historyView([id]) {
     k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
     h("div", { class: "turn-answer" }, k.answer.replace(/\n\nSources: .*$/s, "")),
     sourceChips(k),
-    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}. The days and notes it cited may have changed since.`),
+    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}${tookText(k.timings)}. The days and notes it cited may have changed since.`),
+    timingsView(k.timings),
     h("p", { class: "section-note" }, h("code", {}, `journal history --delete ${k.id}`), " forgets this one for good."));
 }
 

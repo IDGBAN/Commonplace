@@ -11,7 +11,7 @@ from conftest import add_entry, add_note, invoke_cli
 
 from journal_analyzer import browse, cli, history, mcp_server
 from journal_analyzer.config import Config
-from journal_analyzer.models import Answer, QueryPlan
+from journal_analyzer.models import Answer, QueryPlan, Timing
 
 SECRET = "the answer mentions zebra-fourteen"
 
@@ -230,3 +230,38 @@ def test_the_browser_keeps_its_answers_and_lists_them(kept, conn, fake_client):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_how_long_each_part_took_is_kept(kept):
+    timed = _answer().model_copy(update={"timings": [
+        Timing(step="searching", seconds=1.5), Timing(step="precise model reading", seconds=900),
+    ]})
+    found = history.get(kept, history.record(kept, "q", timed, "ask", "a" * 32))
+    assert [(t.step, t.seconds) for t in found.timings] == [
+        ("searching", 1.5), ("precise model reading", 900),
+    ]
+    assert found.as_json()["timings"][1] == {"step": "precise model reading", "seconds": 900}
+
+
+def test_a_history_file_from_before_timings_still_reads_and_takes_new_ones(kept):
+    import sqlite3
+
+    path = history.history_path(kept)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as old:
+        old.execute(
+            "CREATE TABLE asked (id INTEGER PRIMARY KEY, conversation TEXT NOT NULL, "
+            "asked_at TEXT NOT NULL, source TEXT NOT NULL, question TEXT NOT NULL, "
+            "standalone TEXT, scope TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, "
+            "answer TEXT NOT NULL, sources TEXT NOT NULL DEFAULT '{}')"
+        )
+        old.execute(
+            "INSERT INTO asked(conversation, asked_at, source, question, stage, answer) "
+            "VALUES ('a', '2026-01-01T00:00:00+00:00', 'ask', 'old one', 'fast_summary', 'x')"
+        )
+    old.close()
+    [before] = history.recent(kept)
+    assert before.question == "old one" and before.timings == []
+    timed = _answer().model_copy(update={"timings": [Timing(step="searching", seconds=2)]})
+    newer = history.record(kept, "new one", timed, "ask", "a" * 32)
+    assert history.get(kept, newer).timings == [Timing(step="searching", seconds=2)]

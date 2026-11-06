@@ -628,6 +628,9 @@ table.links td:first-child { white-space: nowrap; }
 .turn-read[open] summary { margin-bottom: 0.8rem; }
 .turn-read .note-grid { margin-bottom: 0.8rem; }
 .turn-thinking { margin: 0 0 0.8rem; }
+.turn-timings { border-collapse: collapse; font-size: 0.88rem; color: var(--ink-soft); }
+.turn-timings td { padding: 0.15rem 1.2rem 0.15rem 0; }
+.turn-timings td.num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 0; }
 .turn-thinking-text {
   font: italic 0.92rem/1.6 var(--read); color: var(--ink-soft); white-space: pre-wrap;
   overflow-wrap: anywhere; max-width: var(--measure); max-height: 24rem; overflow-y: auto;

@@ -18,16 +18,17 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePath
 from typing import Any
 
+from pydantic import ValidationError
 from rich.console import Console
 
 from . import store
 from .config import Config
-from .models import Answer, ConfigError
+from .models import Answer, ConfigError, Timing
 
 console = Console(stderr=True)
 
@@ -42,7 +43,9 @@ CREATE TABLE IF NOT EXISTS asked (
   scope        TEXT NOT NULL DEFAULT '',
   stage        TEXT NOT NULL,
   answer       TEXT NOT NULL,
-  sources      TEXT NOT NULL DEFAULT '{}'
+  sources      TEXT NOT NULL DEFAULT '{}',
+  -- [{"step": ..., "seconds": ...}], how long each part of the answer took
+  timings      TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_asked_conversation ON asked(conversation);
 """
@@ -94,6 +97,10 @@ def _writable(config: Config) -> Iterator[sqlite3.Connection]:
         conn.execute("PRAGMA journal_mode = DELETE")
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.executescript(_SCHEMA)
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(asked)")}
+        if "timings" not in columns:
+            # files from before timings were kept
+            conn.execute("ALTER TABLE asked ADD COLUMN timings TEXT NOT NULL DEFAULT '[]'")
         yield conn
     finally:
         conn.close()
@@ -182,11 +189,12 @@ def record(
         with _writable(config) as conn, conn:
             cur = conn.execute(
                 "INSERT INTO asked(conversation, asked_at, source, question, standalone, scope, "
-                "stage, answer, sources) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "stage, answer, sources, timings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     conversation, datetime.now(UTC).isoformat(), source, question,
                     standalone if standalone and standalone != question else None,
                     scope, answer.stage_used, answer.text, _sources(answer),
+                    json.dumps([t.model_dump() for t in answer.timings]),
                 ),
             )
             _prune(config, conn)
@@ -216,12 +224,14 @@ class Kept:
     stage: str
     answer: str
     sources: dict[str, Any]
+    timings: list[Timing] = field(default_factory=list)
 
     def as_json(self) -> dict[str, Any]:
         return {
             "id": self.id, "conversation": self.conversation, "asked_at": self.asked_at,
             "source": self.source, "question": self.question, "standalone": self.standalone,
             "scope": self.scope, "stage": self.stage, "answer": self.answer, "sources": self.sources,
+            "timings": [t.model_dump() for t in self.timings],
         }
 
 
@@ -230,9 +240,14 @@ def _kept(row: sqlite3.Row) -> Kept:
         sources = json.loads(row["sources"])
     except json.JSONDecodeError:
         sources = {"dates": [], "notes": []}
+    timings: list[Timing] = []
+    # a file from before timings were kept that hasn't been written to since
+    if "timings" in row.keys():  # noqa: SIM118 - "in" on a Row looks at values
+        with contextlib.suppress(json.JSONDecodeError, ValidationError, TypeError):
+            timings = [Timing.model_validate(t) for t in json.loads(row["timings"])]
     return Kept(
         row["id"], row["conversation"], row["asked_at"], row["source"], row["question"],
-        row["standalone"], row["scope"], row["stage"], row["answer"], sources,
+        row["standalone"], row["scope"], row["stage"], row["answer"], sources, timings,
     )
 
 

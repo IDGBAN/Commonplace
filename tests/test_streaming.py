@@ -392,6 +392,56 @@ def test_the_reading_bar_says_how_far_and_how_long():
     assert stages[2].endswith("99%, taking longer than last time")
 
 
+def test_each_step_of_an_answer_is_timed_in_order(conn, config, fake_client):
+    add_entry(conn, date(2024, 1, 15), summary="Hiked")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = lambda model, messages: (
+        "INSUFFICIENT" if model == config.ollama.fast_model else "From the full text."
+    )
+    streamed = query.answer("q", config, conn, fake_client, today=date(2024, 6, 1),
+                            on_text=lambda _t: None)
+    assert [t.step for t in streamed.timings] == [
+        "working out the question", "searching", "fast model reading",
+        "fast model writing", "precise model reading", "precise model writing",
+    ]
+    assert all(t.seconds >= 0 for t in streamed.timings)
+    # without streaming each call is one step
+    whole = query.answer("q", config, conn, fake_client, today=date(2024, 6, 1))
+    assert [t.step for t in whole.timings][2:] == ["fast model", "precise model"]
+
+
+def test_timings_read_as_one_line():
+    from journal_analyzer.models import Timing
+
+    line = query.timing_line([
+        Timing(step="working out the question", seconds=4.2),
+        Timing(step="searching", seconds=0.1),
+        Timing(step="precise model reading", seconds=1142),
+        Timing(step="precise model writing", seconds=95),
+    ])
+    # the tenth of a second of searching isn't worth a mention, but it counts
+    assert line == (
+        "Took 20m 41s: working out the question 4.2s, precise model reading 19m 02s, "
+        "precise model writing 1m 35s."
+    )
+    assert query.timing_line([]) == ""
+    assert query.duration(3725) == "1h 02m"
+    follow_up = query.with_step(
+        query.Answer(text="a", stage_used="fast_summary"), "reading your follow-up", 3
+    )
+    assert follow_up.timings[0].step == "reading your follow-up"
+
+
+def test_ask_says_how_long_it_took(tmp_path, config, conn, fake_client, monkeypatch):
+    add_entry(conn, date(2024, 1, 15), summary="Hiked", path="/vault/2024-01-15.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "You hiked."
+    monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
+    result = invoke_cli(tmp_path, config, "ask", "When?")
+    assert result.exit_code == 0, result.output
+    assert "Took " in result.output
+
+
 def test_ask_prints_the_streamed_answer_once(tmp_path, config, conn, fake_client, monkeypatch):
     add_entry(conn, date(2024, 1, 15), summary="Hiked", path="/vault/2024-01-15.md")
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
