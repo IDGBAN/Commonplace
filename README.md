@@ -277,7 +277,7 @@ With it on, the browser's Ask page lists your earlier questions, and each opens 
 
 ## Longer summaries
 
-A one-sentence summary loses most of a long entry, and when the summaries aren't enough an answer falls back to the slower precise model re-reading the full text. So entries of 400 words or more (`[indexing] detail_min_words`) also get a longer summary of 2 or 3 sentences, and from 1,000 words (`detail_long_words`) one of 3 to 5. It's written in the same call as everything else about the entry, in the same first-person voice.
+A one-sentence summary loses most of a long entry, and when the summaries aren't enough an answer falls back to the slower precise model re-reading the full text. So entries of 400 words or more (`[indexing] detail_min_words`) also get a longer summary of 2 or 3 sentences, and from 1,000 words (`detail_long_words`) one of 3 to 5. It's written in the same call as everything else about the entry, in the same first-person voice. Summaries are always in your voice ("Felt drained after work", not "The author felt drained"); one that comes back written from outside is asked for again, and `journal index` and `journal watch` rewrite any older ones that still are, one short fast-model call each.
 
 The one-liner stays where a list wants one line: the tables, the browser's entry lists and the calendar. The longer one goes where depth helps: answers from summaries, `ask --sources`, week and month digests, relationship digests and writing prompts. `journal show`, `journal export` and the entry page in the browser show both. Prompts have room for only so much, so each one fills a budget (`[rollups] entry_details_chars` for digests), longest entries first; the rest go in as their one-liner.
 

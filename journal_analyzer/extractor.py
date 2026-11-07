@@ -4,6 +4,8 @@ import re
 from collections.abc import Sequence
 from typing import TypeVar
 
+from pydantic import BaseModel
+
 from .config import Config
 from .context import fit
 from .models import DetailedExtraction, Extraction, NoteSummary, ParsedEntry, ParsedNote
@@ -72,6 +74,45 @@ _DETACHED_OPENING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "the author" partway through gives it away as well
+_DETACHED_ANYWHERE_RE = re.compile(
+    r"\bthe\s+(?:author|writer|user|narrator|journaler|diarist)(?:'s)?\b", re.IGNORECASE
+)
+
+
+def is_detached(text: str) -> bool:
+    """Whether a summary describes the writer from outside instead of in their voice."""
+    return bool(_DETACHED_OPENING_RE.match(text) or _DETACHED_ANYWHERE_RE.search(text))
+
+
+_REVOICE_PROMPT = """You rewrite one sentence that sums up a diary entry. It \
+describes the writer from outside ("The author ...", "the writer's ..."). \
+Rewrite it in the voice of the person who wrote the entry, the way they would \
+jot it in their own diary: first person (I, me, my), and the "I" may be left \
+out where the sentence reads fine without it. Keep every fact and what it \
+means, add nothing, and keep it to one sentence of at most {summary_max} \
+characters."""
+
+
+class _Revoiced(BaseModel):
+    summary: str
+
+
+def in_first_person(summary: str, config: Config, client: OllamaClient) -> str:
+    """A summary that describes the writer from outside, rewritten in their
+    voice. The summary as it was if the model's rewrite is still detached."""
+    reply = client.chat_structured(
+        model=config.ollama.fast_model,
+        messages=[
+            {"role": "system", "content": _REVOICE_PROMPT.format(summary_max=SUMMARY_MAX_CHARS)},
+            {"role": "user", "content": summary},
+        ],
+        schema=_Revoiced,
+    )
+    rewritten = _clip(" ".join(reply.summary.split()), SUMMARY_MAX_CHARS)
+    return rewritten if rewritten and not is_detached(rewritten) else summary
+
+
 _VOICE_CORRECTION = (
     "The summary describes the writer from outside. Give the same fields again "
     "with the summary rewritten in the writer's own first-person voice (I, me, "
@@ -132,7 +173,7 @@ def _in_writers_voice(
         model=model, messages=messages, schema=schema, memo_key=memo_messages
     )
     details = getattr(result, "details", "")
-    if not _DETACHED_OPENING_RE.match(result.summary) and not _DETACHED_OPENING_RE.match(details):
+    if not is_detached(result.summary) and not is_detached(details):
         return result
     tail: list[dict[str, str]] = [
         {"role": "assistant", "content": result.model_dump_json()},

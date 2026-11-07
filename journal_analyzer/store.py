@@ -1612,6 +1612,18 @@ def prune_note_digests(conn: sqlite3.Connection, keep: set[str]) -> int:
     return len(doomed)
 
 
+def entries_with_summaries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT id, entry_date, summary FROM entries WHERE summary IS NOT NULL AND summary != '' "
+        "ORDER BY entry_date, id"
+    ).fetchall())
+
+
+def set_entry_summary(conn: sqlite3.Connection, entry_id: int, summary: str) -> None:
+    with conn:
+        conn.execute("UPDATE entries SET summary = ? WHERE id = ?", (summary, entry_id))
+
+
 def profile_scanned_hashes(conn: sqlite3.Connection) -> set[str]:
     try:
         return {r["text_hash"] for r in conn.execute("SELECT text_hash FROM profile_scans")}

@@ -552,6 +552,7 @@ def run_backfill(
             progress.advance(task)
     _refresh_sections(config, conn, client, set(indexed))
     _refresh_links(config, conn)
+    _refresh_voice(config, conn, client)
     dropped = f", {counts['dropped']} dropped" if counts["dropped"] else ""
     private = f", {counts['private']} private" if counts["private"] else ""
     console.print(
@@ -688,6 +689,29 @@ def _apply_photo_settings(config: Config, conn: sqlite3.Connection) -> None:
         console.print(
             f"Photo settings changed: {queued} {'file' if queued == 1 else 'files'} with photos to index again."
         )
+
+
+def _refresh_voice(config: Config, conn: sqlite3.Connection, client: OllamaClient) -> None:
+    """Rewrites summaries that describe the writer from outside, in their voice.
+
+    Entries indexed before summaries had to be first person, or whose second
+    try still wasn't, keep that summary until their file changes. Each one is
+    a short fast-model call, kept in the memo.
+    """
+    detached = [r for r in store.entries_with_summaries(conn) if extractor.is_detached(r["summary"])]
+    if not detached:
+        return
+    fixed = 0
+    with Progress(console=console, transient=True) as progress:
+        task = progress.add_task("Rewriting summaries in your voice", total=len(detached))
+        for row in detached:
+            rewritten = extractor.in_first_person(row["summary"], config, client)
+            if rewritten != row["summary"]:
+                store.set_entry_summary(conn, row["id"], rewritten)
+                fixed += 1
+            progress.advance(task)
+    if fixed:
+        console.print(f"Rewrote {fixed} {'summary' if fixed == 1 else 'summaries'} in your own voice.")
 
 
 def _refresh_readings(config: Config, conn: sqlite3.Connection) -> None:
@@ -863,6 +887,7 @@ def run_watch(
     _refresh_note_properties(config, conn)
     _refresh_sections(config, conn, client)
     _refresh_links(config, conn)
+    _refresh_voice(config, conn, client)
     handler = _DebounceHandler(config)
     observer = Observer()
     observer.schedule(handler, str(config.vault.path), recursive=True)
