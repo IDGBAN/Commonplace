@@ -33,8 +33,8 @@ NO_ANSWER = (
     "The model stopped without writing an answer. Asking again usually works; if it "
     "keeps happening, try precise_model_think = false in config.toml."
 )
-# roughly 24-32k tokens; the client raises num_ctx to fit
-MAX_RAW_CONTEXT_CHARS = 96_000
+# roughly 48-64k tokens; the client raises num_ctx to fit
+MAX_RAW_CONTEXT_CHARS = 192_000
 # ranges wider than this also get month digests
 BROAD_RANGE_DAYS = 62
 # ranges from this up to BROAD_RANGE_DAYS get week digests instead
@@ -57,7 +57,7 @@ NOTE_SEARCH_K = 3
 LINKED_NOTES_K = 8
 MAX_CONTEXT_NOTES = 12
 # comes out of MAX_RAW_CONTEXT_CHARS
-MAX_NOTE_CONTEXT_CHARS = 16_000
+MAX_NOTE_CONTEXT_CHARS = 32_000
 # extra room for long entries' longer summaries when answering from summaries
 ANSWER_DETAILS_CHARS = 6000
 # and for the part of a long, many-headed entry that matched, each and in all
