@@ -647,6 +647,9 @@ table.links td:first-child { white-space: nowrap; }
 .ask-box button:disabled { opacity: 0.45; pointer-events: none; }
 .ask-foot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: 52rem; }
 .ask-foot .section-note { margin: 0; }
+.notify-toggle { display: block; margin-top: 0.6rem; font-size: 0.88rem; color: var(--ink-soft); }
+.notify-toggle input { accent-color: var(--pencil); vertical-align: middle; }
+.notify-said { display: block; color: var(--alert); margin-top: 0.3rem; }
 
 /* States */
 

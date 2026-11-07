@@ -1925,7 +1925,7 @@ function loadTurns() {
   try {
     const saved = JSON.parse(sessionStorage.getItem("ask-turns") || "[]");
     // a question that was still running when the page reloaded has no answer coming
-    return saved.map((t) => (t.status === "running" ? { ...t, status: "cancelled" } : t));
+    return saved.map((t) => (t.status === "running" || t.status === "queued" ? { ...t, status: "cancelled" } : t));
   } catch {
     return [];
   }
@@ -2034,13 +2034,27 @@ async function readEvents(response, onEvent) {
   }
 }
 
-async function askQuestion(question) {
+// A question asked while another is answering waits its turn, and goes once
+// the one before it is done, so it can follow up on that answer.
+function askQuestion(question) {
+  const turn = { question, status: "queued", scope: ask.scope };
+  ask.turns.push(turn);
+  if (ask.controller) changed();
+  else runTurn(turn);
+}
+
+function askNext() {
+  const next = ask.turns.find((t) => t.status === "queued");
+  if (next) runTurn(next);
+}
+
+async function runTurn(turn) {
   const history = ask.turns
     .filter((t) => t.status === "done")
     .slice(-HISTORY_TURNS)
     .map((t) => [t.rewritten || t.question, t.answer.text.slice(0, HISTORY_ANSWER_CHARS)]);
-  const turn = { question, status: "running", stage: "Starting…", scope: ask.scope };
-  ask.turns.push(turn);
+  Object.assign(turn, { status: "running", stage: "Starting…" });
+  const question = turn.question;
   const controller = new AbortController();
   ask.controller = controller;
   changed();
@@ -2081,8 +2095,54 @@ async function askQuestion(question) {
     else Object.assign(turn, { status: "failed", error: err.message === "Failed to fetch" ? "The journal browser isn't answering. Is `journal browse` still running?" : err.message });
   } finally {
     if (ask.controller === controller) ask.controller = null;
+    if (turn.status === "done" || turn.status === "failed") tellAnswered(turn);
     changed();
+    askNext();
   }
+}
+
+// notifications are opt-in from the Ask page, and remembered in this browser
+function notifyOn() {
+  try {
+    return localStorage.getItem("ask-notify") === "on" && "Notification" in window
+      && Notification.permission === "granted";
+  } catch {
+    return false;
+  }
+}
+
+function tellAnswered(turn) {
+  // nothing to tell someone who's looking at it
+  if (!notifyOn() || (document.visibilityState === "visible" && document.hasFocus())) return;
+  const title = turn.status === "done" ? "Your answer is ready" : "A question couldn't be answered";
+  const note = new Notification(title, { body: turn.question, tag: "commonplace-ask" });
+  note.onclick = () => {
+    window.focus();
+    location.hash = "#/ask";
+    note.close();
+  };
+}
+
+function notifyToggle() {
+  if (!("Notification" in window)) return null;
+  const box = h("input", { type: "checkbox", checked: notifyOn() });
+  const said = h("span", { class: "notify-said", role: "status" });
+  box.addEventListener("change", async () => {
+    said.textContent = "";
+    if (!box.checked) {
+      try { localStorage.setItem("ask-notify", "off"); } catch { /* not kept, then */ }
+      return;
+    }
+    const answer = Notification.permission === "default"
+      ? await Notification.requestPermission() : Notification.permission;
+    if (answer !== "granted") {
+      box.checked = false;
+      said.textContent = "Your browser blocked notifications for this page; allow them in its site settings to use this.";
+      return;
+    }
+    try { localStorage.setItem("ask-notify", "on"); } catch { /* not kept, then */ }
+  });
+  return h("label", { class: "notify-toggle" }, box, " Tell me when an answer is ready", said);
 }
 
 // the sentence of each cited day that has the question's words, to check the answer against
@@ -2179,7 +2239,15 @@ function turnView(turn, scale, index) {
   if (turn.scope) parts.push(h("p", { class: "turn-rewrite" }, `${turn.scope.label}.`));
   if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, turn.rewritten)));
   if (turn.status !== "failed") parts.push(thinkingView(turn));
-  if (turn.status === "running") {
+  if (turn.status === "queued") {
+    const ahead = ask.turns.slice(0, index).filter((t) => t.status === "running" || t.status === "queued").length;
+    parts.push(h("div", { class: "turn-running" },
+      h("p", { class: "search-status" }, ahead > 1 ? `Waiting for the ${ahead} questions above.` : "Waiting for the question above."),
+      h("button", {
+        class: "button", type: "button",
+        onclick: () => { ask.turns.splice(ask.turns.indexOf(turn), 1); changed(); },
+      }, "Remove")));
+  } else if (turn.status === "running") {
     if (turn.partial) parts.push(h("div", { class: "turn-answer writing" }, turn.partial));
     parts.push(h("div", { class: "turn-running" },
       ...stageView(turn.partial ? "Writing…" : turn.stage),
@@ -2230,9 +2298,10 @@ async function askView(_, params) {
   else if ((params.get("q") || "").trim()) ask.scope = null;
 
   const draw = () => {
-    const running = ask.turns.some((t) => t.status === "running");
-    go.disabled = running;
-    reset.hidden = !ask.turns.length || running;
+    const busy = ask.turns.some((t) => t.status === "running" || t.status === "queued");
+    go.textContent = busy ? "Queue" : "Ask";
+    go.title = busy ? "Ask this once the questions above are answered" : "";
+    reset.hidden = !ask.turns.length || busy;
     fill(scopeSlot, ask.scope
       ? h("span", { class: "chip pencil" }, ask.scope.label,
         h("button", {
@@ -2255,7 +2324,7 @@ async function askView(_, params) {
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     const q = input.value.trim();
-    if (!q || ask.controller) return;
+    if (!q) return;
     input.value = "";
     askQuestion(q);
   });
@@ -2271,7 +2340,7 @@ async function askView(_, params) {
     replaceParams("/ask", {});
     saveTurns();
   }
-  if (preset && !ask.controller) askQuestion(preset);
+  if (preset) askQuestion(preset);
   draw();
   setTimeout(() => input.focus(), 0);
   return h("div", {},
@@ -2279,7 +2348,7 @@ async function askView(_, params) {
       eyebrow: "Questions about your journal", title: "Ask",
       lede: "Ask in plain words. The answer cites the days and notes it drew on, and you can open each one.",
     }),
-    thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset), earlierQuestions());
+    thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset), notifyToggle(), earlierQuestions());
 }
 
 // filled in once the list arrives, so the Ask page doesn't wait on it
