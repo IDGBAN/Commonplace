@@ -30,8 +30,8 @@ precise_model = "qwen3:14b"
 # times slower. The profile is always written without it.
 fast_model_think = false
 precise_model_think = true
-# Print what a thinking model reasons before its answer, in journal ask,
-# journal chat and the browser. It can run to pages, so it's off by default.
+# Print what a thinking model reasons before its answer, in journal ask and
+# the browser. It can run to pages, so it's off by default.
 show_thinking = false
 # How long a thinking model may think before an answer, in tokens (256 and up).
 # More can mean better answers; on a CPU, 1000 tokens is several minutes.

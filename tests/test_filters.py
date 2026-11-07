@@ -126,6 +126,6 @@ def test_ask_and_chat_pass_the_filters_on(tmp_path, config, journal, fake_client
     assert result.exit_code == 0, result.output
     assert seen[0]["since"] == date(2024, 2, 1) and seen[0]["until"] is None
     assert seen[0]["only"].note_ids == (store.find_notes(journal, "Tomas Reyes")[0]["id"],)
-    result = invoke_cli(tmp_path, config, "chat", "--tag", "work", input="q\nexit\n")
+    result = invoke_cli(tmp_path, config, "ask", "--tag", "work", input="q\nexit\n")
     assert result.exit_code == 0, result.output
     assert seen[1]["only"].tag == "work"

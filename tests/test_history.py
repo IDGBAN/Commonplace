@@ -155,12 +155,18 @@ def test_history_says_when_its_off(tmp_path, config):
     assert result.exit_code == 1 and "no question 99" in result.output
 
 
-def test_chat_resume_needs_history(tmp_path, config):
-    result = invoke_cli(tmp_path, config, "chat", "--resume", input="exit\n")
-    assert result.exit_code == 1 and "History is off" in result.output
+def test_following_up_needs_history_but_asking_in_a_row_does_not(tmp_path, config, conn, fake_client, monkeypatch):
+    result = invoke_cli(tmp_path, config, "ask", "--after", "last", "and April?")
+    assert result.exit_code == 1 and "history is off" in " ".join(result.output.split())
+    add_entry(conn, date(2024, 3, 1), text="March.", summary="March", path="/vault/m.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    monkeypatch.setattr(cli, "OllamaClient", lambda c: fake_client)
+    result = invoke_cli(tmp_path, config, "ask", input="How was March?\nand April?\nexit\n")
+    assert result.exit_code == 0 and result.output.count("canned answer") == 2
+    assert not history.history_path(config).exists()
 
 
-def test_chat_keeps_its_turns_and_picks_them_up_again(kept, conn, fake_client, capsys):
+def test_asking_in_a_row_keeps_its_turns_and_picks_them_up_again(kept, conn, fake_client):
     add_entry(conn, date(2024, 3, 1), text="March.", summary="March", path="/vault/m.md")
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     fake_client.chat_response = "It was calm."
@@ -168,8 +174,8 @@ def test_chat_keeps_its_turns_and_picks_them_up_again(kept, conn, fake_client, c
     real_input = cli.console.input
     cli.console.input = lambda prompt="": next(inputs)
     try:
-        cli._chat_loop(kept, conn, fake_client)
-        [turn] = history.last_conversation(kept, "chat")
+        cli._ask_loop(kept, conn, fake_client)
+        [turn] = history.last_conversation(kept, "ask")
         assert turn.question == "How was March?"
         seen = []
 
@@ -179,12 +185,60 @@ def test_chat_keeps_its_turns_and_picks_them_up_again(kept, conn, fake_client, c
 
         fake_client.chat_response = chat
         inputs = iter(["and April?", "exit"])
-        cli._chat_loop(kept, conn, fake_client, earlier=[turn])
+        cli._ask_loop(kept, conn, fake_client, earlier=[turn])
     finally:
         cli.console.input = real_input
     assert any("User: How was March?" in text for text in seen)
-    turns = history.last_conversation(kept, "chat")
+    turns = history.last_conversation(kept, "ask")
     assert [t.question for t in turns] == ["How was March?", "and April?"]
+
+
+def _with_history(tmp_path, config):
+    path = tmp_path / "config.toml"
+    invoke_cli(tmp_path, config, "history")  # writes config.toml
+    path.write_text(path.read_text(encoding="utf-8") + "[history]\nenabled = true\n", encoding="utf-8")
+    return path
+
+
+def test_ask_after_follows_up_an_earlier_question(tmp_path, config, conn, fake_client, monkeypatch):
+    from typer.testing import CliRunner
+
+    add_entry(conn, date(2024, 3, 1), text="March.", summary="March", path="/vault/m.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    seen = []
+
+    def chat(model, messages):
+        seen.append(messages[-1]["content"])
+        return "How was April 2024?" if "User:" in messages[-1]["content"] else "It was calm."
+
+    fake_client.chat_response = chat
+    monkeypatch.setattr(cli, "OllamaClient", lambda c: fake_client)
+    path = _with_history(tmp_path, config)
+    config.history.enabled = True
+
+    def ask(*args):
+        result = CliRunner().invoke(cli.app, ["ask", *args, "--json", "--config", str(path)])
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)
+
+    first = ask("How was March?")
+    ask("Something else entirely?")
+    follow = ask("and April?", "--after", str(first["history_id"]))
+    # the earlier answer was the context, and the follow-up was read as a question of its own
+    assert any("User: How was March?" in text for text in seen)
+    assert follow["read_as"] == "How was April 2024?"
+    chain = history.conversation_until(config, follow["history_id"])
+    assert [k.question for k in chain] == ["How was March?", "and April?"]
+    latest = ask("and May?", "--after", "last")
+    assert [k.question for k in history.conversation_until(config, latest["history_id"])] == [
+        "How was March?", "and April?", "and May?",
+    ]
+    missing = CliRunner().invoke(cli.app, ["ask", "q", "--after", "99", "--config", str(path)])
+    assert missing.exit_code == 1 and "no question 99" in missing.output
+    bad = CliRunner().invoke(cli.app, ["ask", "q", "--after", "soon", "--config", str(path)])
+    assert bad.exit_code == 1 and "'last'" in bad.output
+    no_question = CliRunner().invoke(cli.app, ["ask", "--json", "--config", str(path)])
+    assert no_question.exit_code == 1 and "needs a question" in no_question.stdout
 
 
 def test_mcp_never_keeps_questions(kept, conn, fake_client):

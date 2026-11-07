@@ -270,6 +270,33 @@ def get(config: Config, kept_id: int) -> Kept | None:
     return _kept(row) if row else None
 
 
+def latest_id(config: Config) -> int | None:
+    """The newest question kept, from anywhere."""
+    _forget_old(config)
+    with _readable(config) as conn:
+        if conn is None:
+            return None
+        row = conn.execute("SELECT MAX(id) AS id FROM asked").fetchone()
+    return row["id"] if row else None
+
+
+def conversation_until(config: Config, kept_id: int) -> list[Kept]:
+    """The conversation question kept_id is part of, oldest turn first, up to
+    and including it. Empty if there's no such question."""
+    _forget_old(config)
+    with _readable(config) as conn:
+        if conn is None:
+            return []
+        found = conn.execute("SELECT conversation FROM asked WHERE id = ?", (kept_id,)).fetchone()
+        if found is None:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM asked WHERE conversation = ? AND id <= ? ORDER BY id",
+            (found["conversation"], kept_id),
+        ).fetchall()
+    return [_kept(r) for r in rows]
+
+
 def last_conversation(config: Config, source: str) -> list[Kept]:
     """The latest conversation from `source`, oldest turn first."""
     _forget_old(config)

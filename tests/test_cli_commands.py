@@ -113,7 +113,7 @@ def test_ctrl_c_during_a_chat_answer_drops_only_that_answer(
     fake_client.structured["QueryPlan"] = plan
     fake_client.chat_response = "Nothing much."
     monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
-    result = invoke_cli(tmp_path, config, "chat", input="first?\nsecond?\nexit\n")
+    result = invoke_cli(tmp_path, config, "ask", input="first?\nsecond?\nexit\n")
     assert result.exit_code == 0, result.output
     assert "(cancelled)" in result.output
     assert asked == ["first?", "second?"]
@@ -157,7 +157,7 @@ def test_chat_follow_ups_build_on_the_rewritten_questions(
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
     result = invoke_cli(
-        tmp_path, config, "chat", input="How was March 2024?\nand April?\nand May?\nexit\n"
+        tmp_path, config, "ask", input="How was March 2024?\nand April?\nand May?\nexit\n"
     )
     assert result.exit_code == 0, result.output
     assert len(transcripts) == 2
@@ -188,7 +188,7 @@ def test_chat_shows_the_last_answers_sources_on_request(
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     fake_client.chat_response = "You hiked."
     monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
-    result = invoke_cli(tmp_path, config, "chat", input="sources\nWhen?\nsources\nexit\n")
+    result = invoke_cli(tmp_path, config, "ask", input="sources\nWhen?\nsources\nexit\n")
     assert result.exit_code == 0, result.output
     output = _flat(result.output)
     assert "Ask something first" in output

@@ -573,7 +573,13 @@ def _print_reading(conn: sqlite3.Connection, answer: Answer) -> None:
 
 @app.command()
 def ask(
-    question: Annotated[str, typer.Argument(help="The question, in plain words.")],
+    question: Annotated[
+        str | None,
+        typer.Argument(
+            help="The question, in plain words. Leave it out to ask one after another, with follow-ups.",
+            show_default=False,
+        ),
+    ] = None,
     config: ConfigOpt = None,
     sources: Annotated[
         bool,
@@ -584,36 +590,116 @@ def ask(
     about: AboutOpt = None,
     tag: TagOpt = None,
     group: GroupOpt = None,
+    after: Annotated[
+        str | None,
+        typer.Option(
+            "--after",
+            help="Follow up on question N from 'journal history', or 'last' for the newest. "
+            "Needs [history] enabled = true.",
+            show_default=False,
+        ),
+    ] = None,
     as_json: JsonOpt = False,
 ) -> None:
-    """Ask a question about your journal.
+    """Ask a question about your journal, or leave the question out to ask several in a row.
 
-    --since, --until, --about, --tag and --group replace whatever the question's
-    wording suggests, so use them when you know the dates or the person.
+    In a row, follow-ups like "what about the month after?" build on the answers
+    before them. --after N follows up on a question you asked earlier, kept in
+    your history. --since, --until, --about, --tag and --group replace whatever
+    the question's wording suggests, and apply to every question in a row.
     """
     OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag, group)
-        with _working("Thinking...") as status:
+        earlier = _earlier_turns(cfg, after) if after is not None else []
+        client = OllamaClient(cfg)
+        if question is None:
+            if as_json:
+                _fail("--json needs a question, since there's no one to ask the next one.")
+            _ask_loop(cfg, conn, client, date_from, date_to, only, earlier)
+            return
+        turns = _turns(earlier)
+        conversation = earlier[-1].conversation if earlier else history.new_conversation()
+        with _working("Resolving your follow-up..." if turns else "Thinking...") as status:
             stream = None if as_json else _Streamed(status)
-            result = query.answer(
-                question, cfg, conn, OllamaClient(cfg),
-                on_stage=_show_stage(status) if stream is None else stream.stage,
-                since=date_from, until=date_to, only=only, on_text=stream,
-                on_thinking=stream.think if stream is not None else None,
+            result, standalone = _answer_turn(
+                cfg, conn, client, question, turns, date_from, date_to, only, status, stream
             )
         kept = history.record(
-            cfg, question, result, "ask", history.new_conversation(),
-            scope=history.scope_text(conn, only, date_from, date_to),
+            cfg, question, result, "ask", conversation, standalone,
+            history.scope_text(conn, only, date_from, date_to),
         )
         if as_json:
-            _emit({"question": question, **serialize.answer_json(conn, result), "history_id": kept})
+            _emit({
+                "question": question,
+                **({"read_as": standalone} if standalone != question else {}),
+                **serialize.answer_json(conn, result), "history_id": kept,
+            })
             return
         assert stream is not None
         _print_answer(conn, result, "answered by stage", streamed=stream.started)
+        if standalone != question:
+            console.print(f"[dim]Read as: {escape(standalone)}[/dim]")
         if sources:
             _print_reading(conn, result)
+
+
+def _earlier_turns(cfg: Config, after: str) -> list[history.Kept]:
+    """The conversation --after points at, up to and including that question."""
+    if not cfg.history.enabled:
+        _fail(
+            "--after follows up on a question kept in your history, and history is off. "
+            "Set [history] enabled = true in config.toml to keep questions; until then, "
+            "'journal ask' with no question asks several in a row with follow-ups.",
+            red=False,
+        )
+    if after.strip().lower() == "last":
+        kept_id = history.latest_id(cfg)
+        if kept_id is None:
+            _fail("There are no questions in your history yet to follow up on.", red=False)
+    else:
+        try:
+            kept_id = int(after)
+        except ValueError:
+            _fail(f"--after takes a question number from 'journal history', or 'last', not '{after}'.")
+    earlier = history.conversation_until(cfg, kept_id)
+    if not earlier:
+        _fail(f"There's no question {kept_id} in your history.", red=False)
+    return earlier
+
+
+def _turns(earlier: list[history.Kept]) -> list[tuple[str, str]]:
+    turns = [(k.standalone or k.question, k.answer) for k in earlier]
+    return turns[-query.CHAT_HISTORY_TURNS:]
+
+
+def _answer_turn(
+    cfg: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    question: str,
+    turns: list[tuple[str, str]],
+    since: date | None,
+    until: date | None,
+    only: store.EntryFilter | None,
+    status: Status,
+    stream: _Streamed | None,
+) -> tuple[Answer, str]:
+    """The answer, and the question as it was read once earlier turns were
+    taken into account."""
+    started = time.monotonic()
+    standalone = query.contextualize_question(question, turns, cfg, client, profile.names(conn, cfg))
+    rewriting = time.monotonic() - started
+    result = query.answer(
+        standalone, cfg, conn, client,
+        on_stage=_show_stage(status) if stream is None else stream.stage,
+        since=since, until=until, only=only, on_text=stream,
+        on_thinking=stream.think if stream is not None else None,
+    )
+    if turns:
+        result = query.with_step(result, "reading your follow-up", rewriting)
+    return result, standalone
 
 
 def _parse_only(value: str | None) -> tuple[str, ...]:
@@ -2171,7 +2257,7 @@ def history_cmd(
             try:
                 held = history.clear(cfg)
             except OSError as exc:
-                _fail(f"Couldn't delete {path}: {exc}. Is 'journal browse' or 'journal chat' still running?")
+                _fail(f"Couldn't delete {path}: {exc}. Is 'journal browse' or 'journal ask' still running?")
             if as_json:
                 _emit({"cleared": held, "path": str(path)})
             else:
@@ -2225,7 +2311,10 @@ def history_cmd(
         for r in rows:
             table.add_row(str(r.id), _when(r.asked_at), escape(r.question), r.source)
         console.print(table)
-        console.print("[dim]'journal history N' shows one again; --delete N forgets one, --clear all of them.[/dim]")
+        console.print(
+            "[dim]'journal history N' shows one again; 'journal ask --after N' follows it up; "
+            "--delete N forgets one, --clear all of them.[/dim]"
+        )
         if not cfg.history.enabled:
             console.print(
                 "[yellow]History is off, so nothing new is kept, but these still are. "
@@ -2252,34 +2341,7 @@ def insights_cmd(
             console.print(f"[dim]- {escape(line)}[/dim]")
 
 
-@app.command()
-def chat(
-    config: ConfigOpt = None,
-    since: SinceOpt = None,
-    until: UntilOpt = None,
-    about: AboutOpt = None,
-    tag: TagOpt = None,
-    group: GroupOpt = None,
-    resume: Annotated[
-        bool,
-        typer.Option("--resume", help="Pick up your last chat from the history ([history] enabled = true)."),
-    ] = False,
-) -> None:
-    """Ask questions with follow-ups. The filters apply to every question."""
-    date_from, date_to = _parse_range(since, until)
-    with _guard(), _open(config) as (cfg, conn):
-        only = _entry_filter(conn, about, tag, group)
-        earlier: list[history.Kept] = []
-        if resume:
-            if not cfg.history.enabled:
-                _fail(_HISTORY_OFF, red=False)
-            earlier = history.last_conversation(cfg, "chat")
-            if not earlier:
-                console.print("[dim]There's no earlier chat in your history, so this starts fresh.[/dim]")
-        _chat_loop(cfg, conn, OllamaClient(cfg), date_from, date_to, only, earlier)
-
-
-def _chat_loop(
+def _ask_loop(
     cfg: Config,
     conn: sqlite3.Connection,
     client: OllamaClient,
@@ -2289,15 +2351,15 @@ def _chat_loop(
     earlier: list[history.Kept] | None = None,
 ) -> None:
     console.print(
-        "Follow-ups like 'what about the month after that?' work. Type 'sources' to "
-        "see what the last answer read, and 'exit' or Ctrl-D to quit."
+        "Ask one question after another; follow-ups like 'what about the month after "
+        "that?' work. Type 'sources' to see what the last answer read, and 'exit' or "
+        "Ctrl-D to quit."
     )
-    turns: list[tuple[str, str]] = [(k.standalone or k.question, k.answer) for k in earlier or []]
-    del turns[: -query.CHAT_HISTORY_TURNS]
+    turns = _turns(earlier or [])
     conversation = earlier[-1].conversation if earlier else history.new_conversation()
     if earlier:
         console.print(
-            f"[dim]Picking up from {_when(earlier[-1].asked_at)}, after "
+            f"[dim]Following on from {_when(earlier[-1].asked_at)}, after "
             f"\"{escape(earlier[-1].question)}\".[/dim]"
         )
     scope = history.scope_text(conn, only, since, until)
@@ -2323,18 +2385,9 @@ def _chat_loop(
         try:
             with _working("Resolving your follow-up..." if turns else "Thinking...") as status:
                 stream = _Streamed(status)
-                started = time.monotonic()
-                standalone = query.contextualize_question(
-                    question, turns, cfg, client, profile.names(conn, cfg)
+                result, standalone = _answer_turn(
+                    cfg, conn, client, question, turns, since, until, only, status, stream
                 )
-                rewriting = time.monotonic() - started
-                result = query.answer(
-                    standalone, cfg, conn, client, on_stage=stream.stage,
-                    since=since, until=until, only=only, on_text=stream,
-                    on_thinking=stream.think,
-                )
-                if turns:
-                    result = query.with_step(result, "reading your follow-up", rewriting)
         except JournalError as exc:
             if stream is not None and stream.started:
                 console.print()
@@ -2343,12 +2396,12 @@ def _chat_loop(
         except KeyboardInterrupt:
             if stream is not None and stream.started:
                 console.print()
-            # Ctrl-C drops this answer but keeps the chat
+            # Ctrl-C drops this answer but keeps the conversation
             console.print("[dim](cancelled)[/dim]")
             continue
         _print_answer(conn, result, "stage", streamed=stream.started)
         last = result
-        history.record(cfg, question, result, "chat", conversation, standalone, scope)
+        history.record(cfg, question, result, "ask", conversation, standalone, scope)
         # keep the rewritten question so the next follow-up can build on it
         turns.append((standalone, result.text))
         del turns[: -query.CHAT_HISTORY_TURNS]
