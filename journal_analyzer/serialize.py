@@ -178,6 +178,7 @@ def answer_json(conn: sqlite3.Connection, answer: Answer) -> Json:
         "entries": entry_briefs(conn, read),
         "notes": note_briefs(conn, store.notes_by_ids(conn, answer.read_note_ids)),
         "timings": [t.model_dump() for t in answer.timings],
+        "model": answer.model or None,
     }
 
 

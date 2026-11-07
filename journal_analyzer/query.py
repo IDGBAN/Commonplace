@@ -1269,7 +1269,12 @@ def answer(
         question, config, conn, client, today, on_stage, since, until, only, on_text,
         on_thinking, clock,
     )
-    return result.model_copy(update={"timings": clock.stop()})
+    writer = {
+        "fast_summary": config.ollama.fast_model,
+        "aggregate": config.ollama.fast_model,
+        "precise_raw": config.ollama.precise_model,
+    }.get(result.stage_used, "")
+    return result.model_copy(update={"timings": clock.stop(), "model": writer})
 
 
 def _answer(

@@ -109,6 +109,8 @@ class Answer(BaseModel):
     read_note_ids: list[int] = Field(default_factory=list)
     # in the order they happened
     timings: list[Timing] = Field(default_factory=list)
+    # the model that wrote the answer, empty when none did
+    model: str = ""
 
     @model_validator(mode="after")
     def _body_defaults_to_text(self) -> Answer:

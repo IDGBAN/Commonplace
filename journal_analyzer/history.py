@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS asked (
   answer       TEXT NOT NULL,
   sources      TEXT NOT NULL DEFAULT '{}',
   -- [{"step": ..., "seconds": ...}], how long each part of the answer took
-  timings      TEXT NOT NULL DEFAULT '[]'
+  timings      TEXT NOT NULL DEFAULT '[]',
+  -- the model that wrote the answer
+  model        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_asked_conversation ON asked(conversation);
 """
@@ -98,9 +100,10 @@ def _writable(config: Config) -> Iterator[sqlite3.Connection]:
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.executescript(_SCHEMA)
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(asked)")}
-        if "timings" not in columns:
-            # files from before timings were kept
-            conn.execute("ALTER TABLE asked ADD COLUMN timings TEXT NOT NULL DEFAULT '[]'")
+        # files from before these were kept
+        for column, default in (("timings", "'[]'"), ("model", "''")):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE asked ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}")
         yield conn
     finally:
         conn.close()
@@ -189,12 +192,13 @@ def record(
         with _writable(config) as conn, conn:
             cur = conn.execute(
                 "INSERT INTO asked(conversation, asked_at, source, question, standalone, scope, "
-                "stage, answer, sources, timings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "stage, answer, sources, timings, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     conversation, datetime.now(UTC).isoformat(), source, question,
                     standalone if standalone and standalone != question else None,
                     scope, answer.stage_used, answer.text, _sources(answer),
                     json.dumps([t.model_dump() for t in answer.timings]),
+                    answer.model,
                 ),
             )
             _prune(config, conn)
@@ -225,6 +229,7 @@ class Kept:
     answer: str
     sources: dict[str, Any]
     timings: list[Timing] = field(default_factory=list)
+    model: str = ""
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -232,6 +237,7 @@ class Kept:
             "source": self.source, "question": self.question, "standalone": self.standalone,
             "scope": self.scope, "stage": self.stage, "answer": self.answer, "sources": self.sources,
             "timings": [t.model_dump() for t in self.timings],
+            "model": self.model or None,
         }
 
 
@@ -245,9 +251,10 @@ def _kept(row: sqlite3.Row) -> Kept:
     if "timings" in row.keys():  # noqa: SIM118 - "in" on a Row looks at values
         with contextlib.suppress(json.JSONDecodeError, ValidationError, TypeError):
             timings = [Timing.model_validate(t) for t in json.loads(row["timings"])]
+    model = row["model"] if "model" in row.keys() else ""  # noqa: SIM118 - as above
     return Kept(
         row["id"], row["conversation"], row["asked_at"], row["source"], row["question"],
-        row["standalone"], row["scope"], row["stage"], row["answer"], sources, timings,
+        row["standalone"], row["scope"], row["stage"], row["answer"], sources, timings, model,
     )
 
 

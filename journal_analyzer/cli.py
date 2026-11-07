@@ -541,7 +541,8 @@ def _print_answer(
     if links:
         console.print()
         console.print(Text(" ").join([Text("Sources:"), *links]))
-    console.print(f"[dim]({stage_label}: {answer.stage_used})[/dim]")
+    by = f", by {answer.model}" if answer.model else ""
+    console.print(f"[dim]({stage_label}: {answer.stage_used}{escape(by)})[/dim]")
     took = query.timing_line(answer.timings)
     if took:
         console.print(f"[dim]{escape(took)}[/dim]")
@@ -2288,7 +2289,8 @@ def history_cmd(
                 console.print(f"[dim]read as: {escape(found.standalone)}[/dim]")
             console.print()
             console.print(escape(found.answer))
-            console.print(f"[dim](answered by stage: {found.stage})[/dim]")
+            by = f", by {found.model}" if found.model else ""
+            console.print(f"[dim](answered by stage: {found.stage}{escape(by)})[/dim]")
             took = query.timing_line(found.timings)
             if took:
                 console.print(f"[dim]{escape(took)}[/dim]")

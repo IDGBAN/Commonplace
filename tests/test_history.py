@@ -297,6 +297,13 @@ def test_how_long_each_part_took_is_kept(kept):
     assert found.as_json()["timings"][1] == {"step": "precise model reading", "seconds": 900}
 
 
+def test_which_model_answered_is_kept(kept):
+    found = history.get(kept, history.record(
+        kept, "q", _answer().model_copy(update={"model": "qwen3:14b"}), "ask", "a" * 32,
+    ))
+    assert found.model == "qwen3:14b" and found.as_json()["model"] == "qwen3:14b"
+
+
 def test_a_history_file_from_before_timings_still_reads_and_takes_new_ones(kept):
     import sqlite3
 

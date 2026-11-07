@@ -405,9 +405,13 @@ def test_each_step_of_an_answer_is_timed_in_order(conn, config, fake_client):
         "fast model writing", "precise model reading", "precise model writing",
     ]
     assert all(t.seconds >= 0 for t in streamed.timings)
+    assert streamed.model == config.ollama.precise_model
     # without streaming each call is one step
     whole = query.answer("q", config, conn, fake_client, today=date(2024, 6, 1))
     assert [t.step for t in whole.timings][2:] == ["fast model", "precise model"]
+    fake_client.chat_response = "Straight from the summaries."
+    fast = query.answer("q", config, conn, fake_client, today=date(2024, 6, 1))
+    assert fast.model == config.ollama.fast_model
 
 
 def test_timings_read_as_one_line():
@@ -440,6 +444,7 @@ def test_ask_says_how_long_it_took(tmp_path, config, conn, fake_client, monkeypa
     result = invoke_cli(tmp_path, config, "ask", "When?")
     assert result.exit_code == 0, result.output
     assert "Took " in result.output
+    assert f"by {config.ollama.fast_model}" in result.output
 
 
 def test_ask_prints_the_streamed_answer_once(tmp_path, config, conn, fake_client, monkeypatch):

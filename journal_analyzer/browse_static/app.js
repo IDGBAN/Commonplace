@@ -2138,6 +2138,11 @@ function duration(seconds) {
   return `${Math.floor(whole / 3600)}h ${String(Math.floor((whole % 3600) / 60)).padStart(2, "0")}m`;
 }
 
+// " by qwen3:14b", for after "Answered from ..."
+function byText(model) {
+  return model ? ` by ${model}` : "";
+}
+
 // " in 4m 10s", for after "Answered from ..."
 function tookText(timings) {
   if (!timings?.length) return "";
@@ -2190,7 +2195,7 @@ function turnView(turn, scale, index) {
       h("div", { class: "turn-answer" }, a.body),
       sourceChips(a),
       sourceQuotes(a),
-      h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}${tookText(a.timings)}.`),
+      h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}${byText(a.model)}${tookText(a.timings)}.`),
       timingsView(a.timings, turn),
       readCount ? h("details", { class: "turn-read" },
         h("summary", {}, `What it read: ${plural(a.entries.length, "entry", "entries")}, ${plural(a.notes.length, "note")}`),
@@ -2310,7 +2315,7 @@ async function historyView([id]) {
     k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
     h("div", { class: "turn-answer" }, k.answer.replace(/\n\nSources: .*$/s, "")),
     sourceChips(k),
-    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}${tookText(k.timings)}. The days and notes it cited may have changed since.`),
+    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}${byText(k.model)}${tookText(k.timings)}. The days and notes it cited may have changed since.`),
     timingsView(k.timings),
     h("p", { class: "section-note" }, h("code", {}, `journal history --delete ${k.id}`), " forgets this one for good."));
 }
