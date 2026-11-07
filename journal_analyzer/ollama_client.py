@@ -57,6 +57,9 @@ LOAD_POLL_SECONDS = 1.0
 MIN_TOKENS_TO_LEARN = 64
 # what a prompt's characters per token is taken to be until it's measured
 DEFAULT_CHARS_PER_TOKEN = 3.5
+# A call that read this many times faster than the model usually does was
+# served from Ollama's cache, even when it says it read the whole prompt.
+CACHED_SPEEDUP = 4.0
 
 _CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError)
 # qwen3 and similar models leave their <think> block in the content
@@ -337,6 +340,10 @@ class OllamaClient:
         rate = count / (nanos / 1e9)
         ratio = sum(len(m.get("content", "")) for m in messages) / count
         old = self._speed(model)
+        # Ollama can count a prompt it mostly had cached as all read, in a
+        # fraction of the time, which is no measure of reading speed
+        if old is not None and rate > old[1] * CACHED_SPEEDUP:
+            return
         # a ratio outside this means much of the prompt came from Ollama's cache
         per_token = ratio if 2 <= ratio <= 6 else None
         if old is not None:

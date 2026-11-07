@@ -245,6 +245,19 @@ def test_a_prompt_mostly_read_from_ollamas_cache_teaches_nothing_wrong(tmp_path,
     assert client._speed("m")[1] == pytest.approx(8.0)
 
 
+def test_a_prompt_counted_as_read_but_served_from_cache_is_not_learned(tmp_path, monkeypatch):
+    # seen with Qwen3.6: 1506 tokens "read" in under a second after a cut-off reply
+    inner = MagicMock()
+    inner.show.return_value.capabilities = ["completion"]
+    long = [{"role": "user", "content": "x" * 4000}]
+    inner.chat.return_value = iter([{"message": {"content": "Hi"}}, _done(1000, 125)])
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat_stream("m", long, lambda _t: None)
+    inner.chat.return_value = iter([{"message": {"content": "Hi"}}, _done(1000, 0.9)])
+    client.chat_stream("m", [*long, {"role": "user", "content": "again"}], lambda _t: None)
+    assert client._speed("m")[1] == pytest.approx(8.0)
+
+
 def test_reading_is_timed_against_how_long_it_took_before(tmp_path, monkeypatch):
     monkeypatch.setattr(ollama_client, "LOAD_POLL_SECONDS", 0.01)
     inner = MagicMock()
