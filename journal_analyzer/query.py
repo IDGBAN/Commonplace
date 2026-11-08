@@ -73,6 +73,22 @@ _READER_VOICE = (
     'them "the author" or "the user".'
 )
 
+# Answers are shown as Markdown in the browser, and light Markdown still reads
+# well as plain text in a terminal. The fast model only gets lists and bold:
+# asked for more, a small model puts headings on two sentences.
+_ANSWER_FORMAT = (
+    "Write the answer in Markdown where that makes it easier to read: a short "
+    "bulleted list when it names several days, people or things, and **bold** "
+    "for the fact the question asked for. An answer of a sentence or two stays "
+    "plain sentences."
+)
+_FAST_ANSWER_FORMAT = f"{_ANSWER_FORMAT} No headings or tables."
+_PRECISE_ANSWER_FORMAT = (
+    f"{_ANSWER_FORMAT} Only a long answer with several distinct parts gets "
+    "headings, and only a comparison of the same things across periods gets a "
+    "table."
+)
+
 _ROUTER_SYSTEM = """You are a query router for a personal journal search tool.
 Today's date is {today}. Classify the question and extract constraints:
 - intent: "aggregate" for statistics over time (mood trends, tag frequencies,
@@ -495,7 +511,7 @@ def _answer_aggregate(
                 "content": (
                     "Answer the question about the asker's own journal using "
                     "ONLY the statistics provided. Do not invent numbers. Be "
-                    f"concise. {_READER_VOICE}{writer}"
+                    f"concise. {_READER_VOICE} {_FAST_ANSWER_FORMAT}{writer}"
                 ),
             },
             {"role": "user", "content": f"Question: {question}\n\nStatistics:\n{fact_block}"},
@@ -1106,7 +1122,8 @@ def _fast_attempt(
                     "links to, and carry no dates. Each item names the file "
                     "it comes from; folder and file names can say what it is "
                     "about. Mention the dates or [[note names]] your answer "
-                    f"draws on. {_READER_VOICE} If the material does not "
+                    f"draws on. {_READER_VOICE} {_FAST_ANSWER_FORMAT} "
+                    "If the material does not "
                     "contain enough information to answer confidently, reply "
                     f"with exactly the single word INSUFFICIENT.{writer}"
                 ),
@@ -1197,6 +1214,7 @@ def _precise_reanalysis(
         "comes from; folder and file names can say what it is "
         "about. Base the answer strictly on this material; mention "
         f"the dates or [[note names]] it draws on. {_READER_VOICE} "
+        f"{_PRECISE_ANSWER_FORMAT} "
         f"If it does not answer the question, say so.{writer}"
     )
 

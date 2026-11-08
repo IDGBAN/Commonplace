@@ -103,6 +103,23 @@ def test_insufficient_escalates_to_precise_raw_text(tmp_path, fake_client):
     assert date(2024, 1, 15) in result.cited_dates
 
 
+def test_answers_are_asked_for_in_light_markdown(tmp_path, fake_client):
+    cfg, conn = _indexed(tmp_path, fake_client)
+    asked = {}
+
+    def chat(model, messages):
+        asked[model] = messages[0]["content"]
+        return "INSUFFICIENT" if model == cfg.ollama.fast_model else "From the full text."
+
+    fake_client.chat_response = chat
+    query.answer("When did I go hiking with John?", cfg, conn, fake_client, today=TODAY)
+    fast, precise = asked[cfg.ollama.fast_model], asked[cfg.ollama.precise_model]
+    assert "Markdown" in fast and "No headings or tables." in fast
+    # the word it gives up with is still the last thing the fast model is told
+    assert fast.index("Markdown") < fast.index("INSUFFICIENT")
+    assert "Markdown" in precise and "gets a table" in precise
+
+
 def test_a_dressed_up_insufficient_still_escalates(tmp_path, fake_client):
     cfg, conn = _indexed(tmp_path, fake_client)
     fake_client.chat_response = lambda model, messages: (
