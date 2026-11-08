@@ -916,6 +916,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._static(url.path)
 
     def do_POST(self) -> None:
+        # Read what was sent before answering, even to refuse it. Closing a
+        # connection with its body unread resets it on Windows, and the page
+        # would get a dropped connection where it needed the status.
+        sent = self._sent()
         if self.headers.get("Host", "") not in self.server.allowed_hosts:
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Unexpected Host header."})
             return
@@ -932,7 +936,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             self._from_this_page()
-            body = self._body()
+            body = self._body(sent)
         except ApiError as exc:
             self._send_json(exc.status, {"error": str(exc)})
             return
@@ -948,7 +952,11 @@ class _Handler(BaseHTTPRequestHandler):
             {"Allow": allowed},
         )
 
-    do_PUT = do_PATCH = do_DELETE = _wrong_method
+    def _other_method(self) -> None:
+        self._sent()
+        self._wrong_method()
+
+    do_PUT = do_PATCH = do_DELETE = _other_method
 
     def _from_this_page(self) -> None:
         """Refuses a POST that this server's own page didn't send.
@@ -969,17 +977,23 @@ class _Handler(BaseHTTPRequestHandler):
             # /api/session again when it sees this status.
             raise ApiError(HTTPStatus.UNAUTHORIZED, "This page's session has ended. Reload it and try again.")
 
-    def _body(self) -> Json:
+    def _sent(self) -> bytes | ApiError:
+        """The request's body, or why it wasn't read."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return ApiError(HTTPStatus.LENGTH_REQUIRED, "The request needs a Content-Length.")
+        if length < 0 or length > MAX_BODY_BYTES:
+            return ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "That request is too big.")
+        return self.rfile.read(length)
+
+    def _body(self, sent: bytes | ApiError) -> Json:
         if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
             raise ApiError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Send the request as application/json.")
+        if isinstance(sent, ApiError):
+            raise sent
         try:
-            length = int(self.headers.get("Content-Length", ""))
-        except ValueError:
-            raise ApiError(HTTPStatus.LENGTH_REQUIRED, "The request needs a Content-Length.") from None
-        if length < 0 or length > MAX_BODY_BYTES:
-            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "That request is too big.")
-        try:
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body = json.loads(sent or b"{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise ApiError(HTTPStatus.BAD_REQUEST, "The request couldn't be read as JSON.") from None
         if not isinstance(body, dict):
