@@ -4,7 +4,6 @@ import os
 import sys
 import threading
 from datetime import UTC, date, datetime, timedelta
-from urllib.parse import quote
 
 import pytest
 from conftest import add_entry, add_note, invoke_cli
@@ -268,19 +267,43 @@ def test_the_browser_keeps_its_answers_and_lists_them(kept, conn, fake_client):
             c.request("GET", path)
             return c.getresponse().read().decode()
 
+        def post(path, body=None):
+            c = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+            c.request("POST", path, body=json.dumps(body or {}), headers={
+                "Content-Type": "application/json", browse.TOKEN_HEADER: server.token,
+            })
+            return c.getresponse().read().decode()
+
         talk = "b" * 32
-        stream = get(f"/api/ask?q={quote('When did I hike?')}&conversation={talk}&tag=")
+        stream = post("/api/ask", {"q": "When did I hike?", "conversation": talk, "tag": ""})
         assert '"history_id": 1' in stream
         listed = json.loads(get("/api/history"))
         assert listed["enabled"] and [i["question"] for i in listed["items"]] == ["When did I hike?"]
-        assert "answer" not in listed["items"][0]
+        assert listed["total"] == 1 and "answer" not in listed["items"][0]
         item = json.loads(get("/api/history/1"))
         assert item["conversation"] == talk and item["sources"]["dates"][0]["id"] is not None
         assert item["sources"]["notes"] == [{"title": "John Doe", "id": 1}]
+        assert item["earlier"] == []
         assert "no question" in json.loads(get("/api/history/7"))["error"]
         # a conversation id that isn't one gets a new one
-        get(f"/api/ask?q={quote('again?')}&conversation=nope")
+        post("/api/ask", {"q": "again?", "conversation": "nope"})
         assert history.get(kept, 2).conversation != "nope"
+        # a follow-up comes with the turns before it, their sources looked up the same way
+        post("/api/ask", {"q": "and after?", "conversation": talk,
+                          "history": [["When did I hike?", "On the 15th."]]})
+        after = json.loads(get("/api/history/3"))
+        assert [(k["id"], k["question"]) for k in after["earlier"]] == [(1, "When did I hike?")]
+        assert after["earlier"][0]["sources"]["notes"] == [{"title": "John Doe", "id": 1}]
+        assert len(json.loads(get("/api/history?limit=2"))["items"]) == 2
+
+        # forgetting one, then all of them
+        assert json.loads(post("/api/history/2/delete")) == {"deleted": 2}
+        assert "no question" in json.loads(post("/api/history/2/delete"))["error"]
+        assert [k.id for k in history.recent(kept)] == [3, 1]
+        assert json.loads(post("/api/history/clear")) == {"cleared": 2}
+        assert not history.history_path(kept).exists()
+        assert json.loads(get("/api/history")) == {"enabled": True, "total": 0, "items": []}
+        assert json.loads(post("/api/history/clear")) == {"cleared": 0}
     finally:
         server.shutdown()
         server.server_close()

@@ -139,6 +139,7 @@ const href = {
   search: (q) => `#/search${query({ q })}`,
   ask: (q, scope) => `#/ask${query({ q, ...scope })}`,
   history: (id) => `#/history/${id}`,
+  historyList: () => "#/history",
 };
 
 function query(params) {
@@ -159,13 +160,46 @@ class ApiError extends Error {
   }
 }
 
+const OFFLINE = "Commonplace isn't answering. Is `journal browse` still running?";
+
 async function api(path, params) {
   let response;
   try {
     response = await fetch(`/api/${path}${query(params)}`, { headers: { Accept: "application/json" } });
   } catch {
-    throw new ApiError("The journal browser isn't answering. Is `journal browse` still running?", 0);
+    throw new ApiError(OFFLINE, 0);
   }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new ApiError(data.error || `Request failed (${response.status}).`, response.status);
+  return data;
+}
+
+// Anything that does something is a POST with the token this page was given.
+// `journal browse` makes a new token each time it starts, so a page left open
+// across a restart asks for it once more before giving up.
+let sessionToken = null;
+
+async function send(path, body, { signal, accept = "application/json" } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    if (!sessionToken || attempt) sessionToken = (await api("session")).token;
+    let response;
+    try {
+      response = await fetch(`/api/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: accept, "X-Journal-Token": sessionToken },
+        body: JSON.stringify(body || {}),
+        signal,
+      });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw new ApiError(OFFLINE, 0);
+    }
+    if (response.status !== 401 || attempt) return response;
+  }
+}
+
+async function post(path, body) {
+  const response = await send(path, body);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new ApiError(data.error || `Request failed (${response.status}).`, response.status);
   return data;
@@ -310,6 +344,34 @@ function debounce(fn, ms) {
 
 function field(label, control, grow = false) {
   return h("label", { class: grow ? "field grow" : "field" }, h("span", {}, label), control);
+}
+
+// a short word that something happened, for a few seconds
+const toasts = h("div", { class: "toasts", role: "status", "aria-live": "polite" });
+document.body.append(toasts);
+
+function toast(message, kind = "") {
+  const el = h("div", { class: `toast ${kind}`.trim() }, message);
+  toasts.append(el);
+  setTimeout(() => el.remove(), kind === "error" ? 9000 : 5000);
+}
+
+// Asks before something that can't be undone. Resolves true only on the action button.
+function confirmAction({ title, body, action }) {
+  return new Promise((resolve) => {
+    const dialog = h("dialog", { class: "dialog", "aria-labelledby": "dialog-title" },
+      h("h2", { id: "dialog-title" }, title),
+      h("p", {}, body),
+      h("div", { class: "dialog-actions" },
+        h("button", { class: "button", type: "button", autofocus: true, onclick: () => dialog.close("no") }, "Cancel"),
+        h("button", { class: "button danger", type: "button", onclick: () => dialog.close("yes") }, action)));
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      resolve(dialog.returnValue === "yes");
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+  });
 }
 
 // ---------------------------------------------------------------- charts
@@ -2059,13 +2121,10 @@ async function runTurn(turn) {
   ask.controller = controller;
   changed();
   try {
-    const params = {
-      q: question, history: history.length ? JSON.stringify(history) : "", conversation: ask.conversation,
-      ...scopeParams(turn.scope),
-    };
-    const response = await fetch(`/api/ask${query(params)}`, {
-      headers: { Accept: "text/event-stream" }, signal: controller.signal,
-    });
+    const response = await send(
+      "ask", { q: question, history, conversation: ask.conversation, ...scopeParams(turn.scope) },
+      { signal: controller.signal, accept: "text/event-stream" },
+    );
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       throw new Error(data.error || `The question couldn't be asked (${response.status}).`);
@@ -2092,7 +2151,7 @@ async function runTurn(turn) {
   } catch (err) {
     delete turn.partial;
     if (controller.signal.aborted) turn.status = "cancelled";
-    else Object.assign(turn, { status: "failed", error: err.message === "Failed to fetch" ? "The journal browser isn't answering. Is `journal browse` still running?" : err.message });
+    else Object.assign(turn, { status: "failed", error: err.message === "Failed to fetch" ? OFFLINE : err.message });
   } finally {
     if (ask.controller === controller) ask.controller = null;
     if (turn.status === "done" || turn.status === "failed") tellAnswered(turn);
@@ -2351,42 +2410,172 @@ async function askView(_, params) {
     thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset), notifyToggle(), earlierQuestions());
 }
 
+// ---------------------------------------------------------------- earlier questions
+
+const ASK_PAGE_QUESTIONS = 5;
+const answerBody = (text) => text.replace(/\n\nSources: .*$/s, "");
+const askBusy = () => ask.turns.some((t) => t.status === "running" || t.status === "queued");
+
+function questionLine(k, onForget) {
+  return h("li", { class: "line-row" },
+    h("a", { class: "line", href: href.history(k.id) },
+      h("span", { class: "line-date" }, stamp(k.asked_at)),
+      h("span", { "aria-hidden": "true" }),
+      h("span", { class: "line-summary" }, k.question),
+      k.scope ? h("span", { class: "line-tags" }, `only ${k.scope}`) : null),
+    onForget && h("button", {
+      class: "button quiet", type: "button", "aria-label": `Forget “${k.question}”`, onclick: () => onForget(k),
+    }, "Forget"));
+}
+
+async function forgetQuestion(k) {
+  const sure = await confirmAction({
+    title: "Forget this question?",
+    body: `“${k.question}” and its answer are deleted from your history for good.`,
+    action: "Forget it",
+  });
+  if (!sure) return false;
+  try {
+    await post(`history/${k.id}/delete`);
+  } catch (err) {
+    toast(err.message, "error");
+    return false;
+  }
+  // it's still on the Ask page if it was asked in this tab
+  ask.turns = ask.turns.filter((t) => t.answer?.history_id !== k.id);
+  saveTurns();
+  toast("Forgotten.");
+  return true;
+}
+
+async function clearHistory(total) {
+  const sure = await confirmAction({
+    title: `Delete all ${plural(total, "question")}?`,
+    body: "The history file is deleted with every question and answer in it, and the conversation on the Ask page is cleared. This can't be undone.",
+    action: "Delete them all",
+  });
+  if (!sure) return false;
+  try {
+    await post("history/clear");
+  } catch (err) {
+    toast(err.message, "error");
+    return false;
+  }
+  ask.turns = ask.turns.filter((t) => t.status === "running" || t.status === "queued");
+  ask.conversation = newConversation();
+  saveTurns();
+  toast(`Deleted ${plural(total, "question")}.`);
+  return true;
+}
+
 // filled in once the list arrives, so the Ask page doesn't wait on it
 function earlierQuestions() {
   const slot = h("div", {});
-  api("history").then((data) => {
+  api("history", { limit: ASK_PAGE_QUESTIONS }).then((data) => {
     if (!data.items.length) return;
     fill(slot, section("Earlier questions", [
-      h("ol", { class: "lines" }, data.items.map((k) => h("li", {},
-        h("a", { class: "line", href: href.history(k.id) },
-          h("span", { class: "line-date" }, stamp(k.asked_at)),
-          h("span", { "aria-hidden": "true" }),
-          h("span", { class: "line-summary" }, k.question),
-          k.scope ? h("span", { class: "line-tags" }, `only ${k.scope}`) : null)))),
-      h("p", { class: "section-note" }, data.enabled
-        ? ["Kept because [history] is on in config.toml. ", h("code", {}, "journal history --delete N"), " forgets one, and ", h("code", {}, "journal history --clear"), " deletes them all for good."]
-        : ["History is off, so nothing new is kept, but these still are. ", h("code", {}, "journal history --clear"), " deletes them for good."]),
-    ], { note: plural(data.items.length, "question") }));
+      h("ol", { class: "lines" }, data.items.map((k) => questionLine(k))),
+      h("p", { class: "section-foot" },
+        h("a", { href: href.historyList() }, data.total > data.items.length ? `All ${plural(data.total, "question")}` : "Manage your history")),
+    ], { note: data.enabled ? null : "history is off, so nothing new is kept" }));
   }).catch(() => {});
   return slot;
+}
+
+async function historyListView() {
+  const data = await api("history", { limit: 500 });
+  document.title = "Earlier questions · Commonplace";
+  const head = pageHead({
+    eyebrow: h("a", { href: "#/ask" }, "Ask"),
+    title: "Earlier questions",
+    lede: data.enabled
+      ? "Every question you asked is kept with its answer, in a file of its own next to the cache. Forgetting one overwrites it, so it's gone for good."
+      : "History is off, so nothing new is kept. The questions from before are still here until you delete them.",
+  });
+  if (!data.items.length) {
+    return h("div", {}, head, empty(data.enabled
+      ? ["No questions kept yet. ", h("a", { href: "#/ask" }, "Ask one"), " and it shows up here."]
+      : ["Nothing is kept. Set ", h("code", {}, "enabled = true"), " under ", h("code", {}, "[history]"), " in config.toml to keep your questions and their answers."]));
+  }
+  const list = h("ol", { class: "lines" });
+  const count = h("p", { class: "result-count", role: "status" });
+  const filter = h("input", { type: "search", placeholder: "Words in the question", autocomplete: "off" });
+  let items = data.items;
+  const draw = () => {
+    const q = filter.value.trim().toLowerCase();
+    const shown = q ? items.filter((k) => k.question.toLowerCase().includes(q)) : items;
+    count.textContent = q
+      ? `${plural(shown.length, "question")} of ${fmtNum(items.length)}`
+      : `${plural(items.length, "question")}, newest first`;
+    fill(list, shown.length
+      ? shown.map((k) => questionLine(k, async (kept) => {
+        if (await forgetQuestion(kept)) {
+          items = items.filter((x) => x.id !== kept.id);
+          if (items.length) draw();
+          else render();
+        }
+      }))
+      : h("li", {}, empty("No question has those words.")));
+  };
+  filter.addEventListener("input", debounce(draw, 80));
+  draw();
+  const clear = h("button", { class: "button danger", type: "button", onclick: async () => {
+    if (await clearHistory(items.length)) render();
+  } }, "Delete all");
+  return h("div", {}, head,
+    h("div", { class: "filters" }, field("Filter", filter, true), clear),
+    count, list);
+}
+
+// a kept question as a turn on the Ask page, so it can be followed up
+function keptTurn(k) {
+  return {
+    question: k.question, rewritten: k.standalone || undefined, status: "done",
+    scope: k.scope ? { label: `Only ${k.scope}` } : null,
+    answer: {
+      body: answerBody(k.answer), text: k.answer, sources: k.sources, stage: k.stage, model: k.model,
+      timings: k.timings, entries: [], notes: [], history_id: k.id,
+    },
+  };
+}
+
+function keptAnswer(k) {
+  return [
+    k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
+    h("div", { class: "turn-answer" }, answerBody(k.answer)),
+    sourceChips(k),
+    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}${byText(k.model)}${tookText(k.timings)}.`),
+    timingsView(k.timings),
+  ];
 }
 
 async function historyView([id]) {
   const k = await api(`history/${id}`);
   document.title = `${k.question} · Commonplace`;
-  const where = { ask: "journal ask", chat: "journal chat", browse: "this browser" }[k.source] || k.source;
-  return h("div", {},
+  const where = { ask: "journal ask", chat: "journal ask", browse: "the Ask page" }[k.source] || k.source;
+  const follow = h("button", { class: "button primary", type: "button", disabled: askBusy(), title: askBusy() ? "A question is being answered on the Ask page" : null, onclick: () => {
+    ask.turns = [...k.earlier, k].map(keptTurn);
+    ask.conversation = k.conversation;
+    ask.scope = null;
+    saveTurns();
+    location.hash = "#/ask";
+  } }, "Follow up");
+  const forget = h("button", { class: "button", type: "button", onclick: async () => {
+    if (await forgetQuestion(k)) location.hash = href.historyList();
+  } }, "Forget");
+  return h("div", { class: "kept" },
     pageHead({
-      eyebrow: h("a", { href: "#/ask" }, "Earlier question"),
+      eyebrow: h("a", { href: href.historyList() }, "Earlier questions"),
       title: k.question,
-      meta: [h("span", {}, `asked ${stamp(k.asked_at)} in ${where}`), k.scope ? h("span", {}, `only ${k.scope}`) : null],
+      meta: [h("span", {}, `Asked ${stamp(k.asked_at)} in ${where}`), k.scope ? h("span", {}, `only ${k.scope}`) : null],
+      actions: [follow, forget],
     }),
-    k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
-    h("div", { class: "turn-answer" }, k.answer.replace(/\n\nSources: .*$/s, "")),
-    sourceChips(k),
-    h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}${byText(k.model)}${tookText(k.timings)}. The days and notes it cited may have changed since.`),
-    timingsView(k.timings),
-    h("p", { class: "section-note" }, h("code", {}, `journal history --delete ${k.id}`), " forgets this one for good."));
+    k.earlier.length ? h("details", { class: "turn-read kept-earlier" },
+      h("summary", {}, `${plural(k.earlier.length, "question")} came before this one in the same conversation`),
+      h("div", { class: "thread" }, k.earlier.map((e) => h("article", { class: "turn" },
+        h("p", { class: "turn-q" }, h("a", { href: href.history(e.id) }, e.question)), keptAnswer(e))))) : null,
+    keptAnswer(k),
+    h("p", { class: "section-note" }, "The days and notes it cited may have changed since."));
 }
 
 // ---------------------------------------------------------------- you
@@ -2502,6 +2691,7 @@ const routes = [
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],
+  [/^\/history$/, historyListView, "ask"],
   [/^\/history\/(\d+)$/, historyView, "ask"],
   [/^\/you$/, youView, "you"],
 ];

@@ -1891,13 +1891,13 @@ def browse_cmd(
         bool, typer.Option("--no-open", help="Don't open a browser window.")
     ] = False,
 ) -> None:
-    """Browse everything the cache knows in a local, read-only web page."""
+    """Browse everything the cache knows, and ask about it, in a local web page."""
     with _guard():
         cfg = load_config(config)
 
         def ready(url: str) -> None:
             console.print(f"Journal browser running at [bold cyan]{url}[/bold cyan]")
-            console.print("[dim]Read-only. Press Ctrl-C to stop.[/dim]")
+            console.print("[dim]Your notes are never changed. Press Ctrl-C to stop.[/dim]")
 
         browse.serve(cfg, port=port, open_browser=not no_open, on_ready=ready)
 

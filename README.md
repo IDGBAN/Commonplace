@@ -227,7 +227,7 @@ The Ask page answers questions the same way `journal ask` does. You see each ste
 
 Note, tag and digest pages, and the Entries page once it's filtered, have an Ask box of their own. A question asked there only reads the entries that page shows: the ones that link the note, have the tag, fall in the digest's dates, or pass the filters (all but the words filter). It works like `--about`, `--tag`, `--group`, `--since` and `--until` on `journal ask`. The Ask page shows what it's kept to above the question box, and follow-ups stay kept to it until you take it off with ×.
 
-It opens the cache read-only and never touches your notes, so it's safe to leave open while `journal watch` runs. Reload a page to see new changes. It only listens on 127.0.0.1 and turns away requests that use any other host name. Keyword search works offline; matching by meaning needs Ollama and falls back to keywords when it isn't running. Nothing loads from the internet. Ctrl-C stops it.
+It opens the cache read-only and never touches your notes, so it's safe to leave open while `journal watch` runs. Reload a page to see new changes. It only listens on 127.0.0.1 and turns away requests that use any other host name. Requests sent by other websites are refused, and anything that does something, like asking a question or forgetting one, only works from the browser's own pages: each of those requests carries a token that's made new every time `journal browse` starts. Keyword search works offline; matching by meaning needs Ollama and falls back to keywords when it isn't running. Nothing loads from the internet. Ctrl-C stops it.
 
 ### Reflection commands
 
@@ -273,7 +273,7 @@ They go in a file of their own, `journal-history.db` next to the cache (`[histor
 
 Deleting really deletes: rows are overwritten rather than left in the file's free space, and the file keeps no `-wal` journal holding older copies. `keep` (500) is how many questions it holds before the oldest go, and `forget_after_days` (0, off) also drops the ones older than that. If you turn history off again, nothing new is kept, but the file stays until you run `journal history --clear`; `journal history` and `journal stats` remind you it's there. Questions asked through `journal mcp` are never kept, since the app on the other end keeps its own.
 
-With it on, the browser's Ask page lists your earlier questions, and each opens on a page of its own with its answer and sources. The browser doesn't delete them, since it only ever reads; use `journal history`.
+With it on, the browser's Ask page lists your latest questions, and Earlier questions lists all of them, with a box to filter them by their words. Each opens on a page of its own with its answer, its sources and the questions that came before it in the same conversation. Follow up carries that conversation on from the Ask page, like `journal ask --after`. Forget deletes one question and Delete all deletes the history file, both for good and both after asking first, the same as `journal history --delete` and `--clear`.
 
 ## Longer summaries
 

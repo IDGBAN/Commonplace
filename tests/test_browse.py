@@ -20,8 +20,9 @@ from journal_analyzer.models import (
 
 
 class Browser:
-    def __init__(self, port: int):
+    def __init__(self, port: int, token: str = ""):
         self.port = port
+        self.token = token
 
     def request(
         self,
@@ -29,11 +30,35 @@ class Browser:
         method: str = "GET",
         host: str | None = None,
         headers: dict[str, str] | None = None,
+        body: bytes | None = None,
     ) -> http.client.HTTPResponse:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         sent = {"Host": host} if host is not None else {}
-        conn.request(method, path, headers={**sent, **(headers or {})})
+        conn.request(method, path, body=body, headers={**sent, **(headers or {})})
         return conn.getresponse()
+
+    def send(
+        self, path: str, body: dict | None = None, headers: dict[str, str | None] | None = None
+    ) -> http.client.HTTPResponse:
+        """A POST the way the page sends one. A header set to None is left out."""
+        sent = {
+            "Content-Type": "application/json", browse.TOKEN_HEADER: self.token,
+            "Origin": f"http://127.0.0.1:{self.port}", "Sec-Fetch-Site": "same-origin",
+            **(headers or {}),
+        }
+        return self.request(
+            path, method="POST", body=json.dumps(body or {}).encode(),
+            headers={k: v for k, v in sent.items() if v is not None},
+        )
+
+    def post(self, path: str, body: dict | None = None, status: int = 200, **headers) -> dict:
+        response = self.send(path, body, headers)
+        raw = response.read()
+        assert response.status == status, raw
+        return json.loads(raw)
+
+    def ask(self, q: str, **kept_to) -> http.client.HTTPResponse:
+        return self.send("/api/ask", {"q": q, **kept_to})
 
     def get(self, path: str, status: int = 200) -> dict:
         response = self.request(path)
@@ -65,7 +90,7 @@ def browser(config, journal, fake_client):
     server = browse.make_server(config, port=0, make_client=lambda cfg: fake_client)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield Browser(server.port)
+    yield Browser(server.port, server.token)
     server.shutdown()
     server.server_close()
 
@@ -155,9 +180,13 @@ def test_refuses_requests_for_another_host_name(browser):
 
 def test_refuses_api_calls_from_other_sites(browser, fake_client):
     for site in ("cross-site", "same-site"):
-        response = browser.request("/api/ask?q=hello", headers={"Sec-Fetch-Site": site})
+        for path in ("/api/overview", "/api/session"):
+            response = browser.request(path, headers={"Sec-Fetch-Site": site})
+            assert response.status == 403
+            assert "John" not in response.read().decode()
+        response = browser.send("/api/ask", {"q": "hello"}, {"Sec-Fetch-Site": site})
+        response.read()
         assert response.status == 403
-        assert "John" not in response.read().decode()
     assert fake_client.chat_calls == fake_client.structured_calls == []
     response = browser.request("/api/overview", headers={"Sec-Fetch-Site": "same-origin"})
     response.read()
@@ -168,12 +197,59 @@ def test_refuses_api_calls_from_other_sites(browser, fake_client):
     assert response.status == 200
 
 
-def test_is_read_only(browser):
-    for method in ("POST", "PUT", "PATCH", "DELETE"):
+def test_reading_is_get_and_doing_is_post(browser, fake_client):
+    for method in ("PUT", "PATCH", "DELETE"):
         response = browser.request("/api/entries", method=method)
         response.read()
         assert response.status == 405
-        assert response.getheader("Allow") == "GET"
+        assert response.getheader("Allow") == "GET, POST"
+    response = browser.send("/api/entries")
+    response.read()
+    assert (response.status, response.getheader("Allow")) == (405, "GET")
+    for path in ("/api/ask?q=hello", "/api/history/clear", "/api/history/1/delete"):
+        response = browser.request(path)
+        response.read()
+        assert (response.status, response.getheader("Allow")) == (405, "POST")
+    assert "No such" in browser.post("/api/nope", status=404)["error"]
+    assert fake_client.chat_calls == fake_client.structured_calls == []
+
+
+def test_a_post_has_to_come_from_this_page(browser, fake_client):
+    assert browser.get("/api/session") == {"token": browser.token}
+    refused = [
+        {browse.TOKEN_HEADER: None},
+        {browse.TOKEN_HEADER: "not-the-token"},
+        {"Origin": "http://attacker.example"},
+        {"Origin": f"http://127.0.0.1:{browser.port + 1}"},
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Site": "none"},
+    ]
+    for headers in refused:
+        for path in ("/api/ask", "/api/history/clear"):
+            response = browser.send(path, {"q": "hello"}, headers)
+            response.read()
+            assert response.status in (401, 403), headers
+    assert fake_client.chat_calls == fake_client.structured_calls == []
+    # a page left open while the server restarted can tell, and ask for the new token
+    stale = browser.post("/api/history/clear", status=401, **{browse.TOKEN_HEADER: "old"})
+    assert "session has ended" in stale["error"]
+    # localhost is the same server by its other name, and a script sends no Origin
+    assert browser.post("/api/history/clear", Origin=f"http://localhost:{browser.port}") == {"cleared": 0}
+    assert browser.post("/api/history/clear", **{"Origin": None, "Sec-Fetch-Site": None}) == {"cleared": 0}
+
+
+def test_a_post_has_to_be_a_small_json_object(browser):
+    wrong_type = browser.post("/api/history/clear", status=415, **{"Content-Type": "text/plain"})
+    assert "application/json" in wrong_type["error"]
+    sent = {"Content-Type": "application/json", browse.TOKEN_HEADER: browser.token}
+    for raw in (b"not json", b"[1, 2]", b"\xff"):
+        response = browser.request("/api/history/clear", method="POST", body=raw, headers=sent)
+        assert response.status == 400, response.read()
+    response = browser.request(
+        "/api/history/clear", method="POST",
+        headers={**sent, "Content-Length": str(browse.MAX_BODY_BYTES + 1)},
+    )
+    assert response.status == 413, response.read()
 
 
 def test_overview_reports_counts_problems_and_setup(browser):
@@ -532,7 +608,7 @@ def _events(response) -> list[tuple[str, dict]]:
 def test_ask_streams_its_steps_then_the_answer(browser, journal, fake_client):
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     fake_client.chat_response = "You hiked Bear Mountain with John on 2024-01-15."
-    response = browser.request(f"/api/ask?q={quote('When did I hike?')}")
+    response = browser.ask("When did I hike?")
     assert response.status == 200
     events = _events(response)
     kinds = [kind for kind, _ in events]
@@ -557,8 +633,7 @@ def test_ask_follow_ups_are_rewritten_first(browser, fake_client):
         return "Quiet."
 
     fake_client.chat_response = chat
-    history = json.dumps([["How was January?", "Calm."]])
-    events = _events(browser.request(f"/api/ask?q=and+Feb%3F&history={quote(history)}"))
+    events = _events(browser.ask("and Feb?", history=[["How was January?", "Calm."]]))
     assert ("rewritten", {"question": "How was February 2024?"}) in events
     assert events[-1][1]["question"] == "How was February 2024?"
 
@@ -568,23 +643,24 @@ def test_ask_reports_problems_inside_the_stream(browser, fake_client):
         raise OllamaUnavailableError("Cannot reach Ollama at http://localhost:11434")
 
     fake_client.chat_structured = down
-    events = _events(browser.request("/api/ask?q=anything"))
+    events = _events(browser.ask("anything"))
     assert events[-1][0] == "problem"
     assert "Cannot reach Ollama" in events[-1][1]["error"]
 
 
 def test_ask_rejects_bad_input_before_streaming(browser):
-    assert "Type a question" in browser.get("/api/ask?q=%20", status=400)["error"]
+    assert "Type a question" in browser.post("/api/ask", {"q": " "}, status=400)["error"]
+    assert "Type a question" in browser.post("/api/ask", {"q": 7}, status=400)["error"]
     long = "x" * (browse.MAX_QUESTION_CHARS + 1)
-    assert "shorter" in browser.get(f"/api/ask?q={long}", status=400)["error"]
-    for history in ("not json", json.dumps({"a": 1}), json.dumps([["only one"]])):
-        error = browser.get(f"/api/ask?q=hi&history={quote(history)}", status=400)["error"]
+    assert "shorter" in browser.post("/api/ask", {"q": long}, status=400)["error"]
+    for history in ("not a list", {"a": 1}, [["only one"]], [["a", 2]]):
+        error = browser.post("/api/ask", {"q": "hi", "history": history}, status=400)["error"]
         assert "conversation" in error
 
 
 def test_ask_keeps_only_the_last_turns_of_history():
     turns = [[f"q{i}", f"a{i}"] for i in range(10)]
-    _, history = browse._ask_params({"q": "next", "history": json.dumps(turns)})
+    _, history = browse._ask_params({"q": "next", "history": turns})
     assert history == [(f"q{i}", f"a{i}") for i in range(4, 10)]
 
 
@@ -614,7 +690,7 @@ def test_note_pages_list_entries_that_name_it_without_a_link(browser, journal):
 def test_ask_streams_the_answer_text_as_it_is_written(browser, fake_client):
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     fake_client.chat_response = "You hiked with John."
-    events = _events(browser.request("/api/ask?q=when"))
+    events = _events(browser.ask("when"))
     written = "".join(data["text"] for kind, data in events if kind == "text")
     assert written == "You hiked with John."
     assert events[-1][0] == "answer"
@@ -659,29 +735,32 @@ def test_ask_can_be_kept_to_a_note_tag_group_or_dates(browser, journal, fake_cli
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     fake_client.chat_response = "Only the hike."
     john = note_id(journal, "John Doe")
-    events = _events(browser.request(f"/api/ask?q=what+happened&note={john}"))
+    events = _events(browser.ask("what happened", note=john))
     answer = events[-1][1]
     assert events[-1][0] == "answer"
     assert [e["date"] for e in answer["entries"]] == ["2024-01-15"]
 
-    events = _events(browser.request("/api/ask?q=what+happened&tag=rain"))
+    events = _events(browser.ask("what happened", tag="rain"))
     assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-16"]
 
-    events = _events(browser.request("/api/ask?q=what+happened&group=relationship%3Dfriend"))
+    events = _events(browser.ask("what happened", group="relationship=friend"))
     assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-15"]
 
-    events = _events(browser.request("/api/ask?q=what+happened&from=2024-01-16&to=2024-01-31"))
+    events = _events(browser.ask("what happened", **{"from": "2024-01-16", "to": "2024-01-31"}))
     assert [e["date"] for e in events[-1][1]["entries"]] == ["2024-01-16"]
 
 
 def test_a_scope_that_finds_nothing_is_refused_before_streaming(browser, journal):
-    assert "no indexed note" in browser.get("/api/ask?q=hi&note=99999", status=404)["error"]
-    assert "must be a note's id" in browser.get("/api/ask?q=hi&note=john", status=400)["error"]
-    assert "tagged 'nope'" in browser.get("/api/ask?q=hi&tag=nope", status=404)["error"]
-    assert "property and a value" in browser.get("/api/ask?q=hi&group=relationship", status=400)["error"]
-    assert "No note's relationship" in browser.get("/api/ask?q=hi&group=relationship%3Denemy", status=404)["error"]
-    assert "is after" in browser.get("/api/ask?q=hi&from=2024-02-01&to=2024-01-01", status=400)["error"]
-    assert "a date like" in browser.get("/api/ask?q=hi&from=yesterday", status=400)["error"]
+    def refused(status, **kept_to):
+        return browser.post("/api/ask", {"q": "hi", **kept_to}, status=status)["error"]
+
+    assert "no indexed note" in refused(404, note=99999)
+    assert "must be a note's id" in refused(400, note="john")
+    assert "tagged 'nope'" in refused(404, tag="nope")
+    assert "property and a value" in refused(400, group="relationship")
+    assert "No note's relationship" in refused(404, group="relationship=enemy")
+    assert "is after" in refused(400, **{"from": "2024-02-01", "to": "2024-01-01"})
+    assert "a date like" in refused(400, **{"from": "yesterday"})
 
 
 def test_compare_sets_two_periods_side_by_side(browser, journal):

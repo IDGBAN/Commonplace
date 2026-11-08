@@ -1,16 +1,22 @@
-"""`journal browse`: a local, read-only web view of everything in the cache.
+"""`journal browse`: a local web view of everything in the cache.
 
-The server binds to 127.0.0.1, only answers GET, and opens the cache with
-db.connect_readonly, so it can run next to `journal watch` without touching it.
-Every value comes from store/query, the same functions the CLI and models use.
-Asking a question streams server-sent events from GET /api/ask, since an
-answer can take minutes and the page shows each step as it happens.
+The server binds to 127.0.0.1 and opens the cache with db.connect_readonly, so
+it can run next to `journal watch` without touching it. Every value comes from
+store/query, the same functions the CLI and models use.
+
+Reading is GET. Anything that does something is POST: asking a question, which
+sets the models going and may be kept in the history, and forgetting kept
+questions. A POST has to come from this server's own page and carry the token
+that page was given, so no other site can start one. Asking streams
+server-sent events, since an answer can take minutes and the page shows each
+step as it happens.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import secrets
 import sqlite3
 import sys
 import time
@@ -70,6 +76,10 @@ MAP_NOTES_MAX = 150
 MAP_MIN_SHARED = 2
 _MAX_ROWID = 2**63 - 1
 _OTHER_SITES = frozenset({"cross-site", "same-site"})
+# the page sends this with every POST; it gets the value from /api/session
+TOKEN_HEADER = "X-Journal-Token"
+# a question, the turns before it and what it's kept to fit many times over
+MAX_BODY_BYTES = 256 * 1024
 _NO_ENTRY = "There is no indexed entry with that id."
 _NO_NOTE = "There is no indexed note with that id."
 
@@ -662,34 +672,44 @@ def theme_page(req: Request, theme_id: str) -> Json:
 
 
 HISTORY_LISTED = 30
+_NO_QUESTION = "There's no question with that number in your history."
 
 
 def history_list(req: Request) -> Json:
+    limit = req.number("limit", HISTORY_LISTED, 1, max(req.config.history.keep, HISTORY_LISTED))
     return {
         "enabled": req.config.history.enabled,
+        "total": history.count(req.config),
         "items": [
             {k: v for k, v in kept.as_json().items() if k not in ("answer", "sources")}
-            for kept in history.recent(req.config, HISTORY_LISTED)
+            for kept in history.recent(req.config, limit)
         ],
     }
 
 
-def history_item(req: Request, kept_id: str) -> Json:
-    missing = "There's no question with that number in your history."
-    found = history.get(req.config, _row_id(kept_id, missing))
-    if found is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, missing)
+def _kept_json(req: Request, kept: history.Kept) -> Json:
     # ids change when files are indexed again, so they're looked up now
     dates = []
-    for d in found.sources.get("dates", []):
+    for d in kept.sources.get("dates", []):
         day = date.fromisoformat(d["date"])
         rows = store.entries_in_range(req.conn, day, day)
         dates.append({**d, "id": rows[0]["id"] if rows else None})
     notes = []
-    for title in found.sources.get("notes", []):
+    for title in kept.sources.get("notes", []):
         matches = store.find_notes(req.conn, title)
         notes.append({"title": title, "id": matches[0]["id"] if matches else None})
-    return {**found.as_json(), "sources": {"dates": dates, "notes": notes}}
+    return {**kept.as_json(), "sources": {"dates": dates, "notes": notes}}
+
+
+def history_item(req: Request, kept_id: str) -> Json:
+    row_id = _row_id(kept_id, _NO_QUESTION)
+    found = history.get(req.config, row_id)
+    if found is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, _NO_QUESTION)
+    # the turns before it in the same conversation, to read it in context and
+    # to follow it up the way `journal ask --after` does
+    earlier = [k for k in history.conversation_until(req.config, row_id) if k.id != found.id]
+    return {**_kept_json(req, found), "earlier": [_kept_json(req, k) for k in earlier]}
 
 
 def profile_page(req: Request) -> Json:
@@ -764,8 +784,9 @@ def search(req: Request) -> Json:
     }
 
 
-def _ask_params(params: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
-    question = params.get("q", "").strip()
+def _ask_params(body: Json) -> tuple[str, list[tuple[str, str]]]:
+    asked = body.get("q")
+    question = asked.strip() if isinstance(asked, str) else ""
     if not question:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Type a question to ask.")
     if len(question) > MAX_QUESTION_CHARS:
@@ -773,10 +794,7 @@ def _ask_params(params: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
             HTTPStatus.BAD_REQUEST,
             f"That question is over {MAX_QUESTION_CHARS} characters. Try a shorter one.",
         )
-    try:
-        raw = json.loads(params.get("history") or "[]")
-    except json.JSONDecodeError:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "The conversation so far couldn't be read.") from None
+    raw = body.get("history") or []
     if not isinstance(raw, list) or not all(
         isinstance(turn, list) and len(turn) == 2 and all(isinstance(x, str) for x in turn)
         for turn in raw
@@ -809,7 +827,36 @@ def _ask_scope(req: Request) -> tuple[store.EntryFilter | None, date | None, dat
     return only or None, date_from, date_to
 
 
+# What a POST can do besides asking. Each gets the config and the request's
+# JSON body, and opens whatever it writes to itself.
+
+
+def forget_question(config: Config, body: Json, kept_id: str) -> Json:
+    row_id = _row_id(kept_id, _NO_QUESTION)
+    if not history.delete(config, row_id):
+        raise ApiError(HTTPStatus.NOT_FOUND, _NO_QUESTION)
+    return {"deleted": row_id}
+
+
+def clear_history(config: Config, body: Json) -> Json:
+    try:
+        held = history.clear(config)
+    except OSError as exc:
+        raise ApiError(
+            HTTPStatus.CONFLICT,
+            f"Couldn't delete {history.history_path(config)}: {exc}. If a question is "
+            "being answered, try again once it's done.",
+        ) from exc
+    return {"cleared": held}
+
+
 Handler = Callable[..., Json]
+Action = Callable[..., Json]
+
+_ACTIONS: list[tuple[re.Pattern[str], Action]] = [
+    (re.compile(r"/api/history/(\d+)/delete"), forget_question),
+    (re.compile(r"/api/history/clear"), clear_history),
+]
 
 _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/overview"), overview),
@@ -858,21 +905,103 @@ class _Handler(BaseHTTPRequestHandler):
         if url.path.startswith("/api/") and self.headers.get("Sec-Fetch-Site") in _OTHER_SITES:
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Requests from other sites are refused."})
             return
-        if url.path == "/api/ask":
-            self._ask(url.query)
+        if url.path == "/api/session":
+            # only this server's own page can read the reply, so only it can POST
+            self._send_json(HTTPStatus.OK, {"token": self.server.token})
+        elif url.path == "/api/ask" or any(p.fullmatch(url.path) for p, _ in _ACTIONS):
+            self._wrong_method("POST")
         elif url.path.startswith("/api/"):
             self._api(url.path, url.query)
         else:
             self._static(url.path)
 
-    def _read_only(self) -> None:
+    def do_POST(self) -> None:
+        if self.headers.get("Host", "") not in self.server.allowed_hosts:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Unexpected Host header."})
+            return
+        path = urlsplit(self.path).path
+        action = next(
+            ((handler, match) for pattern, handler in _ACTIONS if (match := pattern.fullmatch(path))),
+            None,
+        )
+        if path != "/api/ask" and action is None:
+            if any(pattern.fullmatch(path) for pattern, _ in _ROUTES):
+                self._wrong_method("GET")
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "No such API route."})
+            return
+        try:
+            self._from_this_page()
+            body = self._body()
+        except ApiError as exc:
+            self._send_json(exc.status, {"error": str(exc)})
+            return
+        if action is None:
+            self._ask(body)
+        else:
+            self._act(action[0], body, [unquote(g) for g in action[1].groups()])
+
+    def _wrong_method(self, allowed: str = "GET, POST") -> None:
         self._send_json(
             HTTPStatus.METHOD_NOT_ALLOWED,
-            {"error": "The journal browser is read-only."},
-            {"Allow": "GET"},
+            {"error": f"This address only takes {allowed}."},
+            {"Allow": allowed},
         )
 
-    do_POST = do_PUT = do_PATCH = do_DELETE = _read_only
+    do_PUT = do_PATCH = do_DELETE = _wrong_method
+
+    def _from_this_page(self) -> None:
+        """Refuses a POST that this server's own page didn't send.
+
+        A page on another site can make a browser send a POST here. Browsers
+        say where a request came from, and that page can't read /api/session
+        to learn the token, so it fails on every count.
+        """
+        refused = ApiError(HTTPStatus.FORBIDDEN, "Requests from other sites are refused.")
+        if self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin":
+            raise refused
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in self.server.allowed_origins:
+            raise refused
+        sent = self.headers.get(TOKEN_HEADER, "")
+        if not secrets.compare_digest(sent.encode(), self.server.token.encode()):
+            # A page left open outlives a restart of `journal browse`. It asks
+            # /api/session again when it sees this status.
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "This page's session has ended. Reload it and try again.")
+
+    def _body(self) -> Json:
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+            raise ApiError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Send the request as application/json.")
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            raise ApiError(HTTPStatus.LENGTH_REQUIRED, "The request needs a Content-Length.") from None
+        if length < 0 or length > MAX_BODY_BYTES:
+            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "That request is too big.")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "The request couldn't be read as JSON.") from None
+        if not isinstance(body, dict):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "The request has to be a JSON object.")
+        return body
+
+    def _act(self, action: Action, body: Json, args: list[str]) -> None:
+        try:
+            payload = action(self.server.config, body, *args)
+        except ApiError as exc:
+            self._send_json(exc.status, {"error": str(exc)})
+        except JournalError as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+        except sqlite3.Error as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"That couldn't be saved: {exc}"})
+        except Exception as exc:  # noqa: BLE001 - otherwise the page just sees a dropped connection
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"The journal browser hit a bug: {type(exc).__name__}: {exc}"},
+            )
+        else:
+            self._send_json(HTTPStatus.OK, payload)
 
     def log_message(self, format: str, *args: Any) -> None:
         # Search text is in the URL. Keep it out of terminal scrollback.
@@ -908,11 +1037,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "No such API route."})
 
-    def _ask(self, query_string: str) -> None:
-        params = {k: v[-1] for k, v in parse_qs(query_string).items()}
+    def _ask(self, body: Json) -> None:
+        # what an answer is kept to is named as the entries page's address names it
+        params = {
+            k: str(v) for k, v in body.items() if isinstance(v, str | int) and not isinstance(v, bool)
+        }
         config = self.server.config
         try:
-            question, turns = _ask_params(params)
+            question, turns = _ask_params(body)
             with closing(db.connect_readonly(config)) as conn:
                 only, since, until = _ask_scope(Request(config, conn, params, self.server.make_client))
                 scope = history.scope_text(conn, only, since, until)
@@ -1023,6 +1155,9 @@ class BrowseServer(ThreadingHTTPServer):
         super().__init__((HOST, port), _Handler)
         self.port: int = self.socket.getsockname()[1]
         self.allowed_hosts = {f"{HOST}:{self.port}", f"localhost:{self.port}"}
+        self.allowed_origins = {f"http://{host}" for host in self.allowed_hosts}
+        # new on every start, and only ever handed to this server's own page
+        self.token = secrets.token_urlsafe(32)
 
     @property
     def url(self) -> str:
