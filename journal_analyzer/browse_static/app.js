@@ -56,6 +56,8 @@ const fmtMedium = dateFmt({ day: "numeric", month: "short", year: "numeric" });
 const fmtShort = dateFmt({ day: "numeric", month: "short" });
 const fmtMonth = dateFmt({ month: "long", year: "numeric" });
 const fmtMonthShort = dateFmt({ month: "short" });
+const fmtMonthLong = dateFmt({ month: "long" });
+const fmtToday = dateFmt({ weekday: "long", day: "numeric", month: "long" });
 const fmtWeekday = dateFmt({ weekday: "long" });
 
 const longDate = (iso) => (iso ? fmtLong.format(toDate(iso)) : "–");
@@ -211,7 +213,7 @@ let catalogAt = 0;
 function getCatalog(fresh = false) {
   if (fresh || !catalogCache || Date.now() - catalogAt > 60_000) {
     catalogAt = Date.now();
-    catalogCache = api("catalog").catch((err) => {
+    catalogCache = api("catalog").then(indexLinks).catch((err) => {
       catalogCache = null;
       throw err;
     });
@@ -221,9 +223,10 @@ function getCatalog(fresh = false) {
 
 // ---------------------------------------------------------------- shared pieces
 
+// `eyebrow` shows only when it's a link: the way back to the list this page is from
 function pageHead({ eyebrow, title, lede, actions, meta }) {
   return h("header", { class: "page-head" },
-    eyebrow && h("p", { class: "eyebrow" }, eyebrow),
+    eyebrow instanceof Node && h("p", { class: "crumb" }, eyebrow),
     h("div", { class: "head-row" },
       h("h1", { tabindex: "-1" }, title),
       actions && h("div", { class: "pager-nav" }, actions)),
@@ -291,7 +294,19 @@ function entryLines(entries, scale, { emptyText, aside } = {}) {
 // `focus` is what the API sends back for ?at=.
 function rawText(text, focus, emptyText) {
   if (!text) return h("div", { class: "raw empty" }, emptyText);
-  if (!focus || !focus.lines) return h("div", { class: "raw" }, text);
+  if (!focus || !focus.lines) {
+    // shown the way Obsidian would, with the stored text a click away
+    const body = h("div", { class: "raw md" }, md(text));
+    const toggle = h("button", { class: "link-button", type: "button", "aria-pressed": "false" }, "Show it as stored");
+    toggle.addEventListener("click", () => {
+      const stored = toggle.getAttribute("aria-pressed") !== "true";
+      toggle.setAttribute("aria-pressed", String(stored));
+      toggle.textContent = stored ? "Show it formatted" : "Show it as stored";
+      body.className = stored ? "raw" : "raw md";
+      fill(body, stored ? text : md(text));
+    });
+    return h("div", {}, body, toggle);
+  }
   const lines = text.split("\n");
   const [start, end] = focus.lines;
   return h("div", { class: "raw" },
@@ -373,6 +388,167 @@ function confirmAction({ title, body, action }) {
     dialog.showModal();
   });
 }
+
+// ---------------------------------------------------------------- markdown
+
+// What the models write is often Markdown. It's turned into elements here, one
+// text node at a time, so nothing a model or an entry says is ever read as HTML.
+// [[links]] and dates go to the day or note they name, when there is one.
+
+const linkIndex = { days: new Map(), notes: new Map() };
+
+function indexLinks(cat) {
+  linkIndex.days = new Map(cat.entries.map((e) => [e.date, e.id]));
+  linkIndex.notes = new Map();
+  for (const n of cat.notes) {
+    // a title wins over another note's alias, and an alias over a learned name
+    for (const names of [[n.title], n.aliases, n.learned]) {
+      for (const name of names) {
+        const key = name.toLowerCase();
+        if (!linkIndex.notes.has(key) || names.length === 1 && names[0] === n.title) linkIndex.notes.set(key, n.id);
+      }
+    }
+  }
+  return cat;
+}
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function wikilink(target, label) {
+  const [name, part] = target.split("#").map((x) => x.trim());
+  const isDay = ISO_DAY.test(name);
+  const id = isDay ? linkIndex.days.get(name) : linkIndex.notes.get(name.toLowerCase());
+  const text = label || `${isDay ? mediumDate(name) : name}${part ? ` › ${part.replace(/^\^/, "")}` : ""}`;
+  if (id == null) return h("span", { class: "cite none", title: isDay ? "No entry on that day" : "No note by that name" }, text);
+  const at = part ? { at: part } : null;
+  return h("a", { class: isDay && !part ? "cite day" : "cite", href: isDay ? href.entry(id, at) : href.note(id, at) }, text);
+}
+
+const MD_INLINE = new RegExp([
+  "`([^`\\n]+)`",                                        // 1 code
+  "\\[\\[([^\\]\\n|]+)(?:\\|([^\\]\\n]+))?\\]\\]",       // 2 3 [[target|label]]
+  "\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)",     // 4 5 [text](url)
+  "\\*\\*(?=\\S)([^\\n]+?)(?<=\\S)\\*\\*",               // 6 **bold**
+  "(?<![\\w*])\\*(?=[^\\s*])([^*\\n]+?)(?<=[^\\s*])\\*(?![\\w*])", // 7 *italic*
+  "(?<![\\w_])__(?=\\S)([^\\n]+?)(?<=\\S)__(?![\\w_])",  // 8 __bold__
+  "(?<![\\w_])_(?=[^\\s_])([^_\\n]+?)(?<=[^\\s_])_(?![\\w_])", // 9 _italic_
+  "~~(?=\\S)([^\\n]+?)(?<=\\S)~~",                       // 10 ~~struck~~
+  "(?<![\\w-])(\\d{4}-\\d{2}-\\d{2})(?![\\w-])",         // 11 a bare date
+].join("|"), "g");
+
+function mdInline(text) {
+  const out = [];
+  let last = 0;
+  for (const m of text.matchAll(MD_INLINE)) {
+    let node;
+    if (m[1] != null) node = h("code", {}, m[1]);
+    else if (m[2] != null) node = wikilink(m[2], m[3]);
+    else if (m[4] != null) node = h("a", { href: m[5], target: "_blank", rel: "noopener noreferrer" }, mdInline(m[4]));
+    else if (m[6] != null || m[8] != null) node = h("strong", {}, mdInline(m[6] ?? m[8]));
+    else if (m[7] != null || m[9] != null) node = h("em", {}, mdInline(m[7] ?? m[9]));
+    else if (m[10] != null) node = h("s", {}, mdInline(m[10]));
+    else if (linkIndex.days.has(m[11])) node = h("a", { class: "cite day", href: href.entry(linkIndex.days.get(m[11])) }, m[11]);
+    else continue;
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(node);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+const MD_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+const MD_RULE = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
+const MD_FENCE = /^\s{0,3}(```|~~~)/;
+const MD_TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+const mdCells = (line) => line.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+
+// items at one indent become a list; deeper ones go inside the item above them
+function mdList(items) {
+  const base = items[0].indent;
+  const list = h(items[0].ordered ? "ol" : "ul", {});
+  let i = 0;
+  while (i < items.length) {
+    const li = h("li", {}, mdInline(items[i].text));
+    let j = i + 1;
+    while (j < items.length && items[j].indent > base) j++;
+    if (j > i + 1) li.append(mdList(items.slice(i + 1, j)));
+    list.append(li);
+    i = j;
+  }
+  return list;
+}
+
+function md(text) {
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let para = [];
+  const flush = () => {
+    if (para.length) out.push(h("p", {}, mdInline(para.join("\n"))));
+    para = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = MD_FENCE.exec(line);
+    if (fence) {
+      flush();
+      const code = [];
+      // a reply still being written may not have closed its fence yet
+      for (i++; i < lines.length && !lines[i].trimStart().startsWith(fence[1]); i++) code.push(lines[i]);
+      out.push(h("pre", {}, h("code", {}, code.join("\n"))));
+    } else if (!line.trim()) {
+      flush();
+    } else if (MD_RULE.test(line)) {
+      flush();
+      out.push(h("hr", {}));
+    } else if (/^\s{0,3}#{1,6}\s+\S/.test(line)) {
+      flush();
+      const [, marks, title] = /^\s*(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      // the page has its own h1 and h2, so a reply's headings start under them
+      out.push(h(marks.length <= 2 ? "h3" : "h4", {}, mdInline(title)));
+    } else if (/^\s{0,3}>/.test(line)) {
+      flush();
+      const quoted = [];
+      for (; i < lines.length && /^\s{0,3}>/.test(lines[i]); i++) quoted.push(lines[i].replace(/^\s{0,3}>\s?/, ""));
+      i--;
+      out.push(h("blockquote", {}, md(quoted.join("\n"))));
+    } else if (MD_ITEM.test(line)) {
+      flush();
+      const items = [];
+      for (; i < lines.length; i++) {
+        const item = MD_ITEM.exec(lines[i]);
+        const next = item && { indent: item[1].replace(/\t/g, "    ").length, ordered: /\d/.test(item[2]), text: item[3] };
+        // bullets after numbers, or the other way round, are a new list
+        if (next && items.length && next.indent <= items[0].indent && next.ordered !== items[0].ordered) break;
+        if (next) items.push(next);
+        else if (lines[i].trim() && /^\s/.test(lines[i])) items[items.length - 1].text += `\n${lines[i].trim()}`;
+        else if (!lines[i].trim() && MD_ITEM.test(lines[i + 1] || "")) continue;
+        else break;
+      }
+      i--;
+      out.push(mdList(items));
+    } else if (line.includes("|") && MD_TABLE_RULE.test(lines[i + 1] || "")) {
+      flush();
+      const head = mdCells(line);
+      const rows = [];
+      for (i += 2; i < lines.length && lines[i].includes("|") && lines[i].trim(); i++) rows.push(mdCells(lines[i]));
+      i--;
+      out.push(h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, head.map((c) => h("th", {}, mdInline(c))))),
+        h("tbody", {}, rows.map((r) => h("tr", {}, head.map((_, k) => h("td", {}, mdInline(r[k] || "")))))))));
+    } else {
+      para.push(line.trim());
+    }
+  }
+  flush();
+  return out;
+}
+
+// for one line in a list, where a heading or a bullet would only be clutter
+const mdPlain = (text) => String(text || "")
+  .replace(/^\s{0,3}(#{1,6}|[-*+]|\d{1,9}[.)]|>)\s+/gm, "")
+  .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2").replace(/\[\[([^\]]+)\]\]/g, "$1")
+  .replace(/\*\*|__|~~|`/g, "").replace(/\s*\n+\s*/g, " ");
 
 // ---------------------------------------------------------------- charts
 
@@ -551,25 +727,36 @@ async function overviewView() {
 
   if (!c.entries && !c.notes) {
     return h("div", {},
-      pageHead({ eyebrow: "What the app knows", title: "Nothing indexed yet" }),
-      empty("The cache is empty. Run ", h("code", {}, "journal index"), " and reload this page."));
+      pageHead({ title: "Nothing here yet", lede: "Commonplace hasn't read your journal yet." }),
+      empty("Run ", h("code", {}, "journal index"), " in a terminal, then reload this page. It reads each entry once and remembers it, so the first run is the long one."));
   }
 
+  const today = toDate(o.today);
+  const input = h("input", {
+    type: "text", placeholder: "Ask your journal anything", "aria-label": "Ask your journal",
+    autocomplete: "off", maxlength: 2000,
+  });
+  const form = h("form", { class: "search-box ask-box", role: "search" },
+    input, h("button", { class: "button primary", type: "submit" }, "Ask"));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const q = input.value.trim();
+    location.hash = q ? href.ask(q) : "#/ask";
+  });
+  const lastMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1));
+  const prompts = [
+    `How was ${fmtMonthLong.format(lastMonth)}?`,
+    "What have I been writing about lately?",
+    "Who did I see most this year?",
+  ];
+
   const lede = h("p", { class: "lede" },
-    "The app has read ", h("strong", {}, plural(c.entries, "entry", "entries")),
-    c.date_from ? [" written between ", h("strong", {}, fmtDayMonthYear.format(toDate(c.date_from))), " and ", h("strong", {}, fmtDayMonthYear.format(toDate(c.date_to)))] : null,
-    ", ", h("strong", {}, plural(c.words, "word")), " in all, plus ",
-    h("strong", {}, plural(c.notes, "reference note")),
-    " about the people, places and things they link to. Each mark below is one entry, coloured by the mood the app gave it.");
+    h("strong", {}, plural(c.entries, "entry", "entries")),
+    c.date_from ? [" since ", fmtMonth.format(toDate(c.date_from))] : null,
+    ", ", plural(c.words, "word"), " in all, and ",
+    h("strong", {}, plural(c.notes, "note")), " about the people, places and things you link to.");
 
-  const facts = h("div", { class: "facts" },
-    fact(fmtMood(o.baseline_mood), `average mood, from ${plural(o.scored_entries, "scored entry", "scored entries")}`, href.tags()),
-    fact(fmtNum(w.longest_streak), `longest streak in days${w.longest_streak_end ? `, to ${mediumDate(w.longest_streak_end)}` : ""}`, href.calendar(w.longest_streak_end?.slice(0, 4))),
-    fact(fmtNum(c.tags), "tags the model gave", href.tags()),
-    fact(fmtNum(c.links), "links from entries to notes", href.notes()),
-    fact(fmtNum(c.rollups), "digests written", href.digests()),
-    fact(fmtNum(c.files), `files tracked${c.errored_files ? `, ${c.errored_files} with errors` : ""}`, href.files()));
-
+  const PROBLEMS_SHOWN = 3;
   const problems = [
     ...o.errored_files.map((f) => h("div", { class: "notice" },
       h("span", { class: "notice-label" }, "Couldn't index"),
@@ -579,6 +766,14 @@ async function overviewView() {
       h("span", {}, futureLink(cat, f.date), " from ", h("span", { class: "path" }, f.vault_path),
         ". Usually a typo in the file name, and it throws off streaks."))),
   ];
+
+  const facts = h("div", { class: "facts" },
+    fact(fmtMood(o.baseline_mood), `average mood, from ${plural(o.scored_entries, "scored entry", "scored entries")}`, href.tags()),
+    fact(fmtNum(w.longest_streak), `longest streak in days${w.longest_streak_end ? `, to ${mediumDate(w.longest_streak_end)}` : ""}`, href.calendar(w.longest_streak_end?.slice(0, 4))),
+    fact(fmtNum(c.tags), "tags", href.tags()),
+    fact(fmtNum(c.links), "links from entries to notes", href.notes()),
+    fact(fmtNum(c.rollups), "digests written", href.digests()),
+    fact(fmtNum(c.files), `files tracked${c.errored_files ? `, ${c.errored_files} with errors` : ""}`, href.files()));
 
   const s = o.setup;
   const setup = h("dl", { class: "setup" },
@@ -595,22 +790,33 @@ async function overviewView() {
     h("dt", {}, "Meaning vectors"), h("dd", {}, s.embed_model, s.embed_dim ? `, ${s.embed_dim} dimensions` : ""),
     h("dt", {}, "Reranking"), h("dd", {}, s.reranking || "off"));
 
+  const latest = cat.entries.slice(-5).reverse();
   return h("div", {},
-    h("header", { class: "page-head" },
-      h("p", { class: "eyebrow" }, "What the app knows"),
-      h("h1", { tabindex: "-1" }, "Everything it has read, at a glance"),
+    h("header", { class: "page-head home-head" },
+      h("h1", { tabindex: "-1" }, fmtToday.format(today)),
       lede,
-      cat.entries.length ? yearStrips(cat.entries, scale) : null),
-    problems.length ? section("Needs a look", problems) : null,
+      h("div", { class: "home-ask" },
+        form,
+        h("div", { class: "prompts" }, "Try", prompts.map((q) => h("a", { class: "chip", href: href.ask(q) }, q))))),
+    problems.length ? section("Needs a look", [
+      problems.slice(0, PROBLEMS_SHOWN),
+      problems.length > PROBLEMS_SHOWN
+        ? h("p", { class: "section-foot" }, h("a", { href: href.files({ show: "problems" }) }, `All ${plural(o.errored_files.length, "file")} that couldn't be indexed`))
+        : null,
+    ]) : null,
+    h("div", { class: "home-grid" },
+      section("On this day", entryLines(o.on_this_day, scale, {
+        emptyText: `Nothing written on ${fmtShort.format(today)} in other years.`,
+      }), { note: `${fmtShort.format(today)} in other years` }),
+      section("Lately", entryLines(latest, scale), { note: h("a", { href: href.entries() }, "All entries") })),
+    cat.entries.length ? section("Every day you wrote", yearStrips(cat.entries, scale), {
+      note: "one mark for each entry, coloured by its mood",
+    }) : null,
     h("section", { class: "section" }, facts),
     section("Mood by month", monthlyMoodChart(o.monthly_mood, o.baseline_mood, scale), {
-      note: "click a bar to see that month's entries",
+      note: "pick a bar to see that month's entries",
     }),
-    h("div", { class: "two-col" },
-      section(`On this day`, entryLines(o.on_this_day, scale, {
-        emptyText: `Nothing written on ${fmtShort.format(toDate(o.today))} in other years.`,
-      }), { note: fmtShort.format(toDate(o.today)) }),
-      section("How it's set up", setup)));
+    h("details", { class: "about" }, h("summary", {}, "How it's set up"), setup));
 }
 
 function futureLink(cat, iso) {
@@ -945,7 +1151,7 @@ async function entryView([id], params) {
       h("article", {},
         h("p", { class: "reading-label" }, e.focus && e.focus.lines
           ? `Your entry, as the app stored it. The “${e.focus.label}” part a link points at is marked.`
-          : "Your entry, as the app stored it. Links and embeds appear as plain text, the way the models read them."),
+          : "Your entry, as you wrote it. The models read the same text without the formatting."),
         rawText(e.raw_text, e.focus, "The entry has no text."),
         e.photos.length ? h("div", { class: "photos" },
           h("p", { class: "reading-label" }, "Its photos, as the vision model described them"),
@@ -1119,7 +1325,7 @@ async function noteView([id], params) {
   const qualifies = n.digest_min_mentions > 0 && n.mentions && n.mentions.count >= n.digest_min_mentions;
   const overYears = n.digest
     ? section("Over the years", [
-      h("p", { class: "digest-summary" }, n.digest.summary || "The digest is empty."),
+      h("div", { class: "digest-summary md" }, md(n.digest.summary || "The digest is empty.")),
       n.digest.stale && h("p", { class: "turn-meta" }, h("span", { class: "status pending" }, "out of date"),
         " An entry that links here changed since it was written. The next journal rollup rewrites it."),
     ], { note: `written ${stamp(n.digest.generated_at)} from ${plural(n.digest.entries, "entry", "entries")}` })
@@ -1139,7 +1345,7 @@ async function noteView([id], params) {
         props.length ? h("dl", { class: "props" }, props.map(([k, v]) => [h("dt", {}, k), h("dd", {}, propValue(k, v))])) : null,
         h("p", { class: "reading-label" }, n.focus && n.focus.lines
           ? `The note, as the app stored it. The “${n.focus.label}” part a link points at is marked.`
-          : "The note, as the app stored it"),
+          : "The note, as you wrote it"),
         rawText(n.raw_text, n.focus, "This note has no text of its own.")),
       margin),
     overYears,
@@ -1268,7 +1474,7 @@ async function digestsView([type]) {
         h("div", { class: "digest-sub" }, kindLabel(d.kind), d.first ? ` · ${mediumDate(d.first)} to ${mediumDate(d.last)}` : ""),
         h("div", { class: "digest-sub" }, moodChip(d.mood, scale), ` · ${plural(d.entries ?? 0, "entry", "entries")}`),
         d.stale && h("div", { class: "digest-sub" }, h("span", { class: "status pending" }, "out of date"))),
-      h("div", { class: "digest-summary clamp" }, d.summary || "No summary text."))))
+      h("div", { class: "digest-summary clamp" }, mdPlain(d.summary) || "No summary text."))))
     : empty(data.note_min_mentions
       ? ["No relationship digests yet. ", h("code", {}, "journal rollup"), ` writes one for every note linked from ${data.note_min_mentions} or more entries.`]
       : ["Relationship digests are turned off (", h("code", {}, "note_min_mentions = 0"), " in config.toml)."]);
@@ -1288,7 +1494,7 @@ async function digestsView([type]) {
           h("div", { class: "digest-sub" }, periodRange(d.type, d.start, d.end)),
           h("div", { class: "digest-sub" }, moodChip(d.mood, scale), ` · ${plural(d.entries ?? 0, "entry", "entries")}`),
           d.stale && h("div", { class: "digest-sub" }, h("span", { class: "status pending" }, "out of date"))),
-        h("div", { class: "digest-summary clamp" }, d.summary || "No summary text."),
+        h("div", { class: "digest-summary clamp" }, mdPlain(d.summary) || "No summary text."),
         d.tags.length ? h("div", { class: "digest-tags" }, d.tags.join(" · ")) : null)))
       : current === "range"
         ? empty("No digests of a span of days yet. For a trip or a hard fortnight, ", h("code", {}, "journal digest 2024-03-02..2024-03-11 --refresh"), " writes one, and answers about those days read it.")
@@ -1334,7 +1540,7 @@ async function digestView([type, key]) {
     h("div", { class: "folio" },
       h("article", {},
         h("p", { class: "reading-label" }, r ? "What the model wrote about this period" : "No digest for this period yet"),
-        h("div", { class: r && r.summary ? "raw" : "raw empty" }, (r && r.summary) || "Nothing written.")),
+        r && r.summary ? h("div", { class: "raw md" }, md(r.summary)) : h("div", { class: "raw empty" }, "Nothing written.")),
       margin),
     d.entries.length ? askHere({ from: d.start, to: d.end }, "What stood out in this period?",
       `Answers only read the entries from ${periodRange(type, d.start, d.end)}.`) : null,
@@ -1829,7 +2035,7 @@ async function reviewView([period]) {
   document.title = `${r.title} in review · Commonplace`;
 
   const digest = r.digest
-    ? [h("div", { class: "raw" }, r.digest.summary),
+    ? [h("div", { class: "raw md" }, md(r.digest.summary)),
       r.digest.stale && h("p", { class: "turn-meta" }, h("span", { class: "status pending" }, "out of date"),
         " Some entries changed after this was written. ", h("code", {}, `journal digest ${r.key} --refresh`), " rewrites it.")]
     : empty(`There's no ${r.kind} digest yet. `, h("code", {}, `journal digest ${r.key} --refresh`), " writes one.");
@@ -2290,7 +2496,7 @@ function thinkingView(turn) {
   return h("details", { class: "turn-read turn-thinking", open },
     h("summary", { onclick: remember },
       turn.status === "running" && !turn.partial ? "Its thinking so far" : "Its thinking"),
-    h("div", { class: "turn-thinking-text" }, turn.thinking));
+    h("div", { class: "turn-thinking-text md" }, md(turn.thinking)));
 }
 
 function turnView(turn, scale, index) {
@@ -2307,7 +2513,7 @@ function turnView(turn, scale, index) {
         onclick: () => { ask.turns.splice(ask.turns.indexOf(turn), 1); changed(); },
       }, "Remove")));
   } else if (turn.status === "running") {
-    if (turn.partial) parts.push(h("div", { class: "turn-answer writing" }, turn.partial));
+    if (turn.partial) parts.push(h("div", { class: "turn-answer md writing" }, md(turn.partial)));
     parts.push(h("div", { class: "turn-running" },
       ...stageView(turn.partial ? "Writing…" : turn.stage),
       h("button", { class: "button", type: "button", onclick: () => ask.controller?.abort() }, "Cancel")));
@@ -2319,7 +2525,7 @@ function turnView(turn, scale, index) {
     const a = turn.answer;
     const readCount = a.entries.length + a.notes.length;
     parts.push(
-      h("div", { class: "turn-answer" }, a.body),
+      h("div", { class: "turn-answer md" }, md(a.body)),
       sourceChips(a),
       sourceQuotes(a),
       h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[a.stage] || a.stage}${byText(a.model)}${tookText(a.timings)}.`),
@@ -2341,15 +2547,17 @@ async function askView(_, params) {
   const scale = cat.mood_scale;
   document.title = "Ask · Commonplace";
   const thread = h("div", { class: "thread", "aria-live": "polite" });
+  const start = h("div", { class: "ask-empty" });
   const input = h("input", {
     type: "text", placeholder: "When did I last see John? How was March?", "aria-label": "Your question",
     autocomplete: "off", maxlength: 2000,
   });
-  const go = h("button", { class: "button", type: "submit" }, "Ask");
+  const go = h("button", { class: "button primary", type: "submit" }, "Ask");
   const reset = h("button", { class: "button", type: "button" }, "New conversation");
-  const hint = h("p", { class: "section-note" });
+  const hint = h("span", { class: "section-note" });
   const scopeSlot = h("div", { class: "ask-scope" });
   const form = h("form", { class: "search-box ask-box", role: "search" }, input, go);
+  const earlier = earlierQuestions();
 
   // a question from the jump box is about everything; one from a page, about what it shows
   const fromLink = scopeFrom(params);
@@ -2357,7 +2565,7 @@ async function askView(_, params) {
   else if ((params.get("q") || "").trim()) ask.scope = null;
 
   const draw = () => {
-    const busy = ask.turns.some((t) => t.status === "running" || t.status === "queued");
+    const busy = askBusy();
     go.textContent = busy ? "Queue" : "Ask";
     go.title = busy ? "Ask this once the questions above are answered" : "";
     reset.hidden = !ask.turns.length || busy;
@@ -2370,11 +2578,10 @@ async function askView(_, params) {
         }, "×"))
       : null);
     hint.textContent = ask.turns.some((t) => t.status === "done")
-      ? "Follow-ups like “what about the month after?” build on the answers above."
-      : "";
-    fill(thread, ask.turns.length
-      ? ask.turns.map((t, i) => turnView(t, scale, i))
-      : empty("Ask anything about your journal. Answers are built from your entries and notes the same way ", h("code", {}, "journal ask"), " does, and each one lists what it read. Questions need Ollama running; everything else on these pages works without it."));
+      ? "A follow-up like “and the month after?” builds on the answers above."
+      : "Needs Ollama running. An answer can take a few minutes.";
+    start.hidden = earlier.hidden = ask.turns.length > 0;
+    fill(thread, ask.turns.map((t, i) => turnView(t, scale, i)));
   };
   ask.redraw = () => {
     if (thread.isConnected) draw();
@@ -2386,6 +2593,8 @@ async function askView(_, params) {
     if (!q) return;
     input.value = "";
     askQuestion(q);
+    // the new question is at the bottom, by the box it was typed in
+    requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight }));
   });
   reset.addEventListener("click", () => {
     ask.turns = [];
@@ -2394,6 +2603,9 @@ async function askView(_, params) {
     input.focus();
   });
 
+  fill(start,
+    h("p", {}, "Ask in plain words. The answer cites the days and notes it drew on, lists everything it read, and you can open each one."));
+
   const preset = (params.get("q") || "").trim();
   if (preset || fromLink) {
     replaceParams("/ask", {});
@@ -2401,13 +2613,13 @@ async function askView(_, params) {
   }
   if (preset) askQuestion(preset);
   draw();
-  setTimeout(() => input.focus(), 0);
-  return h("div", {},
-    pageHead({
-      eyebrow: "Questions about your journal", title: "Ask",
-      lede: "Ask in plain words. The answer cites the days and notes it drew on, and you can open each one.",
-    }),
-    thread, scopeSlot, form, h("div", { class: "ask-foot" }, hint, reset), notifyToggle(), earlierQuestions());
+  setTimeout(() => input.focus({ preventScroll: true }), 0);
+  return h("div", { class: "ask-page" },
+    pageHead({ title: "Ask", actions: [reset, h("a", { class: "button", href: href.historyList() }, "Earlier questions")] }),
+    start, thread, earlier,
+    h("div", { class: "composer" },
+      scopeSlot, form,
+      h("div", { class: "ask-foot" }, hint, notifyToggle())));
 }
 
 // ---------------------------------------------------------------- earlier questions
@@ -2473,11 +2685,11 @@ function earlierQuestions() {
   const slot = h("div", {});
   api("history", { limit: ASK_PAGE_QUESTIONS }).then((data) => {
     if (!data.items.length) return;
-    fill(slot, section("Earlier questions", [
-      h("ol", { class: "lines" }, data.items.map((k) => questionLine(k))),
-      h("p", { class: "section-foot" },
-        h("a", { href: href.historyList() }, data.total > data.items.length ? `All ${plural(data.total, "question")}` : "Manage your history")),
-    ], { note: data.enabled ? null : "history is off, so nothing new is kept" }));
+    fill(slot, section("Lately you asked", h("ol", { class: "lines" }, data.items.map((k) => questionLine(k))), {
+      note: data.enabled
+        ? h("a", { href: href.historyList() }, data.total > data.items.length ? `All ${plural(data.total, "question")}` : "Manage")
+        : "history is off, so nothing new is kept",
+    }));
   }).catch(() => {});
   return slot;
 }
@@ -2542,7 +2754,7 @@ function keptTurn(k) {
 function keptAnswer(k) {
   return [
     k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
-    h("div", { class: "turn-answer" }, answerBody(k.answer)),
+    h("div", { class: "turn-answer md" }, md(answerBody(k.answer))),
     sourceChips(k),
     h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}${byText(k.model)}${tookText(k.timings)}.`),
     timingsView(k.timings),
@@ -2611,7 +2823,7 @@ async function youView() {
     ? h("div", { class: "folio" },
       h("article", {},
         h("p", { class: "reading-label" }, "As the precise model wrote it from the facts below"),
-        h("div", { class: "raw" }, p.text)),
+        h("div", { class: "raw md" }, md(p.text))),
       h("aside", { class: "margin", "aria-label": "About this profile" },
         h("p", { class: "margin-title" }, "Where it comes from"),
         p.names && gloss("Names", h("p", { class: "gloss-summary" }, p.names)),
@@ -2697,6 +2909,7 @@ const routes = [
 ];
 
 let renderToken = 0;
+const linksReady = getCatalog().catch(() => null);
 
 async function render() {
   const raw = location.hash.replace(/^#/, "") || "/";
@@ -2724,6 +2937,8 @@ async function render() {
 
   const slow = setTimeout(() => document.body.classList.add("is-loading"), 120);
   try {
+    // links in what the models wrote need to know which days and notes exist
+    await linksReady;
     const node = await view(args, params);
     if (mine !== renderToken) return;
     fill(page, node);
@@ -2744,7 +2959,7 @@ function updateRail(overview) {
     const key = el.dataset.count;
     el.textContent = counts[key] != null ? fmtNum(counts[key]) : "";
     if (key === "files" && counts.errored_files) {
-      el.prepend(h("span", { class: "alert-dot", title: `${plural(counts.errored_files, "file")} failed to index` }, "●"), " ");
+      el.prepend(h("span", { class: "alert-dot", role: "img", "aria-label": `${plural(counts.errored_files, "file")} couldn't be indexed`, title: `${plural(counts.errored_files, "file")} couldn't be indexed` }), " ");
     }
   }
 }
@@ -2882,9 +3097,17 @@ document.addEventListener("keydown", (ev) => {
   const typing = target instanceof HTMLElement &&
     (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName));
   if (typing) return;
+  if (document.querySelector("dialog[open]")) return;
   if (ev.key === "/") {
     ev.preventDefault();
     jump.input.focus();
+  } else if (ev.key === "?") {
+    showKeys();
+  } else if (ev.key === "a") {
+    ev.preventDefault();
+    location.hash = "#/ask";
+  } else if (ev.key === "h") {
+    location.hash = "#/";
   } else if (currentNeighbours && (ev.key === "k" || ev.key === "ArrowLeft") && currentNeighbours.prev) {
     location.hash = currentNeighbours.prev;
   } else if (currentNeighbours && (ev.key === "j" || ev.key === "ArrowRight") && currentNeighbours.next) {
@@ -2892,10 +3115,55 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+const KEYS = [
+  [["/"], "Find a day, note or tag, or ask a question"],
+  [["a"], "Go to Ask"],
+  [["h"], "Go to Home"],
+  [["j", "k"], "The next and the previous entry, on an entry's page"],
+  [["?"], "This list"],
+  [["Esc"], "Close a list or a box like this one"],
+];
+
+function showKeys() {
+  const dialog = h("dialog", { class: "dialog", "aria-labelledby": "keys-title" },
+    h("h2", { id: "keys-title" }, "Keyboard shortcuts"),
+    h("dl", { class: "keys" }, KEYS.map(([keys, what]) => [
+      h("dt", {}, keys.map((k) => h("kbd", {}, k))), h("dd", {}, what),
+    ])),
+    h("div", { class: "dialog-actions" },
+      h("button", { class: "button", type: "button", autofocus: true, onclick: () => dialog.close() }, "Close")));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+document.getElementById("keys").addEventListener("click", showKeys);
 document.getElementById("skip").addEventListener("click", () => page.focus());
 
-const themeButton = document.getElementById("theme");
+// On a narrow screen the sections slide in from the menu button.
+const menuButton = document.getElementById("menu");
+const railShade = document.getElementById("rail-shade");
+
+function setMenu(open) {
+  document.body.classList.toggle("rail-open", open);
+  menuButton.setAttribute("aria-expanded", String(open));
+  railShade.hidden = !open;
+}
+
+menuButton.addEventListener("click", () => setMenu(!document.body.classList.contains("rail-open")));
+railShade.addEventListener("click", () => setMenu(false));
+document.getElementById("rail").addEventListener("click", (ev) => {
+  if (ev.target.closest("a")) setMenu(false);
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && document.body.classList.contains("rail-open")) {
+    setMenu(false);
+    menuButton.focus();
+  }
+});
+
 const THEMES = ["system", "light", "dark"];
+const themeButtons = [...document.querySelectorAll("[data-theme-pick]")];
 
 function readTheme() {
   try {
@@ -2908,23 +3176,24 @@ function readTheme() {
 function applyTheme(theme) {
   if (theme === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", theme);
-  themeButton.textContent = `Theme: ${theme}`;
-  themeButton.setAttribute("aria-label", `Colour theme: ${theme}. Click to change.`);
+  for (const button of themeButtons) {
+    button.setAttribute("aria-pressed", String(button.dataset.themePick === theme));
+  }
 }
 
-let theme = readTheme();
+for (const button of themeButtons) {
+  button.addEventListener("click", () => {
+    try {
+      localStorage.setItem("theme", button.dataset.themePick);
+    } catch {
+      // private windows can refuse storage; the theme still changes for this visit
+    }
+    applyTheme(button.dataset.themePick);
+  });
+}
 
-themeButton.addEventListener("click", () => {
-  theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
-  try {
-    localStorage.setItem("theme", theme);
-  } catch {
-    // private windows can refuse storage; the theme still changes for this visit
-  }
-  applyTheme(theme);
-});
-
-applyTheme(theme);
+applyTheme(readTheme());
+window.addEventListener("hashchange", () => setMenu(false));
 window.addEventListener("hashchange", render);
 api("overview").then(updateRail).catch(() => {});
 render();

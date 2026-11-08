@@ -12,38 +12,59 @@
 <body>
   <button class="skip" type="button" id="skip">Skip to content</button>
   <div class="shell">
-    <nav class="rail" aria-label="Sections">
-      <a class="brand" href="#/">
-        <span class="brand-name">Commonplace</span>
-        <span class="brand-sub">what the app knows</span>
-      </a>
-      <ul class="rail-list">
-        <li><a href="#/" data-nav="overview">Overview</a></li>
-        <li><a href="#/ask" data-nav="ask">Ask</a></li>
-        <li><a href="#/you" data-nav="you">You</a></li>
-        <li><a href="#/calendar" data-nav="calendar">Calendar</a></li>
-        <li><a href="#/entries" data-nav="entries">Entries <span class="count" data-count="entries"></span></a></li>
-        <li><a href="#/notes" data-nav="notes">Notes <span class="count" data-count="notes"></span></a></li>
-        <li><a href="#/tags" data-nav="tags">Tags <span class="count" data-count="tags"></span></a></li>
-        <li><a href="#/metrics" data-nav="metrics">Numbers</a></li>
-        <li><a href="#/digests" data-nav="digests">Digests <span class="count" data-count="rollups"></span></a></li>
-        <li><a href="#/themes" data-nav="themes">Themes</a></li>
-        <li><a href="#/files" data-nav="files">Files <span class="count" data-count="files"></span></a></li>
-        <li><a href="#/search" data-nav="search">Search</a></li>
-      </ul>
-      <p class="rail-foot">Runs on this computer. Your notes are never changed.</p>
+    <nav class="rail" id="rail" aria-label="Sections">
+      <a class="brand" href="#/">Commonplace</a>
+      <div class="rail-scroll">
+        <ul class="rail-list">
+          <li><a href="#/" data-nav="overview"><span class="label">Home</span></a></li>
+          <li><a href="#/ask" data-nav="ask"><span class="label">Ask</span></a></li>
+        </ul>
+        <p class="rail-group" id="group-journal">Journal</p>
+        <ul class="rail-list" aria-labelledby="group-journal">
+          <li><a href="#/entries" data-nav="entries"><span class="label">Entries</span> <span class="count" data-count="entries"></span></a></li>
+          <li><a href="#/calendar" data-nav="calendar"><span class="label">Calendar</span></a></li>
+          <li><a href="#/notes" data-nav="notes"><span class="label">Notes</span> <span class="count" data-count="notes"></span></a></li>
+          <li><a href="#/tags" data-nav="tags"><span class="label">Tags</span> <span class="count" data-count="tags"></span></a></li>
+          <li><a href="#/search" data-nav="search"><span class="label">Search</span></a></li>
+        </ul>
+        <p class="rail-group" id="group-patterns">Patterns</p>
+        <ul class="rail-list" aria-labelledby="group-patterns">
+          <li><a href="#/digests" data-nav="digests"><span class="label">Digests</span> <span class="count" data-count="rollups"></span></a></li>
+          <li><a href="#/themes" data-nav="themes"><span class="label">Themes</span></a></li>
+          <li><a href="#/metrics" data-nav="metrics"><span class="label">Numbers</span></a></li>
+          <li><a href="#/you" data-nav="you"><span class="label">You</span></a></li>
+        </ul>
+        <p class="rail-group" id="group-upkeep">Upkeep</p>
+        <ul class="rail-list" aria-labelledby="group-upkeep">
+          <li><a href="#/files" data-nav="files"><span class="label">Files</span> <span class="count" data-count="files"></span></a></li>
+        </ul>
+      </div>
+      <div class="rail-foot">
+        <div class="theme-pick" role="group" aria-label="Colour theme">
+          <button type="button" data-theme-pick="system">Auto</button>
+          <button type="button" data-theme-pick="light">Light</button>
+          <button type="button" data-theme-pick="dark">Dark</button>
+        </div>
+        <button class="link-button" type="button" id="keys">Keyboard shortcuts</button>
+        <p>Runs on this computer. Your notes are never changed.</p>
+      </div>
     </nav>
+    <div class="rail-shade" id="rail-shade" hidden></div>
 
     <header class="topbar">
+      <button class="icon-button" type="button" id="menu" aria-controls="rail" aria-expanded="false" aria-label="Sections">
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <a class="topbar-brand" href="#/">Commonplace</a>
       <div class="jump">
-        <label class="visually-hidden" for="jump">Jump to a date, note or tag</label>
-        <input id="jump" type="search" placeholder="Jump to a date, note or tag" autocomplete="off"
+        <label class="visually-hidden" for="jump">Find a day, note or tag, or ask a question</label>
+        <svg class="jump-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.25" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.6 12.6 17 17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <input id="jump" type="search" placeholder="Find a day, note or tag, or ask" autocomplete="off"
                spellcheck="false" role="combobox" aria-controls="jump-list" aria-expanded="false"
                aria-autocomplete="list">
         <kbd class="jump-key" aria-hidden="true">/</kbd>
         <ul id="jump-list" class="jump-list" role="listbox" hidden></ul>
       </div>
-      <button id="theme" class="theme" type="button"></button>
     </header>
 
     <main id="page" class="page" tabindex="-1"></main>
