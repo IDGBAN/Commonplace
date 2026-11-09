@@ -481,7 +481,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version != SCHEMA_VERSION and _is_populated(conn):
         raise _version_error(conn, version)
-    conn.executescript(SCHEMA)
+    # In one transaction: the script drops a view and makes it again, and a
+    # reader in between, like a page of `journal browse`, found it missing.
+    try:
+        conn.executescript(f"BEGIN IMMEDIATE;\n{SCHEMA}\nCOMMIT;")
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     _fill_entry_file_keys(conn)
     conn.commit()
