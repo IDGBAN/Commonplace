@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
+import time
 from collections.abc import Callable
 from contextlib import closing
+from pathlib import Path
 from typing import Any
 
-from . import db, profile, rollups, store, themes, work
+from rich.console import Console
+
+from . import db, ingester, profile, rollups, store, themes, work
 from .config import Config
 from .models import JournalError
 from .ollama_client import OllamaClient
@@ -32,9 +37,54 @@ def _count(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
 
 
+# Counting the files to read walks the vault and hashes every file, which is
+# too much for a page that asks every second or two while a job runs.
+FILES_FRESH_SECONDS = 60.0
+_files_seen: dict[str, tuple[float, Json]] = {}
+_files_guard = threading.Lock()
+
+
+def forget_files(config: Config) -> None:
+    with _files_guard:
+        _files_seen.pop(str(config.db.path), None)
+
+
+def files_state(config: Config, conn: sqlite3.Connection) -> Json:
+    """How many files `journal index` would read, as its dry run counts them."""
+    key = str(config.db.path)
+    with _files_guard:
+        seen = _files_seen.get(key)
+        if seen and time.monotonic() - seen[0] < FILES_FRESH_SECONDS:
+            return seen[1]
+    try:
+        plan = ingester.plan_backfill(config, conn)
+    except JournalError as exc:
+        found: Json = {"error": str(exc), "due": 0}
+    else:
+        by_status: dict[str, int] = {}
+        for f in plan.files:
+            by_status[f.status] = by_status.get(f.status, 0) + 1
+        todo = plan.to_index
+        found = {
+            "error": None,
+            "tracked": len(plan.files),
+            "new": by_status.get("new", 0),
+            "changed": by_status.get("changed", 0) + by_status.get("switching", 0),
+            "retry": by_status.get("retry", 0),
+            "gone": len(plan.dropped),
+            "wont_parse": sum(1 for f in todo if f.problem),
+            "calls": sum(plan.model_calls()) + plan.photo_calls(),
+            "due": len(todo) + len(plan.dropped),
+        }
+    with _files_guard:
+        _files_seen[key] = (time.monotonic(), found)
+    return found
+
+
 def state(config: Config) -> Json:
     """What each row of the Upkeep page says."""
     with closing(db.connect_readonly(config)) as conn:
+        files = files_state(config, conn)
         plan = rollups.plan_rollups(config, conn, DIGEST_KINDS)
         by_kind: dict[str, int] = {}
         for item in plan:
@@ -61,6 +111,7 @@ def state(config: Config) -> Json:
             },
             "themes": themes.status_json(themes.status(conn, config)),
             "entries": store.stats(conn).entries,
+            "files": files,
         }
 
 
@@ -75,6 +126,8 @@ def describe(kind: str, params: Json) -> str:
     if kind == "digest":
         period_type, key, _, _ = store.parse_period(str(params.get("key", "")), ranges=True)
         return f"Write the digest for {store.period_title(period_type, key)}"
+    if kind == "index":
+        return "Read every file again" if params.get("rebuild") else "Read new and changed files"
     if kind == "digests":
         return "Rewrite every digest" if params.get("rebuild") else "Write the digests that are out of date"
     if kind == "profile":
@@ -84,7 +137,13 @@ def describe(kind: str, params: Json) -> str:
     raise ValueError(f"There's no upkeep job called '{kind}'.")
 
 
-def runners(config: Config, client: Callable[[], OllamaClient]) -> dict[str, work.Runner]:
+def runners(
+    config: Config,
+    client: Callable[[], OllamaClient],
+    then: Callable[[str], None] = lambda kind: None,
+) -> dict[str, work.Runner]:
+    """`then` puts another job in line, for what one job leaves for the next."""
+
     def with_cache(run: Callable[[sqlite3.Connection, work.Job, work.Step], str]) -> work.Runner:
         def runner(job: work.Job, step: work.Step) -> str:
             with closing(db.connect(config)) as conn:
@@ -92,6 +151,40 @@ def runners(config: Config, client: Callable[[], OllamaClient]) -> dict[str, wor
                 return run(conn, job, step)
 
         return runner
+
+    def index(conn: sqlite3.Connection, job: work.Job, step: work.Step) -> str:
+        force = bool(job.params.get("rebuild"))
+        step(0, 0, "Looking through your journal folder")
+        plan = ingester.plan_backfill(config, conn, force=force)
+        todo = {f.path for f in plan.to_index}
+        seen = 0
+
+        def before(path: Path) -> None:
+            nonlocal seen
+            # an unchanged file is skipped without a model, so it isn't a step
+            if path in todo:
+                step(seen, len(todo), f"Reading {path.name}")
+                seen += 1
+
+        # the indexer prints its progress for a terminal; here the page shows it
+        shown, ingester.console = ingester.console, Console(quiet=True)
+        try:
+            counts = ingester.run_backfill(
+                config, conn, force=force, client=client(), before_file=before, profile_after=False
+            )
+        finally:
+            ingester.console = shown
+            forget_files(config)
+        if counts["indexed"] and config.profile.enabled and profile.pending_entries(conn):
+            then("profile")
+        parts = [_count(counts["indexed"], "file read", "files read")]
+        if counts["error"]:
+            parts.append(_count(counts["error"], "couldn't be read", "couldn't be read"))
+        if counts["private"]:
+            parts.append(f"{counts['private']} private")
+        if counts["dropped"]:
+            parts.append(f"{counts['dropped']} no longer there")
+        return ", ".join(parts) + "."
 
     def digest(conn: sqlite3.Connection, job: work.Job, step: work.Step) -> str:
         kind, key, start, end = store.parse_period(str(job.params["key"]), ranges=True)
@@ -143,6 +236,7 @@ def runners(config: Config, client: Callable[[], OllamaClient]) -> dict[str, wor
         return said
 
     return {
+        "index": with_cache(index),
         "digest": with_cache(digest), "digests": with_cache(digests),
         "profile": with_cache(profile_job), "themes": with_cache(themes_job),
     }

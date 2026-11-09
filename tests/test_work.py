@@ -7,7 +7,7 @@ import time
 from datetime import date
 
 import pytest
-from conftest import add_entry, add_note
+from conftest import add_entry, add_note, copy_fixtures
 from test_browse import Browser
 
 from journal_analyzer import browse, history, store, upkeep, work
@@ -144,7 +144,7 @@ def test_upkeep_says_what_is_out_of_date_and_writes_it(served, conn, fake_client
 
 def test_upkeep_refuses_what_it_cannot_do(served, monkeypatch):
     browser, server = served
-    for body in ({"kind": "index"}, {"kind": "digest", "key": "sometime"}, {}):
+    for body in ({"kind": "watch"}, {"kind": "digest", "key": "sometime"}, {}):
         assert "upkeep can do" in browser.post("/api/upkeep/start", body, status=400)["error"]
     assert "isn't waiting" in browser.post("/api/upkeep/9/remove", status=404)["error"]
     assert browser.post("/api/upkeep/stop") == {"stopping": False}
@@ -251,3 +251,34 @@ def test_the_lock_says_who_is_working_and_lets_go(config):
     assert work.holder(config) is None
     with work.hold(config, "journal rollup") as ours:
         assert ours and work.holder(config)["what"] == "journal rollup"
+
+
+def test_new_files_are_read_from_the_upkeep_page(served, config, conn, fake_client):
+    browser, _ = served
+    upkeep.forget_files(config)
+    copy_fixtures(config.vault.path)
+    files = browser.get("/api/upkeep")["files"]
+    # the two entries the fixture put in the cache have no file behind them
+    assert (files["new"], files["gone"], files["error"]) == (2, 3, None)
+    assert files["due"] == 5 and files["calls"] > 0
+
+    job = browser.post("/api/upkeep/start", {"kind": "index"})
+    assert job["label"] == "Read new and changed files"
+    done = _wait(lambda: next((j for j in browser.get("/api/upkeep")["recent"] if j["id"] == job["id"]), None))
+    assert (done["status"], done["error"]) == ("done", None)
+    assert done["result"] == "2 files read, 3 no longer there."
+    assert (done["done"], done["total"]) == (1, 2)
+    assert [r["entry_date"] for r in store.entry_days(conn)] == ["2024-01-15", "2024-01-16"]
+    # reading them for the profile is left to a job of its own, put in line behind
+    _wait(lambda: any(j["kind"] == "profile" for j in browser.get("/api/upkeep")["recent"]))
+    after = browser.get("/api/upkeep")
+    assert after["files"]["due"] == 0 and after["files"]["tracked"] == 2
+    assert after["profile"]["unread"] == 0
+
+
+def test_a_missing_journal_folder_is_said_on_the_page(served, config):
+    browser, _ = served
+    upkeep.forget_files(config)
+    config.vault.path.rmdir()
+    files = browser.get("/api/upkeep")["files"]
+    assert files["due"] == 0 and str(config.vault.path) in files["error"]

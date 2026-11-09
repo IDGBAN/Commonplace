@@ -1272,7 +1272,10 @@ class BrowseServer(ThreadingHTTPServer):
         self._client_guard = threading.Lock()
         self.lane = work.Lane()
         self.answers = work.Answers(self.lane)
-        self.jobs = work.Jobs(config, self.lane, upkeep.runners(config, self.client))
+        self.jobs = work.Jobs(config, self.lane, upkeep.runners(config, self.client, self._then))
+
+    def _then(self, kind: str) -> None:
+        self.jobs.add(kind, upkeep.describe(kind, {}), {})
 
     def client(self) -> OllamaClient:
         with self._client_guard:

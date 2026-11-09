@@ -16,6 +16,7 @@ PAGES = {
     "digest": "/digest/month/2024-03",
     "entities": "/notes",
     "history": "/history",
+    "index": "/upkeep",
     "lapsed": "/notes",
     "links": "/notes",
     "metric": "/metrics",
@@ -37,6 +38,7 @@ PAGES = {
 
 # what a command with a page can still only do from the command line
 PAGE_CANT_YET = {
+    "index": "naming files to read, the lists --dry-run prints, and --no-memo",
     "profile": "--rescan",
     "rollup": "--since, --until and --only",
     "tags": "--similar",
@@ -46,7 +48,6 @@ PAGE_CANT_YET = {
 NO_PAGE_YET = {
     "doctor": "a setup and health page",
     "export": "a download",
-    "index": "the upkeep page",
     "insights": "a page of its own",
     "prompt": "a page of its own",
     "watch": "the upkeep page",

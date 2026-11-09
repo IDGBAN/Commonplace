@@ -8,7 +8,7 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path, PurePath
@@ -510,9 +510,15 @@ def run_backfill(
     force: bool = False,
     client: OllamaClient | None = None,
     targets: Targets | None = None,
+    before_file: Callable[[Path], None] | None = None,
+    profile_after: bool = True,
 ) -> dict[str, int]:
     """With `targets`, only those files are indexed and only the gone ones
-    among them dropped; the rest of the vault isn't walked."""
+    among them dropped; the rest of the vault isn't walked.
+
+    `before_file` is called with each file before it's looked at, and can
+    raise to stop the run, which is as safe as Ctrl-C. `profile_after` False
+    leaves reading the new entries for the profile to the caller."""
     _require_vault(config)
     client = client or OllamaClient(config)
     _ensure_vec(config, conn, client)
@@ -544,6 +550,8 @@ def run_backfill(
     with Progress(console=console) as progress:
         task = progress.add_task("Indexing", total=len(files))
         for path in files:
+            if before_file is not None:
+                before_file(path)
             progress.update(task, description=f"Indexing {escape(path.name)}")
             result = process_file(path, config, conn, client, force=force)
             counts[result] += 1
@@ -559,7 +567,7 @@ def run_backfill(
         f"Done: {counts['indexed']} indexed, {counts['skipped']} skipped, "
         f"{counts['error']} errored{private}{dropped}."
     )
-    if _read_for_profile(config, conn, client, indexed):
+    if profile_after and _read_for_profile(config, conn, client, indexed):
         _update_profile(config, conn, client)
     return counts
 

@@ -728,7 +728,8 @@ async function overviewView() {
   if (!c.entries && !c.notes) {
     return h("div", {},
       pageHead({ title: "Nothing here yet", lede: "Commonplace hasn't read your journal yet." }),
-      empty("Run ", h("code", {}, "journal index"), " in a terminal, then reload this page. It reads each entry once and remembers it, so the first run is the long one."));
+      empty("Reading your journal goes through each entry once and remembers it, so the first time is the long one."),
+      upkeepButton("Read your journal", "index"));
   }
 
   const today = toDate(o.today);
@@ -2938,6 +2939,7 @@ async function upkeepView() {
     return h("button", { class: "button", type: "button", disabled: Boolean(data.elsewhere), onclick: () => start(kind, params) }, label);
   };
 
+  // the files row comes first: digests and the profile are written from what's been read
   const row = (title, detail, ...right) => h("li", { class: "upkeep-row" },
     h("div", { class: "upkeep-what" }, h("h3", {}, title), h("p", {}, detail)),
     h("div", { class: "upkeep-do" }, right));
@@ -2950,6 +2952,13 @@ async function upkeepView() {
       p.unread ? `${plural(p.unread, "entry", "entries")} not read yet` : null,
       p.unfolded ? `${plural(p.unfolded, "new fact")} to add` : null,
     ].filter(Boolean);
+    const f = data.files;
+    const filesWaiting = [
+      f.new ? `${fmtNum(f.new)} new` : null,
+      f.changed ? `${fmtNum(f.changed)} changed` : null,
+      f.retry ? `${fmtNum(f.retry)} that failed last time` : null,
+      f.gone ? `${fmtNum(f.gone)} no longer there` : null,
+    ].filter(Boolean);
     const others = data.queued.filter((j) => j.kind === "digest");
     fill(body,
       data.elsewhere ? h("div", { class: "notice info" },
@@ -2958,6 +2967,12 @@ async function upkeepView() {
       data.running ? jobPanel(data.running, refresh) : null,
       others.length ? h("p", { class: "section-note" }, `Next in line: ${others.map((j) => j.label).join(", ")}`) : null,
       h("ul", { class: "upkeep-rows" },
+        row("Journal files", f.error ? f.error : filesWaiting.length
+          ? `${filesWaiting.join(", ")}.${f.calls ? ` About ${plural(f.calls, "model call")}.` : ""}${f.wont_parse ? ` ${plural(f.wont_parse, "file")} won't parse as they are; Files says why afterwards.` : ""}`
+          : f.tracked
+            ? `All ${plural(f.tracked, "file")} in your journal folder ${f.tracked === 1 ? "has" : "have"} been read.`
+            : "No files found in your journal folder. If it's on a drive that isn't connected, nothing is dropped from the cache.",
+        f.error ? null : f.due ? control("index", "Read them") : null),
         row("Digests", d.due
           ? `${d.kinds.map((k) => k.text).join(", ")} to write. One call to the precise model for each.`
           : d.written ? "All up to date." : "None to write yet. They come once there are entries.",
@@ -2971,11 +2986,15 @@ async function upkeepView() {
         row("Themes", t.made_at
           ? `Grouped ${stamp(t.made_at)} from ${plural(t.grouped, "entry", "entries")}${t.placed ? `, ${fmtNum(t.placed)} written since` : ""}.${t.stale ? " That's a lot since." : ""}`
           : "Not worked out yet. Grouping needs no model, and naming is one fast-model call for each theme.",
-        data.entries ? control("themes", t.made_at ? (t.stale ? "Refresh" : "Refresh anyway") : "Find them") : null),
-        row("Journal files", ["Reading new and changed files is still done from a terminal, with ", h("code", {}, "journal index"), " or ", h("code", {}, "journal watch"), "."])),
+        data.entries ? control("themes", t.made_at ? (t.stale ? "Refresh" : "Refresh anyway") : "Find them") : null)),
       h("details", { class: "about" },
         h("summary", {}, "Start over"),
         h("ul", { class: "upkeep-rows" },
+          row("Read every file again", "Every entry and note is read as if it were new. What the models said before is reused where nothing changed, so it's mostly quick unless a model or a prompt has changed.",
+            h("button", { class: "button danger", type: "button", disabled: Boolean(data.elsewhere) || Boolean(f.error), onclick: () => start("index", { rebuild: true }, {
+              title: "Read every file again?", action: "Read them all",
+              body: "Each file is gone through again. Kept model results are reused, but anything a new model or prompt changes is asked for again, which on a CPU can take hours. You can stop it partway.",
+            }) }, "Read all")),
           row("Rewrite every digest", "Every week, month, year and relationship digest is written again, with your profile as it is now. On a CPU this can take hours.",
             h("button", { class: "button danger", type: "button", disabled: Boolean(data.elsewhere), onclick: () => start("digests", { rebuild: true }, {
               title: "Rewrite every digest?", action: "Rewrite them",
