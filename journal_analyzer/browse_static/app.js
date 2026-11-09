@@ -1518,10 +1518,8 @@ async function digestView([type, key]) {
       gloss("Average mood", moodChip(r.mood, scale)),
       gloss("Built from", plural(r.entries ?? 0, "entry", "entries")),
       gloss("Main tags", r.tags.length ? h("div", { class: "chips" }, r.tags.map((t) => h("a", { class: "chip pencil", href: href.tag(t) }, t))) : h("span", { class: "quiet" }, "None")),
-      gloss("Written", stamp(r.generated_at), r.stale && h("div", {}, "Out of date: an entry in this period changed since. Run journal rollup.")),
-    ] : gloss("Status", type === "range"
-      ? ["Not written yet. ", h("code", {}, `journal digest ${key} --refresh`), " writes it."]
-      : "Not written yet. Run journal rollup."));
+      gloss("Written", stamp(r.generated_at), r.stale && h("div", {}, "Out of date: an entry in this period changed since.", h("div", {}, upkeepButton("Rewrite it", "digest", { key })))),
+    ] : gloss("Status", "Not written yet.", h("div", {}, upkeepButton("Write it", "digest", { key }))));
 
   return h("div", {},
     pageHead({
@@ -1662,7 +1660,7 @@ function themeStatus(st) {
   if (!st.made_at) return null;
   const since = st.placed ? `; ${plural(st.placed, "entry", "entries")} written since go with the nearest theme` : "";
   return h("p", { class: "section-note" }, `Worked out ${stamp(st.made_at)} from ${plural(st.grouped, "entry", "entries")}${since}.`,
-    st.stale ? [" That's a lot since; ", h("code", {}, "journal themes --refresh"), " groups them again."] : null);
+    st.stale ? " That's a lot since. " : " ", upkeepButton(st.stale ? "Group them again" : "Refresh", "themes"));
 }
 
 // each month a cell, shaded by the share of that month's entries in the theme
@@ -1695,8 +1693,8 @@ async function themesView() {
     lede: "Threads that run through the journal, found by grouping entries close in meaning, whether or not you tagged or linked them. The fast model names each from the entries nearest its middle.",
   });
   if (!data.themes.length) {
-    return h("div", {}, head, empty("No themes yet. ", h("code", {}, "journal themes --refresh"),
-      " groups your entries (no model needed for that) and names each group with one call to the fast model."));
+    return h("div", {}, head, empty("No themes yet. Finding them groups your entries, which needs no model, and names each group with one call to the fast model."),
+      upkeepButton("Find the themes", "themes"));
   }
   const months = Object.keys(data.month_totals);
   const years = new Map();
@@ -2037,8 +2035,8 @@ async function reviewView([period]) {
   const digest = r.digest
     ? [h("div", { class: "raw md" }, md(r.digest.summary)),
       r.digest.stale && h("p", { class: "turn-meta" }, h("span", { class: "status pending" }, "out of date"),
-        " Some entries changed after this was written. ", h("code", {}, `journal digest ${r.key} --refresh`), " rewrites it.")]
-    : empty(`There's no ${r.kind} digest yet. `, h("code", {}, `journal digest ${r.key} --refresh`), " writes one.");
+        " Some entries changed after this was written. ", upkeepButton("Rewrite it", "digest", { key: r.key }))]
+    : [empty(`There's no ${r.kind} digest yet.`), upkeepButton("Write it", "digest", { key: r.key })];
 
   const facts = h("div", { class: "facts" },
     fact(fmtNum(w.entries), `entries on ${plural(w.days_written, "day")}`, href.entries({ from: r.start, to: r.end })),
@@ -2192,8 +2190,10 @@ const ask = { turns: loadTurns(), scope: loadScope(), conversation: loadConversa
 function loadTurns() {
   try {
     const saved = JSON.parse(sessionStorage.getItem("ask-turns") || "[]");
-    // a question that was still running when the page reloaded has no answer coming
-    return saved.map((t) => (t.status === "running" || t.status === "queued" ? { ...t, status: "cancelled" } : t));
+    // An answer is written in the background, so one that was running when the
+    // page reloaded is picked up again by its id. Only a question that never
+    // got one, because the reload came first, has no answer coming.
+    return saved.map((t) => (t.status === "running" && !t.run ? { ...t, status: "cancelled" } : t));
   } catch {
     return [];
   }
@@ -2316,40 +2316,69 @@ function askNext() {
   if (next) runTurn(next);
 }
 
-async function runTurn(turn) {
+const RUN_GONE = "This answer was lost when `journal browse` was restarted. Ask it again.";
+
+// `resume` follows an answer that's already being written, after a reload.
+async function runTurn(turn, resume = false) {
   const history = ask.turns
     .filter((t) => t.status === "done")
     .slice(-HISTORY_TURNS)
     .map((t) => [t.rewritten || t.question, t.answer.text.slice(0, HISTORY_ANSWER_CHARS)]);
-  Object.assign(turn, { status: "running", stage: "Starting…" });
+  Object.assign(turn, { status: "running", stage: resume ? "Picking the answer up again…" : "Starting…" });
   const question = turn.question;
   const controller = new AbortController();
   ask.controller = controller;
   changed();
+  const onEvent = (event, data) => {
+    if (event === "run") turn.run = data.id;
+    else if (event === "stage") {
+      turn.stage = data.text;
+      if (turn.thinking) turn.thinkingPaused = true;
+    } else if (event === "thinking") {
+      // a fast answer that thought and gave up, then the precise model's own
+      const gap = turn.thinkingPaused ? "\n\n" : "";
+      turn.thinking = (turn.thinking || "") + gap + data.text;
+      turn.thinkingPaused = false;
+    } else if (event === "text") turn.partial = (turn.partial || "") + data.text;
+    else if (event === "rewritten") turn.rewritten = data.question;
+    else if (event === "answer") Object.assign(turn, { status: "done", answer: data });
+    else if (event === "problem") Object.assign(turn, { status: "failed", error: data.error });
+    else if (event === "cancelled") turn.status = "cancelled";
+    else return;
+    changed();
+  };
   try {
-    const response = await send(
-      "ask", { q: question, history, conversation: ask.conversation, ...scopeParams(turn.scope) },
-      { signal: controller.signal, accept: "text/event-stream" },
-    );
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || `The question couldn't be asked (${response.status}).`);
+    // If the connection drops while the answer is still being written, follow
+    // it again. It's replayed from its first event, so what's shown is rebuilt.
+    for (let tries = 0; turn.status === "running" && tries < 6; tries++) {
+      const again = resume || tries > 0;
+      if (again) {
+        for (const key of ["partial", "thinking", "thinkingPaused", "rewritten"]) delete turn[key];
+        if (tries > 0) await new Promise((r) => setTimeout(r, 1000 * tries));
+      }
+      let response;
+      try {
+        response = again
+          ? await fetch(`/api/ask/${turn.run}/events`, { headers: { Accept: "text/event-stream" }, signal: controller.signal })
+          : await send(
+            "ask", { q: question, history, conversation: ask.conversation, ...scopeParams(turn.scope) },
+            { signal: controller.signal, accept: "text/event-stream" },
+          );
+      } catch (err) {
+        if (controller.signal.aborted || !turn.run) throw err;
+        continue;
+      }
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(again && response.status === 404 ? RUN_GONE : data.error || `The question couldn't be asked (${response.status}).`);
+      }
+      try {
+        await readEvents(response, onEvent);
+      } catch (err) {
+        if (controller.signal.aborted || !turn.run) throw err;
+      }
+      if (!turn.run) break;
     }
-    await readEvents(response, (event, data) => {
-      if (event === "stage") {
-        turn.stage = data.text;
-        if (turn.thinking) turn.thinkingPaused = true;
-      } else if (event === "thinking") {
-        // a fast answer that thought and gave up, then the precise model's own
-        const gap = turn.thinkingPaused ? "\n\n" : "";
-        turn.thinking = (turn.thinking || "") + gap + data.text;
-        turn.thinkingPaused = false;
-      } else if (event === "text") turn.partial = (turn.partial || "") + data.text;
-      else if (event === "rewritten") turn.rewritten = data.question;
-      else if (event === "answer") Object.assign(turn, { status: "done", answer: data });
-      else if (event === "problem") Object.assign(turn, { status: "failed", error: data.error });
-      changed();
-    });
     if (turn.status === "running") {
       Object.assign(turn, { status: "failed", error: "The answer stopped partway. Is `journal browse` still running?" });
     }
@@ -2364,6 +2393,26 @@ async function runTurn(turn) {
     changed();
     askNext();
   }
+}
+
+// Cancel tells the server to stop writing, which is what frees the model.
+async function cancelTurn(turn) {
+  if (turn.run) {
+    try {
+      await post(`ask/${turn.run}/cancel`);
+      return;
+    } catch {
+      // it's gone already; stop listening for it
+    }
+  }
+  ask.controller?.abort();
+}
+
+// after a reload: follow the answer that was being written, or ask what was waiting
+function resumeAsking() {
+  const running = ask.turns.find((t) => t.status === "running" && t.run);
+  if (running) runTurn(running, true);
+  else askNext();
 }
 
 // notifications are opt-in from the Ask page, and remembered in this browser
@@ -2516,7 +2565,7 @@ function turnView(turn, scale, index) {
     if (turn.partial) parts.push(h("div", { class: "turn-answer md writing" }, md(turn.partial)));
     parts.push(h("div", { class: "turn-running" },
       ...stageView(turn.partial ? "Writing…" : turn.stage),
-      h("button", { class: "button", type: "button", onclick: () => ask.controller?.abort() }, "Cancel")));
+      h("button", { class: "button", type: "button", onclick: () => cancelTurn(turn) }, "Cancel")));
   } else if (turn.status === "failed") {
     parts.push(h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't answer"), h("span", {}, turn.error)));
   } else if (turn.status === "cancelled") {
@@ -2790,6 +2839,172 @@ async function historyView([id]) {
     h("p", { class: "section-note" }, "The days and notes it cited may have changed since."));
 }
 
+// ---------------------------------------------------------------- upkeep
+
+const upkeepCount = document.getElementById("upkeep-count");
+
+// "In line" on the page that asked, and the way to watch it
+async function startUpkeep(kind, params, { quiet } = {}) {
+  try {
+    const job = await post("upkeep/start", { kind, ...params });
+    if (!quiet) toast(job.status === "running" ? "Started. Upkeep shows how it's going." : "In line. Upkeep shows how it's going.");
+    watchUpkeep();
+    return job;
+  } catch (err) {
+    toast(err.message, "error");
+    return null;
+  }
+}
+
+function upkeepButton(label, kind, params = {}) {
+  return h("button", { class: "button", type: "button", onclick: async () => {
+    if (await startUpkeep(kind, params, { quiet: true })) location.hash = "#/upkeep";
+  } }, label);
+}
+
+// the mark by Upkeep in the list of sections while something runs
+let upkeepTimer = null;
+
+async function watchUpkeep() {
+  clearTimeout(upkeepTimer);
+  let busy = false;
+  try {
+    const data = await api("upkeep");
+    busy = Boolean(data.running || data.queued.length);
+    upkeepCount.textContent = data.running ? "running" : "";
+  } catch {
+    upkeepCount.textContent = "";
+  }
+  if (busy) upkeepTimer = setTimeout(watchUpkeep, 5000);
+}
+
+function jobPanel(job, redraw) {
+  const known = job.total > 0;
+  const left = job.seconds_left != null ? `, about ${duration(job.seconds_left)} left` : "";
+  const stop = h("button", { class: "button", type: "button", disabled: job.stopping, onclick: async () => {
+    await post("upkeep/stop").catch((err) => toast(err.message, "error"));
+    redraw();
+  } }, job.stopping ? "Stopping after this step…" : "Stop after this step");
+  return h("section", { class: "job-running", "aria-live": "polite" },
+    h("div", { class: "job-head" },
+      h("h2", {}, job.label),
+      known ? h("span", { class: "section-note" }, `${fmtNum(job.done)} of ${fmtNum(job.total)}${left}`) : null),
+    known
+      ? h("progress", { class: "job-bar", max: job.total, value: job.done, "aria-label": "How far it is" })
+      : h("progress", { class: "job-bar", "aria-label": "Working" }),
+    h("p", { class: "job-message" }, job.message || "Starting…",
+      job.paused >= 1 ? ` Waited ${duration(job.paused)} for questions.` : null),
+    h("div", { class: "job-actions" }, stop,
+      h("span", { class: "section-note" }, "Stopping is safe. What's done is kept, and the rest stays on this page.")));
+}
+
+async function upkeepView() {
+  let data = await api("upkeep");
+  document.title = "Upkeep · Commonplace";
+  const body = h("div", {});
+  let timer = null;
+
+  const refresh = async () => {
+    clearTimeout(timer);
+    if (!body.isConnected) return;
+    try {
+      data = await api("upkeep");
+      draw();
+    } catch {
+      // the next try may get through
+    }
+    timer = setTimeout(refresh, data.running || data.queued.length ? 1500 : 15000);
+    watchUpkeep();
+  };
+
+  const start = async (kind, params, sure) => {
+    if (sure && !(await confirmAction(sure))) return;
+    await startUpkeep(kind, params || {}, { quiet: true });
+    refresh();
+  };
+
+  // a row's right-hand side: how its job stands, or the button that starts one
+  const control = (kind, label, params) => {
+    const same = (j) => j && j.kind === kind && Boolean(j.params.rebuild) === Boolean(params?.rebuild);
+    if (same(data.running)) return h("span", { class: "status pending" }, "Running");
+    const waiting = data.queued.find(same);
+    if (waiting) {
+      return [h("span", { class: "status" }, "In line"),
+        h("button", { class: "button quiet", type: "button", onclick: async () => {
+          await post(`upkeep/${waiting.id}/remove`).catch((err) => toast(err.message, "error"));
+          refresh();
+        } }, "Remove")];
+    }
+    return h("button", { class: "button", type: "button", disabled: Boolean(data.elsewhere), onclick: () => start(kind, params) }, label);
+  };
+
+  const row = (title, detail, ...right) => h("li", { class: "upkeep-row" },
+    h("div", { class: "upkeep-what" }, h("h3", {}, title), h("p", {}, detail)),
+    h("div", { class: "upkeep-do" }, right));
+
+  const draw = () => {
+    const d = data.digests;
+    const p = data.profile;
+    const t = data.themes;
+    const profileWaiting = [
+      p.unread ? `${plural(p.unread, "entry", "entries")} not read yet` : null,
+      p.unfolded ? `${plural(p.unfolded, "new fact")} to add` : null,
+    ].filter(Boolean);
+    const others = data.queued.filter((j) => j.kind === "digest");
+    fill(body,
+      data.elsewhere ? h("div", { class: "notice info" },
+        h("span", { class: "notice-label" }, "Busy elsewhere"),
+        h("span", {}, `${data.elsewhere.what} is working on the cache in another window${data.elsewhere.since ? `, since ${stamp(data.elsewhere.since)}` : ""}. Upkeep can start here once it has finished.`)) : null,
+      data.running ? jobPanel(data.running, refresh) : null,
+      others.length ? h("p", { class: "section-note" }, `Next in line: ${others.map((j) => j.label).join(", ")}`) : null,
+      h("ul", { class: "upkeep-rows" },
+        row("Digests", d.due
+          ? `${d.kinds.map((k) => k.text).join(", ")} to write. One call to the precise model for each.`
+          : d.written ? "All up to date." : "None to write yet. They come once there are entries.",
+        d.due ? control("digests", "Write them") : null),
+        p.enabled
+          ? row("Your profile", profileWaiting.length
+            ? `${profileWaiting.join(", ")}. ${plural(p.calls, "call")} to the fast model, then one to the precise model.`
+            : p.written ? "Up to date." : "Not written yet.",
+          p.due || !p.written ? control("profile", p.written ? "Update" : "Write it") : null)
+          : row("Your profile", "Turned off in config.toml."),
+        row("Themes", t.made_at
+          ? `Grouped ${stamp(t.made_at)} from ${plural(t.grouped, "entry", "entries")}${t.placed ? `, ${fmtNum(t.placed)} written since` : ""}.${t.stale ? " That's a lot since." : ""}`
+          : "Not worked out yet. Grouping needs no model, and naming is one fast-model call for each theme.",
+        data.entries ? control("themes", t.made_at ? (t.stale ? "Refresh" : "Refresh anyway") : "Find them") : null),
+        row("Journal files", ["Reading new and changed files is still done from a terminal, with ", h("code", {}, "journal index"), " or ", h("code", {}, "journal watch"), "."])),
+      h("details", { class: "about" },
+        h("summary", {}, "Start over"),
+        h("ul", { class: "upkeep-rows" },
+          row("Rewrite every digest", "Every week, month, year and relationship digest is written again, with your profile as it is now. On a CPU this can take hours.",
+            h("button", { class: "button danger", type: "button", disabled: Boolean(data.elsewhere), onclick: () => start("digests", { rebuild: true }, {
+              title: "Rewrite every digest?", action: "Rewrite them",
+              body: "Each one is a call to the precise model, so this can run for hours. You can stop it partway; the ones already rewritten are kept.",
+            }) }, "Rewrite all")),
+          p.enabled ? row("Rebuild your profile", "Writes the profile again from every fact, oldest first.",
+            h("button", { class: "button danger", type: "button", disabled: Boolean(data.elsewhere), onclick: () => start("profile", { rebuild: true }, {
+              title: "Rebuild your profile?", action: "Rebuild it",
+              body: "The profile is written again from all the facts found so far. The one you have now is replaced.",
+            }) }, "Rebuild")) : null)),
+      data.recent.length ? section("Earlier", h("ol", { class: "lines" }, data.recent.map((j) => h("li", {},
+        h("div", { class: "line" },
+          h("span", { class: "line-date" }, stamp(j.finished_at)),
+          h("span", { "aria-hidden": "true" }),
+          h("span", { class: "line-summary" }, j.label),
+          h("span", { class: j.status === "failed" ? "line-tags err" : "line-tags" }, j.error || j.result))))),
+      { note: "since Commonplace was started" }) : null);
+  };
+
+  draw();
+  timer = setTimeout(refresh, data.running || data.queued.length ? 1500 : 15000);
+  return h("div", { class: "upkeep" },
+    pageHead({
+      title: "Upkeep",
+      lede: "What's out of date, and a button to bring each up to date. They run one at a time, a question you ask goes first, and they carry on with this tab closed for as long as journal browse is running.",
+    }),
+    body);
+}
+
 // ---------------------------------------------------------------- you
 
 const FACT_LABELS = {
@@ -2815,7 +3030,7 @@ async function youView() {
   if (data.unfolded) waiting.push(plural(data.unfolded, "new fact") + " not added yet");
   const catchUp = waiting.length
     ? h("div", { class: "notice info" }, h("span", { class: "notice-label" }, "Catching up"),
-      h("span", {}, `${waiting.join(", ")}. `, h("code", {}, "journal profile --update"), " or ", h("code", {}, "journal rollup"), " brings it up to date."))
+      h("span", {}, `${waiting.join(", ")}. `, upkeepButton("Update your profile", "profile")))
     : null;
 
   const p = data.profile;
@@ -2831,7 +3046,7 @@ async function youView() {
         gloss("Your own note", data.note
           ? [h("div", { class: "path" }, data.note), h("div", { class: "quiet" }, "Wins whenever it disagrees with what was inferred")]
           : h("span", { class: "quiet" }, "None set. Point [profile] note at a note about yourself to correct or add to this."))))
-    : empty("No profile yet. Run ", h("code", {}, "journal profile --update"), ` to read your entries${data.unread ? ` (${plural(data.unread, "entry", "entries")})` : ""} and write one.`);
+    : [empty(`No profile yet. Writing one reads your entries${data.unread ? ` (${plural(data.unread, "entry", "entries")})` : ""} first.`), upkeepButton("Write your profile", "profile")];
 
   // the same fact turns up on many days; show it once, at its latest day
   const groups = new Map();
@@ -2900,6 +3115,7 @@ const routes = [
   [/^\/digest\/(year|month|week|range)\/([^/]+)$/, digestView, "digests"],
   [/^\/compare\/([^/]+)(?:\/([^/]+))?$/, compareView, "digests"],
   [/^\/review\/([^/]+)$/, reviewView, "digests"],
+  [/^\/upkeep$/, upkeepView, "upkeep"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],
@@ -3196,4 +3412,6 @@ applyTheme(readTheme());
 window.addEventListener("hashchange", () => setMenu(false));
 window.addEventListener("hashchange", render);
 api("overview").then(updateRail).catch(() => {});
+resumeAsking();
+watchUpkeep();
 render();

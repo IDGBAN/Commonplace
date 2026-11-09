@@ -47,6 +47,7 @@ from . import (
     store,
     themes,
     unlinked,
+    work,
 )
 from .config import Config, load_config
 from .models import Answer, JournalError, OllamaUnavailableError
@@ -386,7 +387,8 @@ def index(
     with _guard(), _open(config) as (cfg, conn):
         cfg = _memo(_with_vault(cfg, vault), no_memo)
         targets = ingester.resolve_targets(cfg, conn, paths) if paths else None
-        ingester.run_backfill(cfg, conn, force=force, targets=targets)
+        with work.hold(cfg, "journal index"):
+            ingester.run_backfill(cfg, conn, force=force, targets=targets)
 
 
 def _with_vault(cfg: Config, vault: Path | None) -> Config:
@@ -475,7 +477,7 @@ def _print_plan(plan: ingester.BackfillPlan, vault: Path, cache: bool) -> None:
 @app.command()
 def watch(config: ConfigOpt = None, no_memo: NoMemoOpt = False) -> None:
     """Keep indexing files as they change, until Ctrl-C."""
-    with _guard(), _open(config) as (cfg, conn):
+    with _guard(), _open(config) as (cfg, conn), work.hold(cfg, "journal watch"):
         ingester.run_watch(_memo(cfg, no_memo), conn)
 
 
@@ -767,9 +769,10 @@ def rollup(
             _print_rollup_plan(plan, profile.scan_calls(cfg, conn) if reading else 0)
             return
         cfg = _memo(cfg, no_memo)
-        counts = rollups.generate_rollups(
-            cfg, conn, OllamaClient(cfg), kinds, not rebuild_all, date_from, date_to
-        )
+        with work.hold(cfg, "journal rollup"):
+            counts = rollups.generate_rollups(
+                cfg, conn, OllamaClient(cfg), kinds, not rebuild_all, date_from, date_to
+            )
     console.print(
         f"Generated {counts['week']} week, {counts['month']} month, "
         f"{counts['year']} year and {counts['note']} relationship rollups."

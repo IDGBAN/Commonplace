@@ -5,11 +5,15 @@ it can run next to `journal watch` without touching it. Every value comes from
 store/query, the same functions the CLI and models use.
 
 Reading is GET. Anything that does something is POST: asking a question, which
-sets the models going and may be kept in the history, and forgetting kept
-questions. A POST has to come from this server's own page and carry the token
-that page was given, so no other site can start one. Asking streams
-server-sent events, since an answer can take minutes and the page shows each
-step as it happens.
+sets the models going and may be kept in the history, forgetting kept
+questions, and starting upkeep like writing digests. A POST has to come from
+this server's own page and carry the token that page was given, so no other
+site can start one.
+
+Asking streams server-sent events, since an answer can take minutes and the
+page shows each step as it happens. The answer itself is written in the
+background (see work.py), so a page that reloads or goes away doesn't stop
+it, and can follow it again at /api/ask/<id>/events.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 import webbrowser
 from collections.abc import Callable
@@ -46,6 +51,8 @@ from . import (
     store,
     themes,
     unlinked,
+    upkeep,
+    work,
 )
 from .config import Config
 from .models import JournalError
@@ -831,23 +838,66 @@ def _ask_scope(req: Request) -> tuple[store.EntryFilter | None, date | None, dat
 # JSON body, and opens whatever it writes to itself.
 
 
-def forget_question(config: Config, body: Json, kept_id: str) -> Json:
+def forget_question(server: BrowseServer, body: Json, kept_id: str) -> Json:
     row_id = _row_id(kept_id, _NO_QUESTION)
-    if not history.delete(config, row_id):
+    if not history.delete(server.config, row_id):
         raise ApiError(HTTPStatus.NOT_FOUND, _NO_QUESTION)
     return {"deleted": row_id}
 
 
-def clear_history(config: Config, body: Json) -> Json:
+def clear_history(server: BrowseServer, body: Json) -> Json:
     try:
-        held = history.clear(config)
+        held = history.clear(server.config)
     except OSError as exc:
         raise ApiError(
             HTTPStatus.CONFLICT,
-            f"Couldn't delete {history.history_path(config)}: {exc}. If a question is "
+            f"Couldn't delete {history.history_path(server.config)}: {exc}. If a question is "
             "being answered, try again once it's done.",
         ) from exc
     return {"cleared": held}
+
+
+_NO_RUN = "That answer isn't being written any more. `journal browse` may have been restarted."
+
+
+def cancel_answer(server: BrowseServer, body: Json, run_id: str) -> Json:
+    run = server.answers.get(run_id)
+    if run is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, _NO_RUN)
+    run.cancel()
+    return {"cancelled": run_id}
+
+
+def start_upkeep(server: BrowseServer, body: Json) -> Json:
+    kind = body.get("kind")
+    params: Json = {}
+    if body.get("rebuild") is True:
+        params["rebuild"] = True
+    try:
+        if kind == "digest":
+            # the key the way digests are stored, so asking twice is one job
+            params = {"key": store.parse_period(str(body.get("key", "")), ranges=True)[1]}
+        label = upkeep.describe(str(kind), params)
+    except ValueError:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "That isn't something upkeep can do.") from None
+    other = upkeep.elsewhere(server.config)
+    if other is not None:
+        raise ApiError(
+            HTTPStatus.CONFLICT,
+            f"{other.get('what', 'Something else')} is already working on the cache, in another "
+            "window. Start this once it has finished.",
+        )
+    return server.jobs.add(str(kind), label, params).as_json()
+
+
+def stop_upkeep(server: BrowseServer, body: Json) -> Json:
+    return {"stopping": server.jobs.stop()}
+
+
+def remove_upkeep(server: BrowseServer, body: Json, job_id: str) -> Json:
+    if not server.jobs.remove(_row_id(job_id, "That job isn't waiting any more.")):
+        raise ApiError(HTTPStatus.NOT_FOUND, "That job isn't waiting any more.")
+    return {"removed": int(job_id)}
 
 
 Handler = Callable[..., Json]
@@ -856,7 +906,14 @@ Action = Callable[..., Json]
 _ACTIONS: list[tuple[re.Pattern[str], Action]] = [
     (re.compile(r"/api/history/(\d+)/delete"), forget_question),
     (re.compile(r"/api/history/clear"), clear_history),
+    (re.compile(r"/api/ask/([0-9a-f]{32})/cancel"), cancel_answer),
+    (re.compile(r"/api/upkeep/start"), start_upkeep),
+    (re.compile(r"/api/upkeep/stop"), stop_upkeep),
+    (re.compile(r"/api/upkeep/(\d+)/remove"), remove_upkeep),
 ]
+_ANSWER_EVENTS = re.compile(r"/api/ask/([0-9a-f]{32})/events")
+# said to a question that has to wait for an upkeep step to let go of the model
+_WAITING_FOR_UPKEEP = "Waiting for the upkeep step in hand to finish..."
 
 _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/overview"), overview),
@@ -908,6 +965,10 @@ class _Handler(BaseHTTPRequestHandler):
         if url.path == "/api/session":
             # only this server's own page can read the reply, so only it can POST
             self._send_json(HTTPStatus.OK, {"token": self.server.token})
+        elif url.path == "/api/upkeep":
+            self._upkeep()
+        elif found := _ANSWER_EVENTS.fullmatch(url.path):
+            self._follow_again(found.group(1), url.query)
         elif url.path == "/api/ask" or any(p.fullmatch(url.path) for p, _ in _ACTIONS):
             self._wrong_method("POST")
         elif url.path.startswith("/api/"):
@@ -1002,7 +1063,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _act(self, action: Action, body: Json, args: list[str]) -> None:
         try:
-            payload = action(self.server.config, body, *args)
+            payload = action(self.server, body, *args)
         except ApiError as exc:
             self._send_json(exc.status, {"error": str(exc)})
         except JournalError as exc:
@@ -1071,21 +1132,12 @@ class _Handler(BaseHTTPRequestHandler):
         except sqlite3.Error as exc:
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"The cache couldn't be read: {exc}"})
             return
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        for key, value in _SECURITY_HEADERS.items():
-            self.send_header(key, value)
-        self.end_headers()
 
-        def send(event: str, data: Json) -> None:
-            body = json.dumps(data, default=serialize.json_default, ensure_ascii=False)
-            self.wfile.write(f"event: {event}\ndata: {body}\n\n".encode())
-            self.wfile.flush()
-
-        try:
+        def write(run: work.Run) -> None:
+            send = run.send
             try:
                 with closing(db.connect_readonly(config)) as conn:
-                    client = self.server.make_client(config)
+                    client = self.server.client()
                     standalone = question
                     rewriting = 0.0
                     if turns:
@@ -1119,13 +1171,55 @@ class _Handler(BaseHTTPRequestHandler):
                 send("problem", {"error": str(exc)})
             except sqlite3.Error as exc:
                 send("problem", {"error": f"The cache couldn't be read: {exc}"})
-            except (ConnectionError, OSError):
-                raise
-            except Exception as exc:  # noqa: BLE001 - otherwise the page waits on a dead stream
-                send("problem", {"error": f"The journal browser hit a bug: {type(exc).__name__}: {exc}"})
+
+        self._follow(self.server.answers.start(write, _WAITING_FOR_UPKEEP), 0)
+
+    def _follow(self, run: work.Run, start: int) -> None:
+        """Streams an answer's events to this page for as long as it listens."""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        for key, value in _SECURITY_HEADERS.items():
+            self.send_header(key, value)
+        self.end_headers()
+
+        def send(event: str, data: Json) -> None:
+            body = json.dumps(data, default=serialize.json_default, ensure_ascii=False)
+            self.wfile.write(f"event: {event}\ndata: {body}\n\n".encode())
+            self.wfile.flush()
+
+        try:
+            send("run", {"id": run.id})
+            for item in run.follow(start):
+                if item is None:
+                    self.wfile.write(b": still writing\n\n")
+                    self.wfile.flush()
+                else:
+                    send(*item)
         except (ConnectionError, OSError):
-            # the page closed or cancelled; stop here instead of running more model calls
+            # the page reloaded or went away; the answer carries on without it
             return
+
+    def _follow_again(self, run_id: str, query_string: str) -> None:
+        run = self.server.answers.get(run_id)
+        if run is None:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": _NO_RUN})
+            return
+        raw = parse_qs(query_string).get("from", ["0"])[-1]
+        self._follow(run, int(raw) if raw.isdigit() else 0)
+
+    def _upkeep(self) -> None:
+        config = self.server.config
+        try:
+            payload = {
+                **upkeep.state(config), **self.server.jobs.snapshot(),
+                "elsewhere": upkeep.elsewhere(config),
+            }
+        except JournalError as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+        except sqlite3.Error as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"The cache couldn't be read: {exc}"})
+        else:
+            self._send_json(HTTPStatus.OK, payload)
 
     def _static(self, path: str) -> None:
         asset = _STATIC.get(path)
@@ -1172,6 +1266,19 @@ class BrowseServer(ThreadingHTTPServer):
         self.allowed_origins = {f"http://{host}" for host in self.allowed_hosts}
         # new on every start, and only ever handed to this server's own page
         self.token = secrets.token_urlsafe(32)
+        # Answers and upkeep share one client, so a model keeps the window it
+        # was loaded with instead of being loaded again for each of them.
+        self._client: OllamaClient | None = None
+        self._client_guard = threading.Lock()
+        self.lane = work.Lane()
+        self.answers = work.Answers(self.lane)
+        self.jobs = work.Jobs(config, self.lane, upkeep.runners(config, self.client))
+
+    def client(self) -> OllamaClient:
+        with self._client_guard:
+            if self._client is None:
+                self._client = self.make_client(self.config)
+            return self._client
 
     @property
     def url(self) -> str:

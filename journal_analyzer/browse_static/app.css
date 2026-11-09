@@ -765,6 +765,26 @@ a.cite:hover { background-color: var(--mark); }
 .cite.none { background: none; border-bottom: 1px dashed var(--ink-faint); }
 .cite.day { white-space: nowrap; }
 
+/* Upkeep */
+
+.upkeep { max-width: 52rem; }
+.job-running { margin-bottom: 1.6rem; padding: 1.2rem 1.35rem; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: 12px; box-shadow: var(--shadow); }
+.job-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.3rem 1rem; }
+.job-head h2 { font: 600 1.25rem/1.25 var(--display); }
+.job-bar { display: block; width: 100%; height: 0.45rem; margin: 0.8rem 0 0.7rem; accent-color: var(--ink); }
+.job-message { margin: 0 0 1rem; color: var(--ink-soft); overflow-wrap: anywhere; }
+.job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; }
+.upkeep-rows { list-style: none; margin: 0; padding: 0; }
+.upkeep-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
+.upkeep-what { flex: 1 1 18rem; min-width: 0; }
+.upkeep-what h3 { font-size: 1rem; }
+.upkeep-what p { margin: 0.15rem 0 0; color: var(--ink-soft); }
+.upkeep-do { display: flex; align-items: center; gap: 0.5rem; }
+.line-tags.err { color: var(--alert); }
+#upkeep-count { color: var(--ink); background: var(--mark-wash); padding: 0 0.4rem; border-radius: 999px; }
+#upkeep-count:empty { display: none; }
+.gloss-body .button, .section-note .button, .notice .button, .turn-meta .button { margin-top: 0.4rem; }
+
 /* Asking first, and saying it's done */
 
 .dialog {

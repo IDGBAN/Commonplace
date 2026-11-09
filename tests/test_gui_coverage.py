@@ -24,6 +24,7 @@ PAGES = {
     "on-this-day": "/",
     "profile": "/you",
     "review": "/review/2024",
+    "rollup": "/upkeep",
     "search": "/search",
     "show": "/entry/1",
     "similar": "/entry/1",
@@ -36,10 +37,9 @@ PAGES = {
 
 # what a command with a page can still only do from the command line
 PAGE_CANT_YET = {
-    "digest": "--refresh, and writing a span of days",
-    "profile": "--update, --rebuild and --rescan",
+    "profile": "--rescan",
+    "rollup": "--since, --until and --only",
     "tags": "--similar",
-    "themes": "--refresh",
 }
 
 # commands waiting for a page
@@ -49,7 +49,6 @@ NO_PAGE_YET = {
     "index": "the upkeep page",
     "insights": "a page of its own",
     "prompt": "a page of its own",
-    "rollup": "the upkeep page",
     "watch": "the upkeep page",
 }
 

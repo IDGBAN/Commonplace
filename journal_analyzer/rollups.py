@@ -504,19 +504,40 @@ def generate_rollups(
     only_stale: bool = True,
     since: date | None = None,
     until: date | None = None,
+    before_item: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, int]:
+    """With `before_item`, it's called with (done, total, what's next) before
+    each digest and nothing is printed, for a caller that shows progress its
+    own way. It can raise to stop the run; what's written so far is kept."""
     counts = dict.fromkeys(ORDER, 0)
     groups = _entry_periods(conn)
+    quiet = before_item is not None
     pruned = _prune_orphan_rollups(conn, groups)
-    if pruned:
+    if pruned and not quiet:
         console.print(f"pruned {pruned} rollups for periods with no entries")
     if "note" in period_types and config.rollups.note_min_mentions:
         keep = {n["link_key"] for n in store.notes_linked_at_least(conn, config.rollups.note_min_mentions)}
         pruned = store.prune_note_digests(conn, keep)
-        if pruned:
+        if pruned and not quiet:
             console.print(f"pruned {pruned} note digests for notes no longer linked often enough")
     plan = plan_rollups(config, conn, period_types, only_stale, since, until)
     if not plan:
+        return counts
+    if before_item is not None:
+        for done, item in enumerate(plan):
+            before_item(done, len(plan), f"Writing the {item.kind} {item.label} digest")
+            if item.kind == "profile":
+                written = _write_profile(config, conn, client, not only_stale, lambda _done, _total: None)
+            elif item.kind == "note":
+                written = _write_note_digest(item.key, config, conn, client)
+            elif item.kind == "year":
+                written = _write_year(item.key, config, conn, client, groups["month"])
+            elif item.kind == "range":
+                written = write_range(config, conn, client, item.key)
+            else:
+                _write_period(item.kind, item.key, groups[item.kind][item.key], config, conn, client)
+                written = True
+            counts[item.kind] += bool(written)
         return counts
     with Progress(
         TextColumn("{task.description}"),
