@@ -1896,15 +1896,19 @@ def browse_cmd(
 ) -> None:
     """Browse everything the cache knows, and ask about it, in a local web page."""
     with _guard():
-        cfg = load_config(config)
+        path = (config or Path("config.toml")).resolve()
+        # with no config file yet, the pages open on Setup, which writes one
+        cfg = load_config(config) if path.is_file() else None
 
         def ready(url: str) -> None:
             console.print(f"Journal browser running at [bold cyan]{url}[/bold cyan]")
+            if cfg is None:
+                console.print(f"[dim]No config file at {escape(str(path))} yet. The page asks what it needs and writes one.[/dim]")
             console.print("[dim]Your notes are never changed. Press Ctrl-C to stop.[/dim]")
 
         browse.serve(
             cfg, port=port, open_browser=not no_open, on_ready=ready,
-            config_path=(config or Path("config.toml")).resolve(),
+            config_path=path,
         )
 
 

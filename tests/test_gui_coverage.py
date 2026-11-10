@@ -14,6 +14,7 @@ PAGES = {
     "ask": "/ask",
     "compare": "/compare/2024",
     "digest": "/digest/month/2024-03",
+    "doctor": "/health",
     "entities": "/notes",
     "history": "/history",
     "index": "/upkeep",
@@ -48,7 +49,6 @@ PAGE_CANT_YET = {
 
 # commands waiting for a page
 NO_PAGE_YET = {
-    "doctor": "a setup and health page",
     "export": "a download",
     "insights": "a page of its own",
     "prompt": "a page of its own",

@@ -817,6 +817,11 @@ a.cite:hover { background-color: var(--mark); }
 }
 .save-said { flex: 1 1 14rem; color: var(--ink-soft); font-size: 0.9rem; }
 
+.health .upkeep-what h3 { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.health .upkeep-what p { overflow-wrap: anywhere; }
+/* nothing to go to until Setup is done */
+body.setting-up .rail-scroll, body.setting-up .jump, body.setting-up #keys { visibility: hidden; }
+
 /* Asking first, and saying it's done */
 
 .dialog {

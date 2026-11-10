@@ -41,6 +41,7 @@ from . import (
     compare,
     db,
     fields,
+    health,
     history,
     insights,
     links,
@@ -894,6 +895,26 @@ def start_upkeep(server: BrowseServer, body: Json) -> Json:
     return server.jobs.add(str(kind), label, params).as_json()
 
 
+_SET_UP_FIRST = "Commonplace isn't set up yet. Finish the Setup page first."
+
+
+def look_at_folder(server: BrowseServer, body: Json) -> Json:
+    return health.look(str(body.get("path", "")))
+
+
+def finish_setup(server: BrowseServer, body: Json) -> Json:
+    if not server.setup or server.config_path is None:
+        raise ApiError(HTTPStatus.CONFLICT, "Commonplace is set up already. Change things on the Settings page.")
+    try:
+        config = health.first_config(server.config_path, body)
+        health.make_cache(config)
+    except JournalError as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+    server.setup = False
+    server.use(config)
+    return {"path": str(server.config_path)}
+
+
 def save_settings(server: BrowseServer, body: Json) -> Json:
     changes = body.get("values")
     if server.config_path is None:
@@ -947,6 +968,8 @@ _ACTIONS: list[tuple[re.Pattern[str], Action]] = [
     (re.compile(r"/api/history/clear"), clear_history),
     (re.compile(r"/api/ask/([0-9a-f]{32})/cancel"), cancel_answer),
     (re.compile(r"/api/settings/save"), save_settings),
+    (re.compile(r"/api/setup/look"), look_at_folder),
+    (re.compile(r"/api/setup/save"), finish_setup),
     (re.compile(r"/api/upkeep/start"), start_upkeep),
     (re.compile(r"/api/upkeep/stop"), stop_upkeep),
     (re.compile(r"/api/upkeep/watch"), watch_folder),
@@ -1005,7 +1028,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/session":
             # only this server's own page can read the reply, so only it can POST
-            self._send_json(HTTPStatus.OK, {"token": self.server.token})
+            self._send_json(HTTPStatus.OK, {"token": self.server.token, "setup": self.server.setup})
+        elif url.path == "/api/models":
+            self._send_json(HTTPStatus.OK, health.models(self.server.config, self.server.client))
+        elif self.server.setup and url.path.startswith("/api/"):
+            # there's no journal folder or cache to read from yet
+            self._send_json(HTTPStatus.CONFLICT, {"error": _SET_UP_FIRST, "setup": True})
+        elif url.path == "/api/health":
+            self._send_json(HTTPStatus.OK, {"checks": health.check(self.server.config, self.server.client)})
         elif url.path == "/api/upkeep":
             self._upkeep()
         elif url.path == "/api/settings":
@@ -1040,6 +1070,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             self._from_this_page()
+            if self.server.setup and not path.startswith("/api/setup/"):
+                raise ApiError(HTTPStatus.CONFLICT, _SET_UP_FIRST)
             body = self._body(sent)
         except ApiError as exc:
             self._send_json(exc.status, {"error": str(exc)})
@@ -1307,6 +1339,8 @@ class BrowseServer(ThreadingHTTPServer):
         self.config = config
         # the file Settings saves to; without one the page only shows them
         self.config_path = config_path
+        # true until the Setup page has written a config file
+        self.setup = False
         self.make_client = make_client
         super().__init__((HOST, port), _Handler)
         self.port: int = self.socket.getsockname()[1]
@@ -1377,15 +1411,26 @@ def make_server(
 
 
 def serve(
-    config: Config,
+    config: Config | None,
     port: int = DEFAULT_PORT,
     open_browser: bool = True,
     on_ready: Callable[[str], None] = print,
     config_path: Path | None = None,
 ) -> None:
-    # fail here, in the terminal, rather than as an error page
-    db.connect_readonly(config).close()
-    server = make_server(config, port, config_path=config_path)
+    """With no config yet, the pages open on Setup, which writes one to `config_path`."""
+    if config is None:
+        if config_path is None:
+            raise JournalError("There's no config file, and nowhere was given to write one.")
+        # a stand-in until Setup has asked; nothing reads from it
+        waiting = Config.model_validate({"vault": {"path": str(config_path.parent / "no journal folder yet")}})
+        server = make_server(waiting, port, config_path=config_path)
+        server.setup = True
+    else:
+        if not config.db.path.is_file():
+            health.make_cache(config)
+        # fail here, in the terminal, rather than as an error page
+        db.connect_readonly(config).close()
+        server = make_server(config, port, config_path=config_path)
     on_ready(server.url)
     if open_browser:
         webbrowser.open(server.url)

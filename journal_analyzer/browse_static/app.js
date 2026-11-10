@@ -2840,6 +2840,130 @@ async function historyView([id]) {
     h("p", { class: "section-note" }, "The days and notes it cited may have changed since."));
 }
 
+// ---------------------------------------------------------------- health and setup
+
+const STATE_WORDS = { ok: "Fine", warn: "Worth a look", fail: "Needs fixing" };
+
+async function healthView() {
+  document.title = "Health · Commonplace";
+  const body = h("div", {}, empty("Checking…"));
+  const run = async () => {
+    fill(body, empty("Checking…"));
+    let data;
+    try {
+      data = await api("health");
+    } catch (err) {
+      fill(body, h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't check"), h("span", {}, err.message)));
+      return;
+    }
+    const wrong = data.checks.filter((c) => c.state !== "ok");
+    fill(body,
+      h("p", { class: "lede" }, wrong.length
+        ? `${plural(wrong.length, "thing")} to look at, out of ${fmtNum(data.checks.length)} checked.`
+        : `All ${fmtNum(data.checks.length)} checks are fine.`),
+      h("ul", { class: "upkeep-rows health" }, data.checks.map((c) => h("li", { class: "upkeep-row" },
+        h("div", { class: "upkeep-what" },
+          h("h3", {}, c.name, " ", h("span", { class: c.state === "ok" ? "status" : c.state === "fail" ? "status error" : "status pending" }, STATE_WORDS[c.state])),
+          h("p", {}, c.said),
+          c.command ? h("p", {}, "In a terminal: ", h("code", {}, c.command)) : null,
+          c.fix ? h("p", {}, "In config.toml: ", h("code", {}, c.fix.line)) : null),
+        c.fix ? h("div", { class: "upkeep-do" }, h("button", { class: "button", type: "button", onclick: async () => {
+          try {
+            await post("settings/save", { values: { [c.fix.section]: { [c.fix.key]: c.fix.value } } });
+            toast("Saved to config.toml.");
+            run();
+          } catch (err) {
+            toast(err.message, "error");
+          }
+        } }, "Use this")) : null))));
+  };
+  run();
+  return h("div", { class: "upkeep" },
+    pageHead({
+      title: "Health",
+      lede: "Whether Commonplace can reach what it needs: your journal folder, Ollama and its models, and how your settings sit with Obsidian's.",
+      actions: h("button", { class: "button", type: "button", onclick: run }, "Check again"),
+    }),
+    body);
+}
+
+// a box to type a model in, with Ollama's own list to pick from
+function modelBox(id, value, models) {
+  const list = h("datalist", { id: `${id}-list` }, models.map((m) => h("option", { value: m })));
+  const box = h("input", { id, type: "text", value, list: `${id}-list`, spellcheck: "false", autocomplete: "off" });
+  return [box, list];
+}
+
+async function setupView() {
+  document.title = "Set up · Commonplace";
+  const found = await api("models").catch(() => ({ reachable: false, models: [], host: "", error: OFFLINE }));
+  const embedders = found.models.filter((m) => /embed/i.test(m));
+  const writers = found.models.filter((m) => !/embed/i.test(m));
+  const folder = h("input", { id: "setup-folder", type: "text", placeholder: "C:/Users/you/Documents/Journal", spellcheck: "false", autocomplete: "off" });
+  const seen = h("p", { class: "setting-about", role: "status" });
+  const problem = h("p", { class: "setting-problem", role: "alert" });
+  const [fast, fastList] = modelBox("setup-fast", writers[0] || "", writers);
+  const [precise, preciseList] = modelBox("setup-precise", writers[0] || "", writers);
+  const [embed, embedList] = modelBox("setup-embed", embedders[0] || "", found.models);
+  const save = h("button", { class: "button primary", type: "submit" }, "Save and open Commonplace");
+
+  const look = debounce(async () => {
+    try {
+      const got = await post("setup/look", { path: folder.value });
+      fill(seen, got.said, got.sample?.length ? [" Like ", got.sample.slice(0, 3).map((name, i) => [i ? ", " : "", h("code", {}, name)]), "."] : null,
+        got.obsidian ? " It's an Obsidian vault." : null);
+    } catch (err) {
+      seen.textContent = err.message;
+    }
+  }, 350);
+  folder.addEventListener("input", look);
+
+  const form = h("form", { class: "settings" },
+    h("section", { class: "section" },
+      h("div", { class: "section-head" }, h("h2", {}, "Your journal")),
+      h("div", { class: "setting" },
+        h("label", { for: "setup-folder" }, "The folder your journal is in"),
+        folder, seen,
+        h("p", { class: "setting-about" }, "Paste its path from File Explorer's address bar. It's only ever read; nothing is written to it."))),
+    h("section", { class: "section" },
+      h("div", { class: "section-head" }, h("h2", {}, "Models"),
+        h("span", { class: "section-note" }, found.reachable ? `${plural(found.models.length, "model")} in Ollama` : null)),
+      found.reachable ? null : h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Ollama isn't answering"),
+        h("span", {}, "Start Ollama and reload this page to pick from its models, or type their names. You can also leave these and change them later on the Settings page.")),
+      h("div", { class: "setting" }, h("label", { for: "setup-fast" }, "Fast model"), fast, fastList,
+        h("p", { class: "setting-about" }, "Reads each entry and answers from summaries. A small one is quicker. Empty uses llama3.2:3b.")),
+      h("div", { class: "setting" }, h("label", { for: "setup-precise" }, "Precise model"), precise, preciseList,
+        h("p", { class: "setting-about" }, "Writes digests, your profile and answers from full text. Can be the same model. Empty uses qwen3:14b.")),
+      h("div", { class: "setting" }, h("label", { for: "setup-embed" }, "Embedding model"), embed, embedList,
+        h("p", { class: "setting-about" }, "Makes the vectors for search by meaning. Changing it later means rebuilding the cache. Empty uses qwen3-embedding:0.6b."))),
+    h("div", { class: "save-bar" }, problem, save));
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    problem.textContent = "";
+    save.disabled = true;
+    try {
+      await post("setup/save", { vault: folder.value, fast_model: fast.value, precise_model: precise.value, embed_model: embed.value });
+      setupMode = false;
+      document.body.classList.remove("setting-up");
+      toast("Saved. Next, read your journal.");
+      location.hash = "#/upkeep";
+      render();
+    } catch (err) {
+      problem.textContent = err.message;
+      save.disabled = false;
+      folder.focus();
+    }
+  });
+  setTimeout(() => folder.focus(), 0);
+  return h("div", {},
+    pageHead({
+      title: "Set up Commonplace",
+      lede: "Two things to say before it can read your journal: where the journal is, and which Ollama models to use. The answers go in a config.toml you can change later on the Settings page.",
+    }),
+    form);
+}
+
 // ---------------------------------------------------------------- settings
 
 const EFFECT_LABELS = {
@@ -2884,6 +3008,7 @@ function settingControl(f, id) {
 
 async function settingsView() {
   let data = await api("settings");
+  const pulled = (await api("models").catch(() => ({ models: [] }))).models;
   document.title = "Settings · Commonplace";
   const body = h("div", {});
   const bar = h("div", { class: "save-bar" });
@@ -2944,13 +3069,16 @@ async function settingsView() {
         const id = `set-${s.name}-${f.key}`;
         const control = settingControl(f, id);
         const problem = h("p", { class: "setting-problem", role: "alert" });
+        const picks = s.name === "ollama" && f.key.endsWith("_model") && pulled.length
+          ? h("datalist", { id: `${id}-list` }, pulled.map((m) => h("option", { value: m }))) : null;
+        if (picks) control.el.setAttribute("list", `${id}-list`);
         control.el.disabled = !data.writable;
         control.el.addEventListener("input", () => drawBar());
         controls.push({ ...control, field: f, section: s.name, problem });
         const cost = EFFECT_LABELS[f.effect];
         return h("div", { class: f.kind === "bool" ? "setting check" : "setting" },
           h("label", { for: id }, h("code", {}, f.key), cost ? h("span", { class: "status", title: data.effects[f.effect] }, cost) : null),
-          control.el,
+          control.el, picks,
           h("p", { class: "setting-about", id: `${id}-about` }, f.about),
           problem);
       }))));
@@ -3295,6 +3423,7 @@ const routes = [
   [/^\/review\/([^/]+)$/, reviewView, "digests"],
   [/^\/upkeep$/, upkeepView, "upkeep"],
   [/^\/settings$/, settingsView, "settings"],
+  [/^\/health$/, healthView, "health"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],
@@ -3304,7 +3433,14 @@ const routes = [
 ];
 
 let renderToken = 0;
-const linksReady = getCatalog().catch(() => null);
+// until there's a config file, every address shows the Setup page
+let setupMode = false;
+const sessionReady = api("session").then((s) => {
+  sessionToken = s.token;
+  setupMode = Boolean(s.setup);
+  document.body.classList.toggle("setting-up", setupMode);
+}).catch(() => {});
+const linksReady = sessionReady.then(() => (setupMode ? null : getCatalog())).catch(() => null);
 
 async function render() {
   const raw = location.hash.replace(/^#/, "") || "/";
@@ -3334,7 +3470,7 @@ async function render() {
   try {
     // links in what the models wrote need to know which days and notes exist
     await linksReady;
-    const node = await view(args, params);
+    const node = setupMode ? await setupView() : await view(args, params);
     if (mine !== renderToken) return;
     fill(page, node);
   } catch (err) {
@@ -3590,7 +3726,10 @@ for (const button of themeButtons) {
 applyTheme(readTheme());
 window.addEventListener("hashchange", () => setMenu(false));
 window.addEventListener("hashchange", render);
-api("overview").then(updateRail).catch(() => {});
-resumeAsking();
-resumeWatching().then(watchUpkeep);
+sessionReady.then(() => {
+  if (setupMode) return;
+  api("overview").then(updateRail).catch(() => {});
+  resumeAsking();
+  resumeWatching().then(watchUpkeep);
+});
 render();

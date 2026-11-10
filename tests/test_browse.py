@@ -215,7 +215,7 @@ def test_reading_is_get_and_doing_is_post(browser, fake_client):
 
 
 def test_a_post_has_to_come_from_this_page(browser, fake_client):
-    assert browser.get("/api/session") == {"token": browser.token}
+    assert browser.get("/api/session") == {"token": browser.token, "setup": False}
     refused = [
         {browse.TOKEN_HEADER: None},
         {browse.TOKEN_HEADER: "not-the-token"},
