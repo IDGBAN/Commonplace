@@ -282,3 +282,36 @@ def test_a_missing_journal_folder_is_said_on_the_page(served, config):
     config.vault.path.rmdir()
     files = browser.get("/api/upkeep")["files"]
     assert files["due"] == 0 and str(config.vault.path) in files["error"]
+
+
+def test_keeping_up_reads_a_file_when_it_is_saved(served, config, conn, fake_client):
+    browser, server = served
+    upkeep.forget_files(config)
+    assert browser.get("/api/upkeep")["watching"]["on"] is False
+    on = browser.post("/api/upkeep/watch", {"on": True})
+    assert on["on"] is True and on["debounce"] == 0.1
+    assert browser.post("/api/upkeep/watch", {"on": True})["on"] is True  # twice is once
+    # turning it on looks for what changed before; an empty folder drops nothing
+    _wait(lambda: server.watcher.read >= 1 and server.jobs.idle())
+    assert len(store.entry_days(conn)) == 2
+
+    copy_fixtures(config.vault.path, ["2024-01-16.md"])
+    _wait(lambda: [r for r in store.entry_days(conn) if r["entry_date"] == "2024-01-16"], seconds=20)
+    jobs = browser.get("/api/upkeep")["recent"]
+    assert jobs[0]["label"] == "Read the files you saved" and jobs[0]["status"] == "done"
+    # the profile isn't rewritten on every save: journal watch's own gap applies
+    assert config.profile.watch_update_minutes > 0
+    assert [j["kind"] for j in jobs].count("profile") <= 1
+
+    assert browser.post("/api/upkeep/watch", {"on": False})["on"] is False
+    assert browser.get("/api/upkeep")["watching"]["on"] is False
+
+
+def test_keeping_up_gives_way_to_journal_watch(served, config, monkeypatch):
+    browser, server = served
+    monkeypatch.setattr(work, "holder", lambda config: {"pid": os.getpid() + 1, "what": "journal watch", "since": None})
+    assert "another window" in browser.post("/api/upkeep/watch", {"on": True}, status=409)["error"]
+    assert server.watcher.state()["on"] is False
+    monkeypatch.undo()
+    config.vault.path.rmdir()
+    assert "no folder" in browser.post("/api/upkeep/watch", {"on": True}, status=503)["error"]

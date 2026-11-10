@@ -7,12 +7,14 @@ how far they are through a work.Step, which also lets questions go first.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
 import time
 from collections.abc import Callable
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +129,8 @@ def describe(kind: str, params: Json) -> str:
         period_type, key, _, _ = store.parse_period(str(params.get("key", "")), ranges=True)
         return f"Write the digest for {store.period_title(period_type, key)}"
     if kind == "index":
+        if params.get("watch"):
+            return "Read the files you saved"
         return "Read every file again" if params.get("rebuild") else "Read new and changed files"
     if kind == "digests":
         return "Rewrite every digest" if params.get("rebuild") else "Write the digests that are out of date"
@@ -175,7 +179,9 @@ def runners(
         finally:
             ingester.console = shown
             forget_files(config)
-        if counts["indexed"] and config.profile.enabled and profile.pending_entries(conn):
+        # as files are saved, the watcher decides when the profile is due
+        watching = bool(job.params.get("watch"))
+        if not watching and counts["indexed"] and config.profile.enabled and profile.pending_entries(conn):
             then("profile")
         parts = [_count(counts["indexed"], "file read", "files read")]
         if counts["error"]:
@@ -240,3 +246,101 @@ def runners(
         "digest": with_cache(digest), "digests": with_cache(digests),
         "profile": with_cache(profile_job), "themes": with_cache(themes_job),
     }
+
+
+class Watcher:
+    """Keeps up with the journal folder while `journal browse` runs, the way
+    `journal watch` does in a terminal.
+
+    It only notices that files changed. The reading is an ordinary index job
+    put in line, so it shows on the Upkeep page, gives way to questions and
+    can be stopped like any other.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        start: Callable[[str, Json], None],
+        idle: Callable[[], bool],
+    ) -> None:
+        self.config = config
+        self._start = start
+        self._idle = idle
+        self._guard = threading.Lock()
+        self._observer: Any = None
+        self._handler: Any = None
+        self._stop = threading.Event()
+        self._since: str | None = None
+        # files changed and not read yet, and entries read that the profile hasn't seen
+        self._to_read = False
+        self._for_profile = False
+        self._last_profile = float("-inf")
+        self.read = 0
+
+    def on(self) -> None:
+        with self._guard:
+            if self._observer is not None:
+                return
+            if not self.config.vault.path.is_dir():
+                raise JournalError(f"There is no folder at {self.config.vault.path} to watch.")
+            self._handler = ingester._DebounceHandler(self.config)
+            self._observer = ingester.Observer()
+            self._observer.schedule(self._handler, str(self.config.vault.path), recursive=True)
+            self._observer.start()
+            self._stop = threading.Event()
+            self._since = datetime.now(UTC).isoformat()
+            # what changed before it was turned on is waiting too
+            self._to_read = True
+            threading.Thread(target=self._run, args=(self._stop,), name="watch", daemon=True).start()
+
+    def off(self) -> None:
+        with self._guard:
+            observer, self._observer, self._handler = self._observer, None, None
+            self._stop.set()
+            self._since = None
+        if observer is not None:
+            observer.stop()
+            observer.join(5)
+
+    def state(self) -> Json:
+        with self._guard:
+            return {
+                "on": self._observer is not None,
+                "since": self._since,
+                "waiting": len(self._handler.pending) if self._handler is not None else 0,
+                "debounce": self.config.indexing.watch_debounce_seconds,
+                "read": self.read,
+            }
+
+    def _run(self, stop: threading.Event) -> None:
+        while not stop.wait(ingester.WATCH_POLL_SECONDS):
+            with self._guard:
+                handler = self._handler
+            if handler is None:
+                return
+            with contextlib.suppress(Exception):  # a bad tick mustn't end the watching
+                self._tick(handler)
+
+    def _tick(self, handler: Any) -> None:
+        if handler.take_due(self.config.indexing.watch_debounce_seconds):
+            self._to_read = True
+        if not self._idle():
+            return
+        if self._to_read:
+            # a file saved while the last read was running is caught by this one
+            self._to_read = False
+            self._for_profile = True
+            self.read += 1
+            self._start("index", {"watch": True})
+            return
+        gap = self.config.profile.watch_update_minutes * 60
+        if self._for_profile and not handler.pending and time.monotonic() - self._last_profile >= gap:
+            self._for_profile = False
+            if not self.config.profile.enabled:
+                return
+            with closing(db.connect_readonly(self.config)) as conn:
+                due = bool(profile.pending_entries(conn)) or profile.needs_update(conn, self.config)
+            if due:
+                # the profile is a precise-model call, so no more often than watch does it
+                self._last_profile = time.monotonic()
+                self._start("profile", {})

@@ -34,6 +34,7 @@ PAGES = {
     "tags": "/tags",
     "themes": "/themes",
     "unlinked": "/note/1",
+    "watch": "/upkeep",
 }
 
 # what a command with a page can still only do from the command line
@@ -42,6 +43,7 @@ PAGE_CANT_YET = {
     "profile": "--rescan",
     "rollup": "--since, --until and --only",
     "tags": "--similar",
+    "watch": "writing digests as you go ([rollups] watch_refresh_minutes), and --no-memo",
 }
 
 # commands waiting for a page
@@ -50,7 +52,6 @@ NO_PAGE_YET = {
     "export": "a download",
     "insights": "a page of its own",
     "prompt": "a page of its own",
-    "watch": "the upkeep page",
 }
 
 # commands a page wouldn't make sense for

@@ -2863,6 +2863,25 @@ function upkeepButton(label, kind, params = {}) {
   } }, label);
 }
 
+// Keeping up is remembered in this browser, and turned back on when a page
+// loads after `journal browse` was restarted.
+async function setWatching(on, { quiet } = {}) {
+  try {
+    await post("upkeep/watch", { on });
+    try { localStorage.setItem("upkeep-watch", on ? "on" : "off"); } catch { /* not remembered, then */ }
+  } catch (err) {
+    if (!quiet) toast(err.message, "error");
+  }
+}
+
+async function resumeWatching() {
+  let wanted = false;
+  try { wanted = localStorage.getItem("upkeep-watch") === "on"; } catch { /* storage refused */ }
+  if (!wanted) return;
+  const data = await api("upkeep").catch(() => null);
+  if (data && !data.watching.on) setWatching(true, { quiet: true });
+}
+
 // the mark by Upkeep in the list of sections while something runs
 let upkeepTimer = null;
 
@@ -2872,7 +2891,8 @@ async function watchUpkeep() {
   try {
     const data = await api("upkeep");
     busy = Boolean(data.running || data.queued.length);
-    upkeepCount.textContent = data.running ? "running" : "";
+    upkeepCount.textContent = data.running ? "running" : data.watching.on ? "watching" : "";
+    busy = busy || data.watching.on;
   } catch {
     upkeepCount.textContent = "";
   }
@@ -2914,7 +2934,7 @@ async function upkeepView() {
     } catch {
       // the next try may get through
     }
-    timer = setTimeout(refresh, data.running || data.queued.length ? 1500 : 15000);
+    timer = setTimeout(refresh, data.running || data.queued.length ? 1500 : data.watching.on ? 4000 : 15000);
     watchUpkeep();
   };
 
@@ -2953,6 +2973,7 @@ async function upkeepView() {
       p.unfolded ? `${plural(p.unfolded, "new fact")} to add` : null,
     ].filter(Boolean);
     const f = data.files;
+    const w = data.watching;
     const filesWaiting = [
       f.new ? `${fmtNum(f.new)} new` : null,
       f.changed ? `${fmtNum(f.changed)} changed` : null,
@@ -2973,6 +2994,10 @@ async function upkeepView() {
             ? `All ${plural(f.tracked, "file")} in your journal folder ${f.tracked === 1 ? "has" : "have"} been read.`
             : "No files found in your journal folder. If it's on a drive that isn't connected, nothing is dropped from the cache.",
         f.error ? null : f.due ? control("index", "Read them") : null),
+        row("Keep up as you write", w.on
+          ? `On. A file you save is read once it has been left alone for ${duration(w.debounce)}${w.waiting ? `; ${plural(w.waiting, "file")} waiting for that now` : ""}. It stays on while journal browse is running.`
+          : "Off. Files you save wait until you press Read them.",
+        h("button", { class: "button", type: "button", disabled: Boolean(f.error), onclick: () => setWatching(!w.on).then(refresh) }, w.on ? "Turn off" : "Turn on")),
         row("Digests", d.due
           ? `${d.kinds.map((k) => k.text).join(", ")} to write. One call to the precise model for each.`
           : d.written ? "All up to date." : "None to write yet. They come once there are entries.",
@@ -3432,5 +3457,5 @@ window.addEventListener("hashchange", () => setMenu(false));
 window.addEventListener("hashchange", render);
 api("overview").then(updateRail).catch(() => {});
 resumeAsking();
-watchUpkeep();
+resumeWatching().then(watchUpkeep);
 render();

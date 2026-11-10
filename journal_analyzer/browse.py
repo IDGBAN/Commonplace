@@ -890,6 +890,20 @@ def start_upkeep(server: BrowseServer, body: Json) -> Json:
     return server.jobs.add(str(kind), label, params).as_json()
 
 
+def watch_folder(server: BrowseServer, body: Json) -> Json:
+    if body.get("on") is True:
+        other = upkeep.elsewhere(server.config)
+        if other is not None and "watch" in str(other.get("what", "")):
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "journal watch is already keeping up with your journal folder, in another window.",
+            )
+        server.watcher.on()
+    else:
+        server.watcher.off()
+    return server.watcher.state()
+
+
 def stop_upkeep(server: BrowseServer, body: Json) -> Json:
     return {"stopping": server.jobs.stop()}
 
@@ -909,6 +923,7 @@ _ACTIONS: list[tuple[re.Pattern[str], Action]] = [
     (re.compile(r"/api/ask/([0-9a-f]{32})/cancel"), cancel_answer),
     (re.compile(r"/api/upkeep/start"), start_upkeep),
     (re.compile(r"/api/upkeep/stop"), stop_upkeep),
+    (re.compile(r"/api/upkeep/watch"), watch_folder),
     (re.compile(r"/api/upkeep/(\d+)/remove"), remove_upkeep),
 ]
 _ANSWER_EVENTS = re.compile(r"/api/ask/([0-9a-f]{32})/events")
@@ -1213,6 +1228,7 @@ class _Handler(BaseHTTPRequestHandler):
             payload = {
                 **upkeep.state(config), **self.server.jobs.snapshot(),
                 "elsewhere": upkeep.elsewhere(config),
+                "watching": self.server.watcher.state(),
             }
         except JournalError as exc:
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
@@ -1274,8 +1290,19 @@ class BrowseServer(ThreadingHTTPServer):
         self.answers = work.Answers(self.lane)
         self.jobs = work.Jobs(config, self.lane, upkeep.runners(config, self.client, self._then))
 
+        self.watcher = upkeep.Watcher(config, self._start, self.jobs.idle)
+
     def _then(self, kind: str) -> None:
-        self.jobs.add(kind, upkeep.describe(kind, {}), {})
+        self._start(kind, {})
+
+    def _start(self, kind: str, params: Json) -> None:
+        self.jobs.add(kind, upkeep.describe(kind, params), params)
+
+    def server_close(self) -> None:
+        # also called when the port turned out to be taken, before there's a watcher
+        if hasattr(self, "watcher"):
+            self.watcher.off()
+        super().server_close()
 
     def client(self) -> OllamaClient:
         with self._client_guard:
