@@ -121,3 +121,9 @@ precise_model_think = false
     cfg = load_config(_write(tmp_path, text))
     assert cfg.ollama.fast_model_think is True
     assert cfg.ollama.precise_model_think is False
+
+
+def test_the_cache_goes_under_the_home_folder_when_no_path_is_given(tmp_path, _a_home_folder_of_its_own):
+    cfg = load_config(_write(tmp_path, MINIMAL.format(vault=tmp_path)))
+    # not a folder called "~" next to wherever the command was run
+    assert cfg.db.path == (_a_home_folder_of_its_own / ".journal_analyzer" / "journal.db").resolve()

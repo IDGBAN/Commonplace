@@ -152,6 +152,17 @@ def make_config(
     )
 
 
+@pytest.fixture(autouse=True)
+def _a_home_folder_of_its_own(tmp_path_factory, monkeypatch):
+    """No test gets the real home folder. A config that leaves [db] path out
+    puts the cache under it, and a test once opened the real one that way."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    assert Path("~").expanduser() == home
+    return home
+
+
 @pytest.fixture
 def config(tmp_path) -> Config:
     return make_config(tmp_path)

@@ -5,7 +5,14 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .models import ConfigError
 
@@ -87,6 +94,11 @@ class OllamaConfig(BaseModel):
 
 
 class DbConfig(BaseModel):
+    # Without this the default path is never run through _abs_path, and a
+    # config with no [db] path put the cache in a folder literally named "~"
+    # under wherever the command was run from.
+    model_config = ConfigDict(validate_default=True)
+
     path: Path = Path("~/.journal_analyzer/journal.db")
     # keep model results so rebuilding the cache doesn't redo them
     memo: bool = True
@@ -295,7 +307,9 @@ class McpConfig(BaseModel):
 class Config(BaseModel):
     vault: VaultConfig
     ollama: OllamaConfig = OllamaConfig()
-    db: DbConfig = DbConfig()
+    # made when a config is read, not when this module loads, so the home
+    # folder is the one in effect then
+    db: DbConfig = Field(default_factory=DbConfig)
     indexing: IndexingConfig = IndexingConfig()
     reranking: RerankingConfig = RerankingConfig()
     insights: InsightsConfig = InsightsConfig()
