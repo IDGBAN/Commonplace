@@ -1902,7 +1902,10 @@ def browse_cmd(
             console.print(f"Journal browser running at [bold cyan]{url}[/bold cyan]")
             console.print("[dim]Your notes are never changed. Press Ctrl-C to stop.[/dim]")
 
-        browse.serve(cfg, port=port, open_browser=not no_open, on_ready=ready)
+        browse.serve(
+            cfg, port=port, open_browser=not no_open, on_ready=ready,
+            config_path=(config or Path("config.toml")).resolve(),
+        )
 
 
 @app.command(name="mcp")

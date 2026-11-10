@@ -2840,6 +2840,140 @@ async function historyView([id]) {
     h("p", { class: "section-note" }, "The days and notes it cited may have changed since."));
 }
 
+// ---------------------------------------------------------------- settings
+
+const EFFECT_LABELS = {
+  now: null, index: "next time files are read", reread: "files read from now on",
+  rebuild: "needs a rebuild", restart: "a different file",
+};
+
+// one setting's control, with how to read its value back out
+function settingControl(f, id) {
+  const common = { id, "aria-describedby": `${id}-about` };
+  if (f.kind === "bool") {
+    const box = h("input", { ...common, type: "checkbox", checked: f.value === true });
+    return { el: box, read: () => box.checked };
+  }
+  if (f.kind === "maybe") {
+    const pick = h("select", common,
+      h("option", { value: "", selected: f.value == null }, "Leave it to the model"),
+      h("option", { value: "true", selected: f.value === true }, "On"),
+      h("option", { value: "false", selected: f.value === false }, "Off"));
+    return { el: pick, read: () => (pick.value === "" ? null : pick.value === "true") };
+  }
+  if (f.kind === "choice") {
+    const pick = h("select", common, f.choices.map((c) => h("option", { value: c, selected: c === f.value }, c)));
+    return { el: pick, read: () => pick.value };
+  }
+  if (f.kind === "int" || f.kind === "float") {
+    const box = h("input", { ...common, type: "number", value: f.value, min: f.min, max: f.max, step: f.kind === "int" ? 1 : "any" });
+    return { el: box, read: () => (box.value.trim() === "" ? null : Number(box.value)) };
+  }
+  if (f.kind === "list") {
+    const box = h("textarea", { ...common, rows: Math.min(8, Math.max(2, f.value.length + 1)), spellcheck: "false", placeholder: "One on each line" }, f.value.join("\n"));
+    return { el: box, read: () => box.value.split("\n").map((x) => x.trim()).filter(Boolean) };
+  }
+  if (f.kind === "pairs") {
+    const lines = Object.entries(f.value).map(([k, v]) => `${k} = ${v}`);
+    const box = h("textarea", { ...common, rows: Math.min(8, Math.max(2, lines.length + 1)), spellcheck: "false", placeholder: "this = that, one on each line" }, lines.join("\n"));
+    return { el: box, read: () => Object.fromEntries(box.value.split("\n").map((line) => line.split("=").map((x) => x.trim())).filter((p) => p.length === 2 && p[0] && p[1])) };
+  }
+  const box = h("input", { ...common, type: "text", value: f.value ?? "", spellcheck: "false", autocomplete: "off" });
+  return { el: box, read: () => box.value };
+}
+
+async function settingsView() {
+  let data = await api("settings");
+  document.title = "Settings · Commonplace";
+  const body = h("div", {});
+  const bar = h("div", { class: "save-bar" });
+  let controls = [];
+
+  const changes = () => {
+    const out = {};
+    let n = 0;
+    for (const c of controls) {
+      const now = c.read();
+      if (JSON.stringify(now) === JSON.stringify(c.field.value ?? (c.field.kind === "text" ? "" : null))) continue;
+      (out[c.section] ||= {})[c.field.key] = now;
+      n += 1;
+    }
+    return { out, n };
+  };
+
+  const drawBar = (said) => {
+    const { n } = changes();
+    fill(bar,
+      h("span", { class: "save-said", role: "status" }, said || (n ? `${plural(n, "change")} not saved` : data.writable ? "Nothing changed" : null)),
+      h("button", { class: "button", type: "button", disabled: !n, onclick: () => draw() }, "Undo"),
+      h("button", { class: "button primary", type: "button", disabled: !n || !data.writable, onclick: save }, "Save"));
+  };
+
+  const save = async () => {
+    const { out } = changes();
+    const response = await send("settings/save", { values: out }).catch((err) => ({ ok: false, json: async () => ({ error: err.message }) }));
+    const reply = await response.json().catch(() => ({}));
+    for (const c of controls) c.problem.textContent = "";
+    if (!response.ok) {
+      const fields = reply.fields || {};
+      let first = null;
+      for (const c of controls) {
+        const said = fields[`${c.section}.${c.field.key}`];
+        if (!said) continue;
+        c.problem.textContent = said;
+        first ||= c.el;
+      }
+      first?.focus();
+      // a rule about two settings together belongs to no one box
+      const named = new Set(controls.map((c) => `${c.section}.${c.field.key}`));
+      const loose = Object.entries(fields).filter(([name]) => !named.has(name)).map(([name, said]) => `[${name}] ${said}.`);
+      drawBar([reply.error || "That couldn't be saved.", ...loose].join(" "));
+      return;
+    }
+    const effects = reply.costs.filter((e) => e !== "now").map((e) => reply.effects[e]);
+    data = reply;
+    draw(`Saved to config.toml.${effects.length ? ` ${effects.join(" ")}` : ""}`);
+    toast("Settings saved.");
+  };
+
+  const draw = (said) => {
+    controls = [];
+    fill(body, data.sections.map((s) => h("section", { class: "section settings-section", id: `settings-${s.name}` },
+      h("div", { class: "section-head" }, h("h2", {}, s.title), h("span", { class: "section-note" }, h("code", {}, `[${s.name}]`))),
+      s.fields.map((f) => {
+        const id = `set-${s.name}-${f.key}`;
+        const control = settingControl(f, id);
+        const problem = h("p", { class: "setting-problem", role: "alert" });
+        control.el.disabled = !data.writable;
+        control.el.addEventListener("input", () => drawBar());
+        controls.push({ ...control, field: f, section: s.name, problem });
+        const cost = EFFECT_LABELS[f.effect];
+        return h("div", { class: f.kind === "bool" ? "setting check" : "setting" },
+          h("label", { for: id }, h("code", {}, f.key), cost ? h("span", { class: "status", title: data.effects[f.effect] }, cost) : null),
+          control.el,
+          h("p", { class: "setting-about", id: `${id}-about` }, f.about),
+          problem);
+      }))));
+    drawBar(said);
+  };
+
+  draw();
+  return h("div", { class: "settings" },
+    pageHead({
+      title: "Settings",
+      lede: data.path
+        ? ["Everything in ", h("code", {}, "config.toml"), ". Saving changes only the lines you changed and keeps your comments. The file as it was is kept next to it."]
+        : "Commonplace was started without a config file, so these can be read here but not changed.",
+      meta: data.path ? [h("span", { class: "path" }, data.path)] : null,
+    }),
+    data.path && !data.writable ? h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Can't save"), h("span", {}, "The config file can't be written to from here.")) : null,
+    h("nav", { class: "chips settings-jump", "aria-label": "Jump to a part" }, data.sections.map((s) => h("a", { class: "chip", href: `#settings-${s.name}`, onclick: (ev) => {
+      ev.preventDefault();
+      document.getElementById(`settings-${s.name}`).scrollIntoView({ block: "start" });
+    } }, s.title))),
+    body, bar);
+}
+
 // ---------------------------------------------------------------- upkeep
 
 const upkeepCount = document.getElementById("upkeep-count");
@@ -3160,6 +3294,7 @@ const routes = [
   [/^\/compare\/([^/]+)(?:\/([^/]+))?$/, compareView, "digests"],
   [/^\/review\/([^/]+)$/, reviewView, "digests"],
   [/^\/upkeep$/, upkeepView, "upkeep"],
+  [/^\/settings$/, settingsView, "settings"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],

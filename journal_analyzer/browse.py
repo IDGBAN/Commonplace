@@ -33,6 +33,7 @@ from datetime import date
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -48,6 +49,7 @@ from . import (
     query,
     review,
     serialize,
+    settings,
     store,
     themes,
     unlinked,
@@ -114,9 +116,11 @@ _SECURITY_HEADERS = {
 
 
 class ApiError(Exception):
-    def __init__(self, status: HTTPStatus, message: str):
+    def __init__(self, status: HTTPStatus, message: str, details: Json | None = None):
         super().__init__(message)
         self.status = status
+        # sent along with the message, like which settings a save tripped on
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -890,6 +894,27 @@ def start_upkeep(server: BrowseServer, body: Json) -> Json:
     return server.jobs.add(str(kind), label, params).as_json()
 
 
+def save_settings(server: BrowseServer, body: Json) -> Json:
+    changes = body.get("values")
+    if server.config_path is None:
+        raise ApiError(HTTPStatus.CONFLICT, "Commonplace was started without a config file, so there's nothing to save to.")
+    if not isinstance(changes, dict) or not changes:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Nothing was changed.")
+    # everything that's running was started with the settings as they were
+    if not server.jobs.idle() or server.lane.busy:
+        raise ApiError(
+            HTTPStatus.CONFLICT,
+            "Something is running with the settings as they are. Save once it has finished.",
+        )
+    try:
+        config, changed = settings.save(server.config_path, changes)
+    except settings.SettingsError as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, str(exc), {"fields": exc.fields}) from exc
+    server.use(config)
+    costs = sorted({settings.HELP[name][0] for name in changed})
+    return {**settings.describe(config, server.config_path), "saved": changed, "costs": costs}
+
+
 def watch_folder(server: BrowseServer, body: Json) -> Json:
     if body.get("on") is True:
         other = upkeep.elsewhere(server.config)
@@ -921,6 +946,7 @@ _ACTIONS: list[tuple[re.Pattern[str], Action]] = [
     (re.compile(r"/api/history/(\d+)/delete"), forget_question),
     (re.compile(r"/api/history/clear"), clear_history),
     (re.compile(r"/api/ask/([0-9a-f]{32})/cancel"), cancel_answer),
+    (re.compile(r"/api/settings/save"), save_settings),
     (re.compile(r"/api/upkeep/start"), start_upkeep),
     (re.compile(r"/api/upkeep/stop"), stop_upkeep),
     (re.compile(r"/api/upkeep/watch"), watch_folder),
@@ -982,6 +1008,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"token": self.server.token})
         elif url.path == "/api/upkeep":
             self._upkeep()
+        elif url.path == "/api/settings":
+            self._send_json(HTTPStatus.OK, settings.describe(self.server.config, self.server.config_path))
         elif found := _ANSWER_EVENTS.fullmatch(url.path):
             self._follow_again(found.group(1), url.query)
         elif url.path == "/api/ask" or any(p.fullmatch(url.path) for p, _ in _ACTIONS):
@@ -1080,7 +1108,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             payload = action(self.server, body, *args)
         except ApiError as exc:
-            self._send_json(exc.status, {"error": str(exc)})
+            self._send_json(exc.status, {"error": str(exc), **exc.details})
         except JournalError as exc:
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
         except sqlite3.Error as exc:
@@ -1273,8 +1301,12 @@ class BrowseServer(ThreadingHTTPServer):
     # On Windows SO_REUSEADDR lets a second server bind a port that's in use
     allow_reuse_address = sys.platform != "win32"
 
-    def __init__(self, config: Config, port: int, make_client: ClientFactory):
+    def __init__(
+        self, config: Config, port: int, make_client: ClientFactory, config_path: Path | None = None
+    ):
         self.config = config
+        # the file Settings saves to; without one the page only shows them
+        self.config_path = config_path
         self.make_client = make_client
         super().__init__((HOST, port), _Handler)
         self.port: int = self.socket.getsockname()[1]
@@ -1288,9 +1320,23 @@ class BrowseServer(ThreadingHTTPServer):
         self._client_guard = threading.Lock()
         self.lane = work.Lane()
         self.answers = work.Answers(self.lane)
+        self._equip(config)
+
+    def _equip(self, config: Config) -> None:
         self.jobs = work.Jobs(config, self.lane, upkeep.runners(config, self.client, self._then))
 
         self.watcher = upkeep.Watcher(config, self._start, self.jobs.idle)
+
+    def use(self, config: Config) -> None:
+        """Carries on with new settings. Only called with nothing running."""
+        watching = self.watcher.state()["on"]
+        self.watcher.off()
+        with self._client_guard:
+            self._client = None
+        self.config = config
+        self._equip(config)
+        if watching and config.vault.path.is_dir():
+            self.watcher.on()
 
     def _then(self, kind: str) -> None:
         self._start(kind, {})
@@ -1316,10 +1362,13 @@ class BrowseServer(ThreadingHTTPServer):
 
 
 def make_server(
-    config: Config, port: int = DEFAULT_PORT, make_client: ClientFactory = OllamaClient
+    config: Config,
+    port: int = DEFAULT_PORT,
+    make_client: ClientFactory = OllamaClient,
+    config_path: Path | None = None,
 ) -> BrowseServer:
     try:
-        return BrowseServer(config, port, make_client)
+        return BrowseServer(config, port, make_client, config_path)
     except OSError as exc:
         raise JournalError(
             f"Couldn't listen on {HOST}:{port} ({exc}). If 'journal browse' is "
@@ -1332,10 +1381,11 @@ def serve(
     port: int = DEFAULT_PORT,
     open_browser: bool = True,
     on_ready: Callable[[str], None] = print,
+    config_path: Path | None = None,
 ) -> None:
     # fail here, in the terminal, rather than as an error page
     db.connect_readonly(config).close()
-    server = make_server(config, port)
+    server = make_server(config, port, config_path=config_path)
     on_ready(server.url)
     if open_browser:
         webbrowser.open(server.url)
