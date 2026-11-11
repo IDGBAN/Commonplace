@@ -822,6 +822,11 @@ a.cite:hover { background-color: var(--mark); }
 /* nothing to go to until Setup is done */
 body.setting-up .rail-scroll, body.setting-up .jump, body.setting-up #keys { visibility: hidden; }
 
+.downloads { margin: 0 0 0.6rem; }
+.prompt-list { margin: 0; padding-left: 1.4rem; display: grid; gap: 0.9rem; max-width: var(--measure); font: 1.09rem/1.6 var(--read); }
+.prompt-list li::marker { color: var(--ink-faint); font-family: var(--ui); font-size: 0.9rem; }
+.upkeep-what h3 .chip { font-weight: 400; vertical-align: 0.05em; }
+
 /* Asking first, and saying it's done */
 
 .dialog {

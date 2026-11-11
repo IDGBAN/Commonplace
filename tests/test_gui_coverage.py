@@ -16,7 +16,9 @@ PAGES = {
     "digest": "/digest/month/2024-03",
     "doctor": "/health",
     "entities": "/notes",
+    "export": "/entries",
     "history": "/history",
+    "insights": "/insights",
     "index": "/upkeep",
     "lapsed": "/notes",
     "links": "/notes",
@@ -25,6 +27,7 @@ PAGES = {
     "note": "/note/1",
     "on-this-day": "/",
     "profile": "/you",
+    "prompt": "/prompts",
     "review": "/review/2024",
     "rollup": "/upkeep",
     "search": "/search",
@@ -43,15 +46,11 @@ PAGE_CANT_YET = {
     "index": "naming files to read, the lists --dry-run prints, and --no-memo",
     "profile": "--rescan",
     "rollup": "--since, --until and --only",
-    "tags": "--similar",
     "watch": "writing digests as you go ([rollups] watch_refresh_minutes), and --no-memo",
 }
 
 # commands waiting for a page
 NO_PAGE_YET = {
-    "export": "a download",
-    "insights": "a page of its own",
-    "prompt": "a page of its own",
 }
 
 # commands a page wouldn't make sense for

@@ -1037,6 +1037,11 @@ async function entriesView(_, params) {
         ? `${plural(data.total, "entry", "entries")} match`
         : `${plural(data.total, "entry", "entries")} in the cache`,
         pages > 1 ? `, page ${state.page} of ${pages}` : ""),
+      data.total ? h("p", { class: "section-note downloads" }, "Save them as ",
+        [["csv", "a spreadsheet (CSV)"], ["markdown", "Markdown"], ["json", "JSON"]].map(([format, label], i) => [
+          i ? ", " : "",
+          h("a", { href: `/api/export${query({ format, tag: state.tag, note: state.note, group: state.group, from: state.from, to: state.to })}`, download: "" }, label),
+        ]), ".", state.q ? " The words filter isn't applied to the file." : null) : null,
       entryLines(data.items, scale, { emptyText: "No entries match these filters." }),
       pages > 1 && h("div", { class: "pager-nav" },
         h("button", { class: "button", type: "button", disabled: state.page <= 1, onclick: go(state.page - 1) }, "Previous page"),
@@ -1273,7 +1278,21 @@ async function notesView(_, params) {
     body,
     groups,
     quiet,
+    looseNotes(),
     unresolved);
+}
+
+function looseNotes() {
+  const slot = h("div", {});
+  api("unlinked").then((data) => {
+    if (!data.notes.length) return;
+    fill(slot, section("Named without a link", h("div", { class: "chips" }, data.notes.map((n) =>
+      h("a", { class: "chip", href: href.note(n.note_id), title: `Last on ${mediumDate(n.latest)}` }, n.title, h("span", { class: "n" }, fmtNum(n.count))))), {
+      note: data.total > data.notes.length ? `${fmtNum(data.notes.length)} of ${fmtNum(data.total)}` : plural(data.total, "note"),
+      intro: "Entries that say one of these names without linking it, so they're missing from its numbers. Each note's page shows the sentences, to add the links in Obsidian.",
+    }));
+  }).catch(() => {});
+  return slot;
 }
 
 async function noteView([id], params) {
@@ -1435,7 +1454,33 @@ async function tagsView(_, params) {
       ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
         h("thead", {}, h("tr", {}, h("th", {}, "Tag"), h("th", { class: "num" }, "Entries"), h("th", {}, h("span", { class: "visually-hidden" }, "Share")), h("th", {}, "Average mood"), h("th", {}, "Compared with usual"), h("th", { class: "num" }, "Last used"))),
         body))
-      : empty("No tags yet. Run ", h("code", {}, "journal index"), " first."));
+      : empty("No tags yet. They come with the first entries that are read."),
+    similarTags());
+}
+
+// filled in once it arrives, so the tags don't wait on it
+function similarTags() {
+  const slot = h("div", {});
+  const load = async () => {
+    const data = await api("similar-tags").catch(() => null);
+    if (!data || !data.pairs.length) return fill(slot);
+    fill(slot, section("Might be the same tag", h("ul", { class: "upkeep-rows" }, data.pairs.map((p) => h("li", { class: "upkeep-row" },
+      h("div", { class: "upkeep-what" },
+        h("h3", {}, tagChip(p.tag, p.n), " looks like ", tagChip(p.like, p.like_n))),
+      h("div", { class: "upkeep-do" }, h("button", { class: "button", type: "button", onclick: async () => {
+        try {
+          await post("settings/save", { values: { tags: { merge: { ...data.merge, [p.tag]: p.like } } } });
+          toast(`${p.tag} counts as ${p.like} from the next time your files are read.`);
+          load();
+        } catch (err) {
+          toast(err.message, "error");
+        }
+      } }, `Count as ${p.like}`))))), {
+      intro: "Counting one as the other is saved to config.toml and applies the next time your files are read, without a model.",
+    }));
+  };
+  load();
+  return slot;
 }
 
 async function tagView([name]) {
@@ -2063,7 +2108,8 @@ async function reviewView([period]) {
       eyebrow: h("a", { href: href.digest(r.kind, r.key) }, `${KIND_LABELS[r.kind]} digest`),
       title: `${r.title} in review`,
       actions: [button(`← ${periodTitle(r.kind, r.previous.key)}`, href.review(r.previous.key), { title: `The review of ${before}` })],
-      meta: [h("span", {}, periodRange(r.kind, r.start, r.end)), h("a", { href: href.compare(r.key) }, `Compare with ${before}`)],
+      meta: [h("span", {}, periodRange(r.kind, r.start, r.end)), h("a", { href: href.compare(r.key) }, `Compare with ${before}`),
+        h("a", { href: `/api/review/${encodeURIComponent(r.key)}/download`, download: "" }, "Save as Markdown")],
     }),
     section("Digest", digest),
     facts,
@@ -2840,6 +2886,101 @@ async function historyView([id]) {
     h("p", { class: "section-note" }, "The days and notes it cited may have changed since."));
 }
 
+// ---------------------------------------------------------------- insights and writing prompts
+
+// One model call that's written in the background, like an answer. The id is
+// kept for this tab, so a reload follows it again where a new one would start.
+async function thinkRun(key, path, body, onEvent) {
+  const forget = () => { try { sessionStorage.removeItem(key); } catch { /* nothing kept */ } };
+  let response;
+  if (body) {
+    response = await send(path, body, { accept: "text/event-stream" });
+  } else {
+    let id = null;
+    try { id = sessionStorage.getItem(key); } catch { /* nothing kept */ }
+    if (!id) return false;
+    response = await fetch(`/api/ask/${id}/events`, { headers: { Accept: "text/event-stream" } });
+  }
+  if (!response.ok) {
+    forget();
+    if (!body) return false;
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `That couldn't be started (${response.status}).`);
+  }
+  await readEvents(response, (event, data) => {
+    if (event === "run") {
+      try { sessionStorage.setItem(key, data.id); } catch { /* not kept, then */ }
+    } else {
+      if (event !== "stage") forget();
+      onEvent(event, data);
+    }
+  });
+  return true;
+}
+
+// the shared shape of both pages: a few boxes, a button, and what came back
+function thinkPage({ key, path, title, lede, controls, read, button, show }) {
+  const out = h("div", { "aria-live": "polite" });
+  const go = h("button", { class: "button primary", type: "submit" }, button);
+  const onEvent = (event, data) => {
+    if (event === "stage") fill(out, h("div", { class: "turn-running" }, h("p", { class: "search-status", role: "status" }, data.text)));
+    else if (event === "result") fill(out, show(data));
+    else if (event === "problem") fill(out, h("div", { class: "notice" }, h("span", { class: "notice-label" }, "Couldn't do that"), h("span", {}, data.error)));
+    if (event !== "stage") go.disabled = false;
+  };
+  const run = async (body) => {
+    go.disabled = true;
+    try {
+      const followed = await thinkRun(key, path, body, onEvent);
+      if (!followed) go.disabled = false;
+    } catch (err) {
+      onEvent("problem", { error: err.message });
+    }
+  };
+  const form = h("form", { class: "filters" }, controls, go);
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    run(read());
+  });
+  // one that was being written when the page reloaded
+  run(null);
+  return h("div", { class: "kept" },
+    pageHead({ title, lede }), form, out);
+}
+
+async function insightsView() {
+  document.title = "Insights · Commonplace";
+  const from = h("input", { type: "date" });
+  const to = h("input", { type: "date" });
+  return thinkPage({
+    key: "think-insights", path: "insights", title: "Insights", button: "Look for patterns",
+    lede: "Patterns you didn't ask about: tags and people your mood runs high or low around, days of the week, seasons, and the numbers you keep. They're worked out from the cache first, then a model puts the ones that stand out into words. They're correlations, not causes.",
+    controls: [field("From", from), field("To", to)],
+    read: () => ({ from: from.value, to: to.value }),
+    show: (d) => [
+      h("div", { class: "turn-answer md" }, md(d.text)),
+      d.signals.length ? section("What it looked at", h("ul", { class: "plain" }, d.signals.map((s) => h("li", {}, s))), {
+        note: `${plural(d.entries, "scored entry", "scored entries")}`,
+      }) : null,
+    ],
+  });
+}
+
+async function promptsView() {
+  document.title = "Writing prompts · Commonplace";
+  const days = h("input", { type: "number", min: 1, max: 365, value: 14 });
+  const count = h("input", { type: "number", min: 1, max: 12, value: 4 });
+  return thinkPage({
+    key: "think-prompts", path: "prompts", title: "Writing prompts", button: "Suggest some",
+    lede: "Things to write about next, picked up from threads your recent entries left open: a project you named, someone who keeps coming up, a feeling you didn't finish with.",
+    controls: [field("Days to look back", days), field("How many", count)],
+    read: () => ({ days: Number(days.value) || 14, count: Number(count.value) || 4 }),
+    show: (d) => (d.prompts.length
+      ? h("ol", { class: "prompt-list" }, d.prompts.map((p) => h("li", { class: "md" }, md(p))))
+      : empty(`Nothing written in the last ${plural(d.days, "day")} to draw from.`)),
+  });
+}
+
 // ---------------------------------------------------------------- health and setup
 
 const STATE_WORDS = { ok: "Fine", warn: "Worth a look", fail: "Needs fixing" };
@@ -3424,6 +3565,8 @@ const routes = [
   [/^\/upkeep$/, upkeepView, "upkeep"],
   [/^\/settings$/, settingsView, "settings"],
   [/^\/health$/, healthView, "health"],
+  [/^\/insights$/, insightsView, "insights"],
+  [/^\/prompts$/, promptsView, "prompts"],
   [/^\/files$/, filesView, "files"],
   [/^\/search$/, searchView, "search"],
   [/^\/ask$/, askView, "ask"],

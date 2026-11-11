@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from . import (
     compare,
     db,
+    export,
     fields,
     health,
     history,
@@ -47,6 +48,7 @@ from . import (
     links,
     parser,
     profile,
+    prompts,
     query,
     review,
     serialize,
@@ -683,6 +685,26 @@ def theme_page(req: Request, theme_id: str) -> Json:
     }
 
 
+def similar_tags(req: Request) -> Json:
+    """Tags that look like the same thing, as `journal tags --similar` lists them."""
+    merged = req.config.tags.merge
+    return {
+        "pairs": [
+            {"tag": rare, "n": n_rare, "like": common, "like_n": n_common}
+            for rare, n_rare, common, n_common in fields.similar_tags(store.tag_stats(req.conn))
+            if rare not in merged
+        ],
+        "merge": merged,
+    }
+
+
+def unlinked_notes(req: Request) -> Json:
+    """Notes your entries name without linking, most often first."""
+    found = unlinked.by_note(req.conn)
+    return {"total": len(found), "notes": [asdict(row) for row in found[:UNLINKED_LISTED]]}
+
+
+UNLINKED_LISTED = 40
 HISTORY_LISTED = 30
 _NO_QUESTION = "There's no question with that number in your history."
 
@@ -1002,7 +1024,18 @@ _ROUTES: list[tuple[re.Pattern[str], Handler]] = [
     (re.compile(r"/api/review/([^/]+)"), review_page),
     (re.compile(r"/api/metrics/(.+)"), metric),
     (re.compile(r"/api/search"), search),
+    (re.compile(r"/api/similar-tags"), similar_tags),
+    (re.compile(r"/api/unlinked"), unlinked_notes),
 ]
+
+# what a POST can start that takes a model a while, and streams as it goes
+_STREAMS = frozenset({"/api/ask", "/api/insights", "/api/prompts"})
+_EXPORTS = {
+    "json": ("application/json; charset=utf-8", "json"),
+    "markdown": ("text/markdown; charset=utf-8", "md"),
+    "csv": ("text/csv; charset=utf-8", "csv"),
+}
+_REVIEW_DOWNLOAD = re.compile(r"/api/review/([^/]+)/download")
 
 
 # Server
@@ -1038,6 +1071,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"checks": health.check(self.server.config, self.server.client)})
         elif url.path == "/api/upkeep":
             self._upkeep()
+        elif url.path == "/api/export" or _REVIEW_DOWNLOAD.fullmatch(url.path):
+            self._download(url.path, url.query)
+        elif url.path in _STREAMS:
+            self._wrong_method("POST")
         elif url.path == "/api/settings":
             self._send_json(HTTPStatus.OK, settings.describe(self.server.config, self.server.config_path))
         elif found := _ANSWER_EVENTS.fullmatch(url.path):
@@ -1062,7 +1099,7 @@ class _Handler(BaseHTTPRequestHandler):
             ((handler, match) for pattern, handler in _ACTIONS if (match := pattern.fullmatch(path))),
             None,
         )
-        if path != "/api/ask" and action is None:
+        if path not in _STREAMS and action is None:
             if any(pattern.fullmatch(path) for pattern, _ in _ROUTES):
                 self._wrong_method("GET")
             else:
@@ -1076,8 +1113,10 @@ class _Handler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._send_json(exc.status, {"error": str(exc)})
             return
-        if action is None:
+        if path == "/api/ask":
             self._ask(body)
+        elif action is None:
+            self._think(path, body)
         else:
             self._act(action[0], body, [unquote(g) for g in action[1].groups()])
 
@@ -1248,6 +1287,90 @@ class _Handler(BaseHTTPRequestHandler):
                 send("problem", {"error": f"The cache couldn't be read: {exc}"})
 
         self._follow(self.server.answers.start(write, _WAITING_FOR_UPKEEP), 0)
+
+    def _think(self, path: str, body: Json) -> None:
+        """Insights and writing prompts: one model call each, in the background
+        like an answer, so a page that reloads can pick the result up."""
+        config = self.server.config
+        try:
+            if path == "/api/insights":
+                params = {k: str(v) for k, v in body.items() if isinstance(v, str)}
+                with closing(db.connect_readonly(config)) as conn:
+                    req = Request(config, conn, params, self.server.make_client)
+                    since, until = req.day("from"), req.day("to")
+            else:
+                days, count = body.get("days", 14), body.get("count", 4)
+                if not all(isinstance(n, int) and not isinstance(n, bool) for n in (days, count)):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "'days' and 'count' must be numbers.")
+                days, count = min(max(days, 1), 365), min(max(count, 1), 12)
+        except ApiError as exc:
+            self._send_json(exc.status, {"error": str(exc)})
+            return
+        except (JournalError, sqlite3.Error) as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+
+        def write(run: work.Run) -> None:
+            try:
+                with closing(db.connect_readonly(config)) as conn:
+                    if path == "/api/insights":
+                        run.send("stage", {"text": "Looking for patterns..."})
+                        text, found = insights.generate_insights(config, conn, self.server.client(), since, until)
+                        run.send("result", {
+                            "text": text, "signals": found.evidence_lines(), "entries": found.overall_count,
+                            "from": since, "to": until,
+                        })
+                    else:
+                        run.send("stage", {"text": "Reading your recent entries..."})
+                        found_prompts = prompts.generate_prompts(
+                            config, conn, self.server.client(), days=days, count=count
+                        )
+                        run.send("result", {"prompts": found_prompts, "days": days})
+            except JournalError as exc:
+                run.send("problem", {"error": str(exc)})
+            except sqlite3.Error as exc:
+                run.send("problem", {"error": f"The cache couldn't be read: {exc}"})
+
+        self._follow(self.server.answers.start(write, _WAITING_FOR_UPKEEP), 0)
+
+    def _download(self, path: str, query_string: str) -> None:
+        """Entries, or a review, as a file to save."""
+        params = {k: v[-1] for k, v in parse_qs(query_string).items()}
+        config = self.server.config
+        try:
+            with closing(db.connect_readonly(config)) as conn:
+                req = Request(config, conn, params, self.server.make_client)
+                wanted = _REVIEW_DOWNLOAD.fullmatch(path)
+                if wanted:
+                    period = unquote(wanted.group(1))
+                    try:
+                        key = store.parse_period(period)[1]
+                    except ValueError:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, f"'{period}' isn't a period.") from None
+                    built = review.build(config, conn, key)
+                    if built is None:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "No entries in that period.")
+                    text, kind, name = review.to_markdown(built), _EXPORTS["markdown"][0], f"review-{key}.md"
+                else:
+                    fmt = params.get("format", "json")
+                    if fmt not in _EXPORTS:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "'format' must be json, markdown or csv.")
+                    only, since, until = _ask_scope(req)
+                    found = export.collect_entries(conn, since, until, include_raw=params.get("raw") == "1", only=only)
+                    if not found:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "No entries to export.")
+                    text = {"json": export.to_json, "markdown": export.to_markdown, "csv": export.to_csv}[fmt](found)
+                    kind, ending = _EXPORTS[fmt]
+                    name = f"journal-{date.today().isoformat()}.{ending}"
+        except ApiError as exc:
+            self._send_json(exc.status, {"error": str(exc)})
+            return
+        except (JournalError, sqlite3.Error) as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+        # a byte-order mark, so Excel reads a CSV as UTF-8
+        body = text.encode("utf-8-sig" if name.endswith(".csv") else "utf-8")
+        self._send(HTTPStatus.OK, body, kind, {"Content-Disposition": f'attachment; filename="{name}"'})
 
     def _follow(self, run: work.Run, start: int) -> None:
         """Streams an answer's events to this page for as long as it listens."""
