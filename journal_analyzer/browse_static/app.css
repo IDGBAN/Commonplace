@@ -256,7 +256,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-faint); opacity: 1;
 }
 .theme-pick button:hover { color: var(--ink); }
 .theme-pick button[aria-pressed="true"] { background: var(--paper-raised); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
-.link-button { margin-top: 0.7rem; padding: 0; border: 0; background: none; color: var(--ink-soft); text-decoration: underline; text-decoration-color: var(--rule-strong); text-underline-offset: 0.2em; cursor: pointer; }
+.link-button { display: block; margin-top: 0.7rem; padding: 0; border: 0; background: none; color: var(--ink-soft); text-decoration: underline; text-decoration-color: var(--rule-strong); text-underline-offset: 0.2em; cursor: pointer; }
 .link-button:hover { color: var(--ink); text-decoration-color: currentColor; }
 
 .rail-shade { display: none; }

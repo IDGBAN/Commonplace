@@ -330,13 +330,25 @@ class Config(BaseModel):
         return self
 
 
+# Where config.toml is looked for when the folder a command runs in has none.
+# Something started from the Start Menu has no folder of its own to look in.
+HOME_CONFIG = Path("~/.journal_analyzer/config.toml")
+
+
+def default_config_path() -> Path:
+    """./config.toml when there is one, else the one in the home folder."""
+    here = Path("config.toml")
+    return here if here.is_file() else HOME_CONFIG.expanduser()
+
+
 def load_config(path: Path | str | None = None) -> Config:
-    cfg_path = Path(path) if path else Path("config.toml")
+    cfg_path = Path(path) if path else default_config_path()
     if not cfg_path.exists():
+        looked = f"{cfg_path}" if path else f"./config.toml or {cfg_path}"
         raise ConfigError(
-            f"Config file not found: {cfg_path}. "
-            "Copy config.example.toml to config.toml and edit it, "
-            "or pass --config PATH."
+            f"Config file not found: {looked}. "
+            "Run 'journal browse' to set one up in the browser, copy "
+            "config.example.toml to config.toml and edit it, or pass --config PATH."
         )
     # Windows editors like to add a BOM, and tomllib won't accept one
     text = cfg_path.read_bytes().decode("utf-8-sig")

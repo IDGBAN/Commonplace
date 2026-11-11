@@ -972,6 +972,13 @@ def watch_folder(server: BrowseServer, body: Json) -> Json:
     return server.watcher.state()
 
 
+def quit_app(server: BrowseServer, body: Json) -> Json:
+    """Stops `journal browse`, for when there's no terminal to press Ctrl-C in."""
+    # from another thread: shutdown waits for the loop this request is being served in
+    threading.Thread(target=server.shutdown, name="quit", daemon=True).start()
+    return {"quit": True, "working": not server.jobs.idle() or server.lane.busy}
+
+
 def stop_upkeep(server: BrowseServer, body: Json) -> Json:
     return {"stopping": server.jobs.stop()}
 
@@ -994,6 +1001,7 @@ _ACTIONS: list[tuple[re.Pattern[str], Action]] = [
     (re.compile(r"/api/setup/save"), finish_setup),
     (re.compile(r"/api/upkeep/start"), start_upkeep),
     (re.compile(r"/api/upkeep/stop"), stop_upkeep),
+    (re.compile(r"/api/quit"), quit_app),
     (re.compile(r"/api/upkeep/watch"), watch_folder),
     (re.compile(r"/api/upkeep/(\d+)/remove"), remove_upkeep),
 ]

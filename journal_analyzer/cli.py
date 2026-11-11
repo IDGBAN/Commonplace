@@ -49,7 +49,7 @@ from . import (
     unlinked,
     work,
 )
-from .config import Config, load_config
+from .config import Config, default_config_path, load_config
 from .models import Answer, JournalError, OllamaUnavailableError
 from .ollama_client import OllamaClient, same_model
 
@@ -73,7 +73,7 @@ class ExportFormat(StrEnum):
 
 ConfigOpt = Annotated[
     Path | None,
-    typer.Option("--config", help="Path to config.toml (default ./config.toml)."),
+    typer.Option("--config", help="Path to config.toml (default ./config.toml, else the one in ~/.journal_analyzer)."),
 ]
 SinceOpt = Annotated[
     str | None, typer.Option("--since", help="Only entries on/after this ISO date.")
@@ -1896,7 +1896,7 @@ def browse_cmd(
 ) -> None:
     """Browse everything the cache knows, and ask about it, in a local web page."""
     with _guard():
-        path = (config or Path("config.toml")).resolve()
+        path = (config or default_config_path()).resolve()
         # with no config file yet, the pages open on Setup, which writes one
         cfg = load_config(config) if path.is_file() else None
 

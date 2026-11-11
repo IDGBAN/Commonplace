@@ -37,6 +37,10 @@ dev = [
 [project.scripts]
 journal = "journal_analyzer.cli:app"
 
+# a windowed program: on Windows it opens no console
+[project.gui-scripts]
+commonplace = "journal_analyzer.launcher:main"
+
 [tool.setuptools.packages.find]
 include = ["journal_analyzer*"]
 

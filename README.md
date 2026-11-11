@@ -62,7 +62,7 @@ Then open `config.toml`, or the browser's Settings page, and set these:
 - `[db] path` is where the SQLite cache goes. `memo` keeps model results in a second file next to it so rebuilds don't redo them; see [Starting over](#starting-over).
 - `[reranking]` is a cross-encoder that reorders search results before they're used for an answer. It makes results more relevant, but it downloads its model from the internet the first time it runs. If that fails, searches fall back to the fusion ranking and print a warning once. Set `enabled = false` to turn it off.
 
-Every command takes `--config PATH` and defaults to `./config.toml`.
+Every command takes `--config PATH`. Without it, `./config.toml` is used when the folder you're in has one, and otherwise `~/.journal_analyzer/config.toml`, so a config kept there works from any folder.
 
 `journal --install-completion` sets up Tab completion for your shell (bash, zsh, fish or PowerShell). Tab then completes from the cache: note titles, aliases and learned names for `note`, `unlinked`, `--about` and `--with`, tags for `--tag`, kinds for `--type`, metric keys for `metric`, days for `show` and `similar`, periods for `digest` and `compare`, properties for `--by`, `property=value` for `--group`, and broken links for `links`. Typing in lower case is fine, since names are matched ignoring case. With no cache yet, Tab just completes nothing.
 
@@ -215,6 +215,15 @@ Whatever app you connect gets your journal's text, summaries and notes. If that 
 - `tools = ["search", "day", "mood"]` offers only those tools.
 
 With `exclude_tags` or `exclude_kinds` set, the server keeps a copy of the cache in memory with all of that taken out, and makes it again whenever the cache file changes, so it keeps up with `journal watch`. The cache itself isn't touched. When it starts, it says on stderr what it's leaving out, which most clients show in their logs.
+
+### Without a terminal
+
+```sh
+commonplace              # open the pages, starting Commonplace if it isn't running
+commonplace --shortcut   # Windows: add Commonplace to the Start Menu
+```
+
+`commonplace` is installed next to `journal` as a windowed program, so on Windows it opens no console. If Commonplace is already running it only opens the pages in your browser; if not, it starts what `journal browse` starts and opens them. It takes `--config` and `--port` like `journal browse`, and with no config anywhere it opens on Setup, which writes one to `~/.journal_analyzer/config.toml`. What would have been printed goes to `commonplace.log` next to the cache, and a start that fails says why in a message box. Quit Commonplace, at the bottom of the list of pages, stops it from the browser; if something is still running it says so first. After upgrading, run `pip install -e .` again to get the program.
 
 ### Browsing in a web page
 

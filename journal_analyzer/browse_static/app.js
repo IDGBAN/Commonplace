@@ -3812,6 +3812,29 @@ function showKeys() {
 }
 
 document.getElementById("keys").addEventListener("click", showKeys);
+
+// Stopping it from the page, for when it was started without a terminal.
+document.getElementById("quit").addEventListener("click", async () => {
+  const state = await api("upkeep").catch(() => null);
+  const busy = Boolean(state && (state.running || state.queued.length)) || askBusy();
+  const sure = await confirmAction({
+    title: "Quit Commonplace?",
+    body: busy
+      ? "Something is still running. It stops where it is: an answer being written is lost, and upkeep picks up from what it had finished the next time it's started."
+      : "The pages stop working until it's started again. Nothing is lost.",
+    action: "Quit",
+  });
+  if (!sure) return;
+  try {
+    await post("quit");
+  } catch (err) {
+    toast(err.message, "error");
+    return;
+  }
+  document.title = "Commonplace";
+  document.body.classList.add("setting-up");
+  fill(page, pageHead({ title: "Commonplace has quit", lede: "Start it again from the Start Menu, or with journal browse, then reload this page." }));
+});
 document.getElementById("skip").addEventListener("click", () => page.focus());
 
 // On a narrow screen the sections slide in from the menu button.
