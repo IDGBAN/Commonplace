@@ -94,6 +94,8 @@ def test_the_shortcut_points_at_the_windowed_program(tmp_path, monkeypatch):
     ran: list[list[str]] = []
     monkeypatch.setattr(launcher.sys, "platform", "win32")
     monkeypatch.setattr(launcher.sys, "executable", str(tmp_path / "Scripts" / "python.exe"))
+    # a virtual environment's layout, kept from finding a real install's Scripts folders
+    monkeypatch.setattr(launcher.sysconfig, "get_path", lambda name, scheme=None: str(tmp_path / "Scripts"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(launcher.subprocess, "run", lambda args, **kwargs: ran.append(args))
     link = launcher.install_shortcut()
@@ -108,6 +110,32 @@ def test_the_shortcut_points_at_the_windowed_program(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher.sys, "platform", "linux")
     with pytest.raises(JournalError, match="only made on Windows"):
         launcher.install_shortcut()
+
+
+def test_the_shortcut_finds_the_program_in_a_scripts_folder(tmp_path, monkeypatch):
+    # a plain or per-user install keeps commonplace.exe in a Scripts folder, not beside python.exe
+    folders = {None: tmp_path / "Python" / "Scripts", "nt_user": tmp_path / "User" / "Scripts"}
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    monkeypatch.setattr(launcher.sys, "executable", str(tmp_path / "Python" / "python.exe"))
+    monkeypatch.setattr(launcher.os, "name", "nt")
+    monkeypatch.setattr(launcher.sysconfig, "get_path", lambda name, scheme=None: str(folders[scheme]))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
+    ran: list[list[str]] = []
+    monkeypatch.setattr(launcher.subprocess, "run", lambda args, **kwargs: ran.append(args))
+    folders["nt_user"].mkdir(parents=True)
+    (folders["nt_user"] / "commonplace.exe").write_bytes(b"")
+    launcher.install_shortcut()
+    assert str(folders["nt_user"] / "commonplace.exe") in ran[0][-1]
+    assert "-m journal_analyzer.launcher" not in ran[0][-1]
+
+
+def test_making_the_shortcut_says_so_in_a_window(tmp_path, monkeypatch):
+    # run from a terminal, a windowed program's printing goes only to the log
+    told: list[tuple[str, int]] = []
+    monkeypatch.setattr(launcher, "_tell", lambda message, icon=0: told.append((message, icon)))
+    monkeypatch.setattr(launcher, "install_shortcut", lambda: tmp_path / "Commonplace.lnk")
+    assert launcher.main(["--shortcut"]) == 0
+    assert told == [(f"Commonplace is in the Start Menu: {tmp_path / 'Commonplace.lnk'}", launcher._INFO_ICON)]
 
 
 def test_quit_stops_the_server_from_the_page(config, conn, fake_client):

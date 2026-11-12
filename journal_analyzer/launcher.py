@@ -10,10 +10,12 @@ start that fails says why in a message box.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import sysconfig
 import urllib.error
 import urllib.request
 import webbrowser
@@ -50,12 +52,16 @@ def _log_output() -> None:
     sys.stderr = sys.stderr or log
 
 
-def _tell(message: str) -> None:
+_ERROR_ICON = 0x10
+_INFO_ICON = 0x40
+
+
+def _tell(message: str, icon: int = _ERROR_ICON) -> None:
     print(message, file=sys.stderr)
     if sys.platform == "win32":
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, "Commonplace", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, "Commonplace", icon)
 
 
 def shortcut_command(link: Path, target: Path, arguments: str = "") -> str:
@@ -72,17 +78,25 @@ def shortcut_command(link: Path, target: Path, arguments: str = "") -> str:
     )
 
 
+def _installed_program() -> Path | None:
+    """commonplace.exe where pip puts it: beside python.exe in a virtual
+    environment, otherwise in Python's Scripts folder or the user's."""
+    folders = [Path(sys.executable).parent, Path(sysconfig.get_path("scripts"))]
+    with contextlib.suppress(KeyError):
+        folders.append(Path(sysconfig.get_path("scripts", f"{os.name}_user")))
+    return next((f / "commonplace.exe" for f in folders if (f / "commonplace.exe").is_file()), None)
+
+
 def install_shortcut() -> Path:
     """Puts Commonplace in the Start Menu. Returns the shortcut's path."""
     if sys.platform != "win32":
         raise JournalError("Shortcuts are only made on Windows. Elsewhere, run 'commonplace' from your launcher of choice.")
-    scripts = Path(sys.executable).parent
-    program = scripts / "commonplace.exe"
-    if program.is_file():
+    program = _installed_program()
+    if program is not None:
         target, arguments = program, ""
     else:
         # not installed as a program, so the windowed Python runs the module
-        windowed = scripts / "pythonw.exe"
+        windowed = Path(sys.executable).parent / "pythonw.exe"
         target = windowed if windowed.is_file() else Path(sys.executable)
         arguments = "-m journal_analyzer.launcher"
     link = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / SHORTCUT_NAME
@@ -105,7 +119,8 @@ def main(argv: list[str] | None = None) -> int:
     _log_output()
     try:
         if args.shortcut:
-            print(f"Commonplace is in the Start Menu: {install_shortcut()}")
+            # a windowed program run from a terminal can't print there
+            _tell(f"Commonplace is in the Start Menu: {install_shortcut()}", _INFO_ICON)
             return 0
         if running(args.port):
             webbrowser.open(f"http://{browse.HOST}:{args.port}/")
