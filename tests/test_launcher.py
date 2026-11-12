@@ -1,5 +1,7 @@
 """Starting Commonplace without a terminal, and stopping it from the page."""
 
+import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -12,6 +14,43 @@ from journal_analyzer.config import HOME_CONFIG, default_config_path, load_confi
 from journal_analyzer.models import ConfigError, JournalError
 
 MINIMAL = "[vault]\npath = '{vault}'\n"
+
+# Stands in for `ollama serve`: answers /api/version where OLLAMA_HOST says,
+# with a child on another port like the runner Ollama starts for a model.
+FAKE_OLLAMA = """
+import http.server, os, subprocess, sys
+class Version(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"version": "0.0.0"}')
+    def log_message(self, *args):
+        pass
+if sys.argv[1:] == ["runner"]:
+    port = int(os.environ["FAKE_RUNNER_PORT"])
+else:
+    subprocess.Popen([sys.executable, "-c", os.environ["FAKE_OLLAMA_SOURCE"], "runner"])
+    port = int(os.environ["OLLAMA_HOST"].rsplit(":", 1)[1])
+http.server.HTTPServer(("127.0.0.1", port), Version).serve_forever()
+"""
+
+
+@pytest.fixture(autouse=True)
+def _ollama_is_already_running(monkeypatch):
+    """No test reaches for the real Ollama, or starts one, unless it asks to."""
+    monkeypatch.setattr(launcher, "ollama_answering", lambda host: True)
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _listening(port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def test_config_is_looked_for_here_then_in_the_home_folder(tmp_path, monkeypatch, _a_home_folder_of_its_own):
@@ -63,6 +102,70 @@ def test_the_launcher_opens_what_is_running_or_starts_it(tmp_path, config, conn,
     monkeypatch.setattr(launcher, "running", lambda port: True)
     assert launcher.main(["--port", "9001"]) == 0
     assert opened == ["http://127.0.0.1:9001/"] and len(served) == 2
+
+
+def test_the_launcher_stops_only_an_ollama_it_started(tmp_path, monkeypatch):
+    calls: list[object] = []
+    monkeypatch.setattr(launcher, "running", lambda port: False)
+    monkeypatch.setattr(launcher.browse, "serve", lambda cfg, **kwargs: calls.append("serve"))
+    monkeypatch.setattr(launcher, "stop_ollama", lambda process: calls.append(("stop", process)))
+    path = tmp_path / "config.toml"
+    path.write_text(
+        MINIMAL.format(vault=tmp_path.as_posix()) + "[ollama]\nhost = 'http://127.0.0.1:12345'\n", encoding="utf-8"
+    )
+
+    started = object()
+    monkeypatch.setattr(launcher, "start_ollama", lambda host: calls.append(host) or started)
+    assert launcher.main(["--config", str(path)]) == 0
+    assert calls == ["http://127.0.0.1:12345", "serve", ("stop", started)]
+
+    # stopped even when the pages end in an error
+    def fails(cfg, **kwargs):
+        raise JournalError("no")
+    monkeypatch.setattr(launcher.browse, "serve", fails)
+    monkeypatch.setattr(launcher, "_tell", lambda *args: None)
+    calls.clear()
+    assert launcher.main(["--config", str(path)]) == 1
+    assert calls == ["http://127.0.0.1:12345", ("stop", started)]
+
+    # one that was already running isn't stopped
+    monkeypatch.setattr(launcher, "start_ollama", lambda host: None)
+    calls.clear()
+    launcher.main(["--config", str(path)])
+    assert calls == []
+
+
+def test_ollama_is_started_only_when_nothing_answers_here(monkeypatch):
+    def never(*args, **kwargs):
+        raise AssertionError("nothing should be started")
+    monkeypatch.setattr(launcher.subprocess, "Popen", never)
+    assert launcher.start_ollama("http://localhost:11434") is None  # answering
+
+    monkeypatch.setattr(launcher, "ollama_answering", lambda host: False)
+    assert launcher.start_ollama("http://192.168.1.20:11434") is None  # another computer
+    monkeypatch.setattr(launcher, "_ollama_command", lambda: None)
+    assert launcher.start_ollama("http://localhost:11434") is None  # not installed
+
+
+def test_a_started_ollama_and_its_runner_are_stopped(monkeypatch):
+    port, runner_port = _free_port(), _free_port()
+    monkeypatch.undo()  # the real ollama_answering, against the stand-in
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.setenv("FAKE_OLLAMA_SOURCE", FAKE_OLLAMA)
+    monkeypatch.setenv("FAKE_RUNNER_PORT", str(runner_port))
+    monkeypatch.setattr(launcher, "_ollama_command", lambda: [sys.executable, "-c", FAKE_OLLAMA])
+    process = launcher.start_ollama(f"http://127.0.0.1:{port}")
+    assert process is not None
+    try:
+        assert launcher.ollama_answering(f"127.0.0.1:{port}")
+        deadline = time.monotonic() + 10
+        while not _listening(runner_port) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert _listening(runner_port)
+    finally:
+        launcher.stop_ollama(process)
+    assert process.poll() is not None
+    assert not _listening(port) and not _listening(runner_port)
 
 
 def test_a_start_that_fails_says_why(tmp_path, monkeypatch):
