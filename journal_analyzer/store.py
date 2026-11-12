@@ -987,10 +987,13 @@ def property_groups(
     try:
         return list(
             conn.execute(
-                f"""WITH members AS (
+                # Left to itself, SQLite rebuilds the entry_entities view once
+                # for every note in the property, which was most of the notes page.
+                f"""WITH ee AS MATERIALIZED (SELECT entry_id, entity_id FROM entry_entities),
+                    members AS (
                       SELECT DISTINCT v.value_key, ee.entry_id
                       FROM note_property_values v
-                      JOIN entry_entities ee ON ee.entity_id = v.note_id
+                      JOIN ee ON ee.entity_id = v.note_id
                       WHERE v.key = ?)
                     SELECT g.value, g.notes, COUNT(e.id) AS entries,
                            ROUND(AVG(e.mood_score), 2) AS avg_mood,
@@ -1201,6 +1204,14 @@ def mentions_by_year(
             [note_id, *params],
         ).fetchall()
     )
+
+
+def entry_ids_by_note(conn: sqlite3.Connection) -> dict[int, set[int]]:
+    """Every note's mentioning entries, for loops that would otherwise ask once a note."""
+    out: dict[int, set[int]] = {}
+    for r in conn.execute("SELECT entry_id, entity_id FROM entry_entities"):
+        out.setdefault(r["entity_id"], set()).add(r["entry_id"])
+    return out
 
 
 def entry_ids_mentioning(conn: sqlite3.Connection, note_ids: list[int]) -> list[int]:

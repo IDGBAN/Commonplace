@@ -1,3 +1,4 @@
+import re
 from datetime import date
 
 from conftest import add_entry, add_note, invoke_cli
@@ -40,6 +41,20 @@ def test_short_names_are_skipped(conn):
     add_note(conn, "Al")
     add_entry(conn, date(2024, 1, 1), text="Al came round.", path="/vault/a.md")
     assert _found(conn, "Al") == []
+
+
+def test_whole_word_matching_agrees_with_the_lookaround_rule():
+    texts = [
+        "ababab abab", "a-a-a a-a", "-x--x- -x-", "O'Neil's", "Émile_ émile",
+        # the long s and the Kelvin sign match s and k when ignoring case
+        "x_y x_yz", "\u017fs SS \u00df", "\u212a k", "John Lee, john-lee, JohnLee", "",
+    ]
+    keys = ["abab", "a-a", "-x-", "o'neil", "émile", "x_y", "ss", "k", "john", "john lee"]
+    for key in keys:
+        rule = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)", re.IGNORECASE)
+        for text in texts:
+            expected = [m.span() for m in rule.finditer(text)]
+            assert [m.span() for m in unlinked._whole_words(key, text)] == expected, (key, text)
 
 
 def test_long_sentences_are_cut_around_the_name():

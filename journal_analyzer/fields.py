@@ -152,6 +152,16 @@ def _plural_pair(a: str, b: str) -> bool:
     return b in (a + "s", a + "es") or (a.endswith("y") and b == a[:-1] + "ies")
 
 
+def _close(a: str, b: str) -> bool:
+    # the quick ratios are upper bounds on ratio(), and rule out most pairs cheaply
+    m = difflib.SequenceMatcher(None, a, b)
+    return (
+        m.real_quick_ratio() >= SIMILAR_TAG_RATIO
+        and m.quick_ratio() >= SIMILAR_TAG_RATIO
+        and m.ratio() >= SIMILAR_TAG_RATIO
+    )
+
+
 def similar_tags(rows: list[sqlite3.Row]) -> list[tuple[str, int, str, int]]:
     """Pairs of tags that look like the same thing: (rarer, count, more used, count)."""
     counts = {r["name"]: r["n"] for r in rows}
@@ -163,8 +173,7 @@ def similar_tags(rows: list[sqlite3.Row]) -> list[tuple[str, int, str, int]]:
             related = (
                 _plural_pair(short, long)
                 or (len(short) >= 4 and long.startswith(short))
-                or (min(len(a), len(b)) >= 5
-                    and difflib.SequenceMatcher(None, a, b).ratio() >= SIMILAR_TAG_RATIO)
+                or (min(len(a), len(b)) >= 5 and _close(a, b))
             )
             if related:
                 rare, common = sorted((a, b), key=lambda t: (counts[t], t == short))

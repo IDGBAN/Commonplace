@@ -8,8 +8,10 @@ words, ignoring case, and a name inside a longer name of another note
 
 from __future__ import annotations
 
+import functools
 import re
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from . import store
@@ -36,8 +38,35 @@ class NoteSummary:
     latest: str
 
 
-def _pattern(key: str) -> re.Pattern[str]:
-    return re.compile(rf"(?<!\w){re.escape(key)}(?!\w)", re.IGNORECASE)
+@functools.lru_cache(maxsize=4096)
+def _literal(key: str) -> re.Pattern[str]:
+    return re.compile(re.escape(key), re.IGNORECASE)
+
+
+def _is_word(c: str) -> bool:
+    return c.isalnum() or c == "_"  # what \w matches in a str pattern
+
+
+def _whole_words(key: str, text: str) -> Iterator[re.Match[str]]:
+    """Where `key` stands as whole words, ignoring case.
+
+    The same matches as finditer on (?<!\\w)key(?!\\w), but searching for the
+    bare name lets the regex engine skip ahead, where the lookbehind had it
+    stop at every character. This was most of the time `by_note` took.
+    """
+    if not key:
+        return
+    pattern = _literal(key)
+    pos = 0
+    while (m := pattern.search(text, pos)) is not None:
+        start, end = m.span()
+        if (start == 0 or not _is_word(text[start - 1])) and (
+            end == len(text) or not _is_word(text[end])
+        ):
+            yield m
+            pos = end
+        else:
+            pos = start + 1  # a whole-word match may still start inside this one
 
 
 def _snippet(text: str, start: int, end: int) -> str:
@@ -57,8 +86,10 @@ def for_note(
     conn: sqlite3.Connection,
     note_id: int,
     names: list[tuple[int, str]] | None = None,
+    linked: dict[int, set[int]] | None = None,
 ) -> list[UnlinkedMention]:
-    """Newest first. `names` is store.note_name_index, passed in when looping."""
+    """Newest first. `names` is store.note_name_index and `linked` is
+    store.entry_ids_by_note, both passed in when looping."""
     index = names if names is not None else [
         (r["note_id"], r["key"]) for r in store.note_name_index(conn)
     ]
@@ -75,16 +106,19 @@ def for_note(
     candidates: set[int] = set()
     for key in own:
         candidates.update(store.fts_phrase_ids(conn, key))
-    candidates -= set(store.entry_ids_mentioning(conn, [note_id]))
+    if linked is not None:
+        candidates -= linked.get(note_id, set())
+    else:
+        candidates -= set(store.entry_ids_mentioning(conn, [note_id]))
     found: list[UnlinkedMention] = []
     for row in store.entries_by_ids(conn, sorted(candidates)):
         text = row["raw_text"]
-        covered = [m.span() for key in longer for m in _pattern(key).finditer(text)]
+        covered = [m.span() for key in longer for m in _whole_words(key, text)]
         hit = next(
             (
                 m
                 for key in own
-                for m in _pattern(key).finditer(text)
+                for m in _whole_words(key, text)
                 if not any(s <= m.start() and m.end() <= e for s, e in covered)
             ),
             None,
@@ -107,11 +141,12 @@ def for_note(
 def by_note(conn: sqlite3.Connection, kind: str | None = None) -> list[NoteSummary]:
     """Notes with unlinked mentions, the most first."""
     names = [(r["note_id"], r["key"]) for r in store.note_name_index(conn)]
+    linked = store.entry_ids_by_note(conn)
     out: list[NoteSummary] = []
     for note in store.all_notes(conn):
         if kind and note["kind"] != kind.casefold():
             continue
-        mentions = for_note(conn, note["id"], names)
+        mentions = for_note(conn, note["id"], names, linked)
         if mentions:
             out.append(
                 NoteSummary(
