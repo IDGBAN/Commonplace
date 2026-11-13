@@ -18,6 +18,8 @@ from journal_analyzer.config import Config
 from journal_analyzer.models import (
     DetailedExtraction,
     Extraction,
+    FollowUp,
+    NotePicks,
     NoteSummary,
     ParsedEntry,
     ParsedNote,
@@ -54,6 +56,10 @@ class FakeOllamaClient:
             "NoteSummary": NoteSummary(summary="A canned note summary."),
             "ScannedFacts": ScannedFacts(),
             "ProfileDigest": ProfileDigest(names="I go by Al.", profile="I like long walks."),
+            # no question of its own, so a follow-up is read as it was typed
+            "FollowUp": FollowUp(),
+            # whichever notes are offered first, up to as many as get read
+            "NotePicks": NotePicks(numbers=[1, 2, 3, 4, 5]),
         }
         self.chat_calls: list[tuple[str, list[dict]]] = []
         self.streamed_calls: list[str] = []

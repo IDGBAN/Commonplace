@@ -1277,6 +1277,7 @@ class _Handler(BaseHTTPRequestHandler):
                         since=since, until=until, only=only,
                         on_text=lambda text: send("text", {"text": text}),
                         on_thinking=lambda text: send("thinking", {"text": text}),
+                        earlier=turns,
                     )
                     if turns:
                         result = query.with_step(result, "reading your follow-up", rewriting)

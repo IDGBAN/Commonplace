@@ -52,6 +52,9 @@ class ParsedNote:
 
 
 QueryIntent = Literal["aggregate", "factual", "narrative"]
+# "record": the journal's own words are the answer. "judgment": the asker wants
+# a conclusion worked out from the facts, not what they wrote about it.
+QueryWants = Literal["record", "judgment"]
 AnswerStage = Literal["aggregate", "fast_summary", "precise_raw", "retrieval_empty"]
 
 
@@ -78,6 +81,12 @@ class QueryPlan(BaseModel):
     entities: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     needs_raw_text: bool = False
+    wants: QueryWants = "record"
+    # about how things stand now or what to do next, so the latest days are
+    # read rather than whatever a search turns up
+    current: bool = False
+    # subjects whose notes would help beyond the question's own words
+    background: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _ordered_range(self) -> QueryPlan:
@@ -85,6 +94,20 @@ class QueryPlan(BaseModel):
         if self.date_from and self.date_to and self.date_from > self.date_to:
             self.date_from, self.date_to = self.date_to, self.date_from
         return self
+
+
+class FollowUp(BaseModel):
+    """A follow-up written out in full. The reasoning comes first so the model
+    works out what's being asked before it writes the question."""
+
+    reasoning: str = ""
+    question: str = ""
+
+
+class NotePicks(BaseModel):
+    """Which of the numbered notes offered bear on a question."""
+
+    numbers: list[int] = Field(default_factory=list)
 
 
 class Timing(BaseModel):

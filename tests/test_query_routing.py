@@ -237,7 +237,7 @@ def test_precise_answers_read_the_notes_in_full(tmp_path, fake_client):
         assert model == cfg.ollama.precise_model
         content = messages[-1]["content"]
         assert "### Note: John Doe (people)\nFile: Links/People/John Doe.md\n" in content
-        assert "### Entry 2024-01-15\nFile: 2024-01-15.md\nWent hiking" in content
+        assert "### Entry 2024-01-15 (Monday)\nFile: 2024-01-15.md\nWent hiking" in content
         return "He said the beds need replanting."
 
     fake_client.chat_response = chat
@@ -298,12 +298,12 @@ def test_each_stage_is_announced_as_it_starts(conn, config, fake_client):
         "Answering from summaries...",
     ]
     # how much it's reading, since that's most of the wait
-    assert stages[3:] == ["Re-reading 1 entry in full, about 6 words..."]
+    assert stages[3:] == ["Re-reading 1 entry in full, about 7 words..."]
     stages.clear()
     query.answer("q", config, conn, fake_client, today=TODAY, on_stage=stages.append,
                  on_text=lambda _t: None)
     # a streamed answer says so again as the call starts reading
-    assert stages[-2:] == ["Re-reading 1 entry in full, about 6 words..."] * 2
+    assert stages[-2:] == ["Re-reading 1 entry in full, about 7 words..."] * 2
 
 
 def test_search_keywords_keep_words_that_start_with_an_accent():

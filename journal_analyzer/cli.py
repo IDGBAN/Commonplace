@@ -699,6 +699,7 @@ def _answer_turn(
         on_stage=_show_stage(status) if stream is None else stream.stage,
         since=since, until=until, only=only, on_text=stream,
         on_thinking=stream.think if stream is not None else None,
+        earlier=turns,
     )
     if turns:
         result = query.with_step(result, "reading your follow-up", rewriting)

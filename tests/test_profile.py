@@ -19,7 +19,7 @@ from journal_analyzer import (
     store,
 )
 from journal_analyzer import prompts as writing_prompts
-from journal_analyzer.models import Extraction, OllamaUnavailableError, QueryPlan
+from journal_analyzer.models import Extraction, FollowUp, OllamaUnavailableError, QueryPlan
 from journal_analyzer.ollama_client import OllamaClient
 from journal_analyzer.profile import ProfileDigest, ScannedFact, ScannedFacts
 
@@ -319,7 +319,7 @@ def test_answers_get_the_profile_and_the_router_only_the_names(conn, config, fak
     assert "NAMES-LINE" in routers[0] and "PROFILE-TEXT" not in routers[0]
     assert all("PROFILE-TEXT" in s and "NAMES-LINE" in s for s in systems) and len(systems) == 2
     rewrite = []
-    fake_client.chat_response = lambda model, messages: rewrite.append(messages[0]["content"]) or "q"
+    fake_client.structured["FollowUp"] = lambda model, messages: rewrite.append(messages[0]["content"]) or FollowUp(question="q")
     query.contextualize_question("and then?", [("q", "a")], config, fake_client, profile.names(conn, config))
     assert "NAMES-LINE" in rewrite[0] and "PROFILE-TEXT" not in rewrite[0]
 

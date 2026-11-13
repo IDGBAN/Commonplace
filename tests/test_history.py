@@ -10,7 +10,7 @@ from conftest import add_entry, add_note, invoke_cli
 
 from journal_analyzer import browse, cli, history, mcp_server
 from journal_analyzer.config import Config
-from journal_analyzer.models import Answer, QueryPlan, Timing
+from journal_analyzer.models import Answer, FollowUp, QueryPlan, Timing
 
 SECRET = "the answer mentions zebra-fourteen"
 
@@ -178,11 +178,11 @@ def test_asking_in_a_row_keeps_its_turns_and_picks_them_up_again(kept, conn, fak
         assert turn.question == "How was March?"
         seen = []
 
-        def chat(model, messages):
+        def follow_up(model, messages):
             seen.append(messages[-1]["content"])
-            return "It was calm."
+            return FollowUp()
 
-        fake_client.chat_response = chat
+        fake_client.structured["FollowUp"] = follow_up
         inputs = iter(["and April?", "exit"])
         cli._ask_loop(kept, conn, fake_client, earlier=[turn])
     finally:
@@ -206,11 +206,12 @@ def test_ask_after_follows_up_an_earlier_question(tmp_path, config, conn, fake_c
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     seen = []
 
-    def chat(model, messages):
+    def follow_up(model, messages):
         seen.append(messages[-1]["content"])
-        return "How was April 2024?" if "User:" in messages[-1]["content"] else "It was calm."
+        return FollowUp(question="How was April 2024?")
 
-    fake_client.chat_response = chat
+    fake_client.structured["FollowUp"] = follow_up
+    fake_client.chat_response = "It was calm."
     monkeypatch.setattr(cli, "OllamaClient", lambda c: fake_client)
     path = _with_history(tmp_path, config)
     config.history.enabled = True

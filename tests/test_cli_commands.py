@@ -7,7 +7,12 @@ import pytest
 from conftest import add_entry, invoke_cli
 
 from journal_analyzer import cli, db, query
-from journal_analyzer.models import ModelRequestError, OllamaUnavailableError, QueryPlan
+from journal_analyzer.models import (
+    FollowUp,
+    ModelRequestError,
+    OllamaUnavailableError,
+    QueryPlan,
+)
 
 
 def _flat(output: str) -> str:
@@ -146,14 +151,14 @@ def test_chat_follow_ups_build_on_the_rewritten_questions(
     rewrites = {"and April?": "How was April 2024?", "and May?": "How was May 2024?"}
     transcripts: list[str] = []
 
-    def chat(model, messages):
+    def follow_up(model, messages):
         assert messages[0]["content"] == query._CONTEXTUALIZE_SYSTEM
         content = messages[-1]["content"]
         transcripts.append(content)
         latest = content.split("Latest message: ", 1)[1].split("\n", 1)[0]
-        return rewrites[latest]
+        return FollowUp(question=rewrites[latest])
 
-    fake_client.chat_response = chat
+    fake_client.structured["FollowUp"] = follow_up
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
     result = invoke_cli(

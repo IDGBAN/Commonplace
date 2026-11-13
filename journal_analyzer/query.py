@@ -3,6 +3,13 @@
 The fast model routes the question. Aggregate questions are answered from SQL.
 The rest go through hybrid retrieval, then the fast model tries to answer from
 summaries, and the precise model re-reads the full text if it can't.
+
+Two kinds of question leave that path. One that wants a judgment (is this
+right, why does it keep happening, what should I do) goes straight to the
+precise model, which is told to reason from the facts in the journal rather
+than report what the writer said about it. One about how things stand now or
+what to do next reads the latest days and the notes about goals and plans,
+since a search for its words would find nothing to the point.
 """
 
 from __future__ import annotations
@@ -20,7 +27,15 @@ from rich.console import Console
 
 from . import context, db, embedder, parser, profile, quotes, store, themes
 from .config import Config
-from .models import Answer, AnswerStage, QueryPlan, Timing
+from .models import (
+    Answer,
+    AnswerStage,
+    FollowUp,
+    NotePicks,
+    QueryPlan,
+    StructuredOutputError,
+    Timing,
+)
 from .ollama_client import REPLY_TOKENS, SYNTHESIS_TEMPERATURE, OllamaClient, prompt_tokens
 
 console = Console(stderr=True)
@@ -65,6 +80,32 @@ ANSWER_PART_CHARS = 700
 ANSWER_PARTS_CHARS = 4000
 # notes called "Go" or "Me" would match ordinary words all the time
 MIN_NAME_CHARS = 3
+# A question about now or what's next reads the past week whatever a search
+# would find, and never fewer than a few entries: after a quiet week the
+# latest ones still say where things stand.
+RECENT_DAYS = 7
+MAX_RECENT_ENTRIES = 10
+MIN_RECENT_ENTRIES = 3
+# the newest entries that link a note it names, on top of those
+CURRENT_TOPIC_ENTRIES = 4
+# Notes about goals, plans and the like. The nearest notes by meaning are
+# only candidates: something is always nearest, and a note about bread handed
+# over as background ends up in the advice. The fast model picks from this
+# many which ones bear on the question.
+BACKGROUND_NOTE_POOL = 12
+BACKGROUND_NOTES_K = 5
+BACKGROUND_NOTE_CHARS = 200
+# fewer of the people and places the week's entries link, which are only
+# background here
+CURRENT_LINKED_NOTES_K = 4
+# What led up to the days it reads: a line for each entry of the two weeks
+# before them, then digests of the weeks before that. Without these, something
+# settled eight days ago is news to the model.
+CURRENT_LEAD_DAYS = 14
+MAX_LEAD_ENTRIES = 14
+CURRENT_WEEK_DIGESTS = 3
+# what's looked for when the router names no subjects of its own
+_CURRENT_BACKGROUND = ["goals", "plans", "priorities", "habits", "things to improve", "the future"]
 
 # Without this the model sometimes takes the journal's "I" to mean itself.
 _READER_VOICE = (
@@ -89,34 +130,120 @@ _PRECISE_ANSWER_FORMAT = (
     "table."
 )
 
+# The journal is good evidence of what happened and of what its writer
+# thought. It isn't evidence that what they thought is so, and neither is the
+# way a question is put.
+_STRAIGHT = (
+    "Be blunt and accurate. The journal is a reliable record of what happened "
+    "and of what its writer thought at the time, but an opinion, belief or "
+    "excuse isn't true because it's written there, and neither is anything "
+    "the question takes for granted. When the facts or what you know say "
+    "otherwise, say so plainly and say why. Don't soften it, flatter, or "
+    "agree to be agreeable."
+)
+
+# For questions that want the journal's own words. The router gets some
+# judgment questions wrong, so these prompts still say what to do with one.
+_RECORD = (
+    "What the journal records (what happened, when, with whom, and what you "
+    "thought or felt when that is what's asked) comes only from this "
+    "material. If the question instead asks whether something is true, right "
+    "or wise, or what to do, it wants your own reasoned answer: take the "
+    "facts from the material and work out the verdict yourself rather than "
+    "quoting what the entries say about it."
+)
+
+# For questions that want a conclusion. Without this the model looks for the
+# entry where the writer gave their own view and hands that back.
+_JUDGMENT = (
+    "The asker wants this thought through, not looked up. Use the material "
+    "for the facts of their situation: what happened, when, who was "
+    "involved, what was done and what came of it. Their own opinions, "
+    "feelings and conclusions in it are what they thought, not evidence, so "
+    "don't hand them back as the answer; mention one only where it bears on "
+    "the reasoning. Work it out: pick the facts that matter, connect facts "
+    "from different days and notes that bear on each other (causes, "
+    "patterns, contradictions, consequences), bring in what you know about "
+    "the world, and reach your own conclusion. Lead with a direct answer, "
+    "then give the reasoning with the facts and dates it rests on. If the "
+    "material lacks a fact the answer turns on, say what's missing and "
+    "answer as far as general knowledge goes rather than guessing about "
+    "their life."
+)
+
+# on top of _JUDGMENT, when the question is what to do next
+_ADVICE = (
+    "If the question is what to do, be specific: name concrete things for "
+    "the day or period asked about, drawn from what the latest entries show "
+    "is unfinished, coming up, slipping or going well, and from the goals "
+    "and plans in the notes. Say which matters most and why."
+)
+
 _ROUTER_SYSTEM = """You are a query router for a personal journal search tool.
-Today's date is {today}. Classify the question and extract constraints:
+Today's date is {today}. The journal has nothing written after today.
+Classify the question and extract constraints:
 - intent: "aggregate" for statistics over time (mood trends, tag frequencies,
   counts); "factual" for specific facts/events; "narrative" for open-ended
   summaries or stories about a period.
-- date_from / date_to: absolute ISO dates. Convert relative expressions
-  ("last March", "this winter", "two weeks ago") to absolute dates using
-  today's date. Use null when the question has no time constraint.
+- date_from / date_to: absolute ISO dates of the entries to read. Convert
+  relative expressions ("last March", "this winter", "two weeks ago") to
+  absolute dates using today's date. Never give a date after today. Use null
+  when the question has no time constraint, and for a question about the
+  future or what to do next.
 - entities: names of people, places, groups, topics or projects mentioned in
   the question.
 - keywords: exact search terms (proper nouns, distinctive words) for
   full-text search. Exclude generic stop words.
 - needs_raw_text: true only if answering will likely require reading full
   entries rather than one-line summaries (e.g. asking for exact details,
-  quotes, or specifics unlikely to survive summarization)."""
+  quotes, or specifics unlikely to survive summarization).
+- wants: "record" when the journal's own words are the answer: what happened,
+  when, with whom, or what the writer themselves thought, felt or said ("how
+  do I feel about X", "what did I write about Y"). "judgment" when the writer
+  wants an answer worked out rather than looked up: whether something is
+  true, right, ethical, fair, wise or healthy, why something keeps happening,
+  what a pattern means, what you think, or what they should do.
+- current: true when the question is about how things stand now or what to do
+  next ("what should I do tomorrow", "what should I focus on this week", "how
+  am I doing lately", "what am I neglecting"), and not about a subject or a
+  past period to search for. The latest entries are read for these.
+- background: for a judgment or current question, up to five subjects whose
+  notes would help beyond the question's own words, such as goals, plans,
+  habits and things to improve for "what should I do tomorrow". Empty
+  otherwise."""
 
 
 CHAT_HISTORY_TURNS = 6
 # the start of an old answer is enough to resolve "that" or "she"
 _HISTORY_ANSWER_CHARS = 400
+# The answer being followed up is read nearly whole. Cut to its start, the
+# rewrite lost what the follow-up was about and the next answer said the same
+# things again.
+LAST_ANSWER_CHARS = 4000
+# how much of it the answering model sees, so it adds to it instead
+_EARLIER_ANSWER_CHARS = 1500
+_SOURCES_LINE_RE = re.compile(r"\n+Sources: .*\Z", re.DOTALL)
 
 _CONTEXTUALIZE_SYSTEM = (
-    "You rewrite a user's latest message into a self-contained journal "
-    "question using the conversation so far. Resolve pronouns and references "
-    '("that month", "she", "the same period", "what about after that") into '
-    "explicit names, dates, and terms drawn from the history. If the latest "
-    "message already stands on its own, return it unchanged. Output ONLY the "
-    "rewritten question, with no preamble, quotes, or explanation."
+    "You read the latest message in a conversation about someone's journal "
+    "and write out in full what they are asking now, so that someone who "
+    "hasn't seen the conversation could answer it.\n\n"
+    "First reason it through in `reasoning`: what the conversation has "
+    "established so far; what the latest message responds to (a claim in the "
+    "last answer they doubt, a detail they want more of, a correction, a new "
+    "angle, or a new subject altogether); and so what they want to be told "
+    "that they haven't been told already.\n\n"
+    "Then write `question`, in their own voice (I, my). It must:\n"
+    '- name the people, dates, events and subjects that words like "that", '
+    '"she", "the same period" or "the month after" stand for;\n'
+    "- carry over what an answer needs from earlier turns: the point of the "
+    "last answer they are reacting to, and anything they have added or "
+    "corrected;\n"
+    "- say exactly what is wanted now, and when the last answer already "
+    "covered part of it, say what was covered so it isn't gone over again.\n"
+    "It can run to several sentences. Don't answer it, and don't add facts "
+    "that aren't in the conversation. If the latest message starts a new "
+    "subject that owes nothing to the conversation, give it back unchanged."
 )
 
 
@@ -130,26 +257,63 @@ def contextualize_question(
     """`names` is profile.names: who the writer and the people they mention are."""
     if not history:
         return question
+    turns = history[-CHAT_HISTORY_TURNS:]
     lines = []
-    for user_q, assistant_a in history[-CHAT_HISTORY_TURNS:]:
+    for i, (user_q, assistant_a) in enumerate(turns):
+        room = LAST_ANSWER_CHARS if i == len(turns) - 1 else _HISTORY_ANSWER_CHARS
         lines.append(f"User: {user_q}")
-        lines.append(f"Assistant: {assistant_a[:_HISTORY_ANSWER_CHARS]}")
+        lines.append(f"Assistant: {assistant_a[:room]}")
     transcript = "\n".join(lines)
-    rewritten = client.chat(
-        model=config.ollama.fast_model,
-        messages=[
-            {"role": "system", "content": _CONTEXTUALIZE_SYSTEM + names},
-            {
-                "role": "user",
-                "content": (
-                    f"Conversation so far:\n{transcript}\n\n"
-                    f"Latest message: {question}\n\nRewritten question:"
-                ),
-            },
-        ],
-    ).strip()
+    try:
+        read = client.chat_structured(
+            model=config.ollama.fast_model,
+            messages=[
+                {"role": "system", "content": _CONTEXTUALIZE_SYSTEM + names},
+                {
+                    "role": "user",
+                    "content": f"Conversation so far:\n{transcript}\n\nLatest message: {question}",
+                },
+            ],
+            schema=FollowUp,
+        )
+    except StructuredOutputError:
+        # the question as typed still gets an answer
+        return question
     # small models occasionally return nothing
-    return rewritten or question
+    return " ".join(read.question.split()) or question
+
+
+def _earlier_block(earlier: Sequence[tuple[str, str]]) -> str:
+    """The exchange a follow-up follows, for the model that answers it."""
+    if not earlier:
+        return ""
+    asked, answered = earlier[-1]
+    said = context.clip(_SOURCES_LINE_RE.sub("", answered), _EARLIER_ANSWER_CHARS)
+    if not said:
+        return ""
+    return (
+        "Earlier in this conversation they asked: "
+        f"{context.clip(asked, _HISTORY_ANSWER_CHARS)}\nYou answered: {said}\n"
+        "Don't repeat that answer. Answer what is asked now, add to what was "
+        "said, and correct it if it was wrong.\n\n"
+    )
+
+
+def _dated(entry_date: str, today: date) -> str:
+    """An entry's date with its weekday, so "Friday" in it can be placed."""
+    day = date.fromisoformat(entry_date)
+    when = {0: ", today", 1: ", yesterday"}.get((today - day).days, "")
+    return f"{entry_date} ({day:%A}{when})"
+
+
+def _today_line(today: date) -> str:
+    # an entry's "tomorrow" is the day after it was written, which a model
+    # otherwise reads as the day after today
+    return (
+        f"Today is {today:%A}, {today.isoformat()}. Each entry was written on "
+        'its own date, so words in it like "today" and "tomorrow" count from '
+        "that date, not from today."
+    )
 
 
 def _plan(
@@ -162,6 +326,62 @@ def _plan(
             {"role": "user", "content": question},
         ],
         schema=QueryPlan,
+    )
+
+
+# days that haven't happened, which no entry can be about
+_AHEAD_RE = re.compile(
+    r"\b(?:tomorrow|tonight|from\s+now\s+on|going\s+forward"
+    r"|next\s+(?:few\s+days|day|week|weekend|month|year|semester|term"
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+    r"|this\s+(?:coming\s+)?weekend|the\s+(?:coming|upcoming)\s+\w+"
+    r"|the\s+rest\s+of\s+(?:the|this|my)\s+(?:day|week|month|year))\b",
+    re.IGNORECASE,
+)
+# "how do I feel about it" asks for the writer's own words
+_OWN_VIEW_RE = re.compile(
+    r"\b(?:how|what)\s+(?:do|did|have)\s+i\s+(?:feel|felt|think|thought|believe|say|said|write|written)\b"
+    r"|\bdo\s+i\s+(?:think|feel|believe)\b"
+    r"|\bmy\s+(?:own\s+)?(?:views?|opinions?|take|feelings?|thoughts?)\s+(?:on|about|of)\b",
+    re.IGNORECASE,
+)
+# and these ask for the reader's
+_JUDGMENT_RE = re.compile(
+    r"\b(?:what|how)\s+do\s+you\s+(?:think|reckon|make\s+of)\b|\bdo\s+you\s+think\b"
+    r"|\bin\s+your\s+(?:opinion|view)\b|\bwhat\s+would\s+you\b"
+    r"|\b(?:should|shouldn't|ought)\s+i\b"
+    r"|\b(?:is|was|were|are|am)\s+(?:it|that|this|i|we|he|she|they)\s+(?:\w+\s+)?"
+    r"(?:ethical|unethical|moral|immoral|right|wrong|fair|unfair|okay|ok|justified|reasonable)\b",
+    re.IGNORECASE,
+)
+
+
+def _settle(plan: QueryPlan, question: str, today: date) -> QueryPlan:
+    """Fits the router's plan to what the journal can hold and to what the
+    question plainly says. Small routers get both wrong now and then."""
+    wants = plan.wants
+    own, yours = _OWN_VIEW_RE.search(question), _JUDGMENT_RE.search(question)
+    if own and not yours:
+        wants = "record"
+    elif yours and not own:
+        wants = "judgment"
+    lo, hi = plan.date_from, plan.date_to
+    current = plan.current
+    if lo is not None and lo > today:
+        # only days to come, so it's asking about what's next
+        lo, hi, current = None, None, True
+    elif hi is not None and hi > today:
+        hi = today
+    # "what did John say about next year?" is still a search for John
+    searched = wants == "record" and bool(plan.entities)
+    if lo is None and hi is None and not searched and _AHEAD_RE.search(question):
+        current = True
+    if current and hi is not None and hi < today - timedelta(days=RECENT_DAYS):
+        current = False  # a period that's over is being asked about, not now
+    if current:
+        lo, hi = None, None  # the latest days are read, whatever "this week" came to
+    return plan.model_copy(
+        update={"date_from": lo, "date_to": hi, "current": current, "wants": wants}
     )
 
 
@@ -474,6 +694,7 @@ def _answer_aggregate(
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
     clock: _Clock | None = None,
+    earlier: str = "",
 ) -> Answer:
     mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
     tag_rows = store.top_tags(
@@ -511,10 +732,15 @@ def _answer_aggregate(
                 "content": (
                     "Answer the question about the asker's own journal using "
                     "ONLY the statistics provided. Do not invent numbers. Be "
-                    f"concise. {_READER_VOICE} {_FAST_ANSWER_FORMAT}{writer}"
+                    "concise and blunt: if the question assumes a trend or a "
+                    "cause the numbers don't show, say so plainly. "
+                    f"{_READER_VOICE} {_FAST_ANSWER_FORMAT}{writer}"
                 ),
             },
-            {"role": "user", "content": f"Question: {question}\n\nStatistics:\n{fact_block}"},
+            {
+                "role": "user",
+                "content": f"{earlier}Question: {question}\n\nStatistics:\n{fact_block}",
+            },
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         on_text,
@@ -711,6 +937,173 @@ def _retrieve_notes(
     for row in store.notes_linked_from_entries(conn, [r["id"] for r in candidates], LINKED_NOTES_K):
         ordered.setdefault(row["note_id"], None)
     return store.notes_by_ids(conn, list(ordered)[:MAX_CONTEXT_NOTES])
+
+
+def _last_day(today: date, until: date | None) -> date:
+    return min(until, today) if until is not None else today
+
+
+def _recent_entries(
+    conn: sqlite3.Connection,
+    today: date,
+    since: date | None,
+    until: date | None,
+    only: store.EntryFilter | None,
+) -> list[sqlite3.Row]:
+    """The past week's entries, newest first, or the latest few after a quiet week."""
+    end = _last_day(today, until)
+    start = end - timedelta(days=RECENT_DAYS)
+    if since is not None and since > start:
+        start = since
+    ids = store.filtered_entry_ids(conn, start, end, only=only)[-MAX_RECENT_ENTRIES:]
+    if len(ids) < MIN_RECENT_ENTRIES:
+        ids = store.filtered_entry_ids(conn, since, end, only=only)[-MIN_RECENT_ENTRIES:]
+    return store.entries_by_ids(conn, ids)[::-1]
+
+
+def _current_entries(
+    conn: sqlite3.Connection,
+    today: date,
+    since: date | None,
+    until: date | None,
+    only: store.EntryFilter | None,
+    about: list[int],
+) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+    """What a question about now reads: the latest days, and the newest
+    entries from before them that link a note it names. Nothing is searched
+    for by meaning, since "what should I do tomorrow" is close to nothing in
+    particular."""
+    recent = _recent_entries(conn, today, since, until, only)
+    have = {r["id"] for r in recent}
+    allowed = set(store.filtered_entry_ids(conn, since, _last_day(today, until), only=only))
+    linked = [i for i in store.entry_ids_mentioning(conn, about) if i in allowed and i not in have]
+    return recent, store.entries_by_ids(conn, linked[:CURRENT_TOPIC_ENTRIES])[::-1]
+
+
+def _word_forms(words: list[str]) -> list[str]:
+    # the index doesn't stem, so "goals" wouldn't find a note called "Goal"
+    forms: dict[str, None] = {}
+    for word in words:
+        forms.setdefault(word, None)
+        forms.setdefault(word[:-1] if word.endswith("s") and len(word) > 3 else word + "s", None)
+    return list(forms)
+
+
+_PICK_SYSTEM = (
+    "You choose background reading for a question someone asks about their "
+    "own life. Below are numbered notes from their files, each with its "
+    "file, title and how it starts. Give the numbers of the notes that would "
+    "help answer the question: ones about the subjects listed, and ones about "
+    "anything the question itself names. Leave out a note that is only about "
+    "a person, place, hobby or project the question doesn't touch, however "
+    "close it sits in the list. An empty list is right when none would help."
+)
+
+
+def _pick_notes(
+    question: str,
+    subjects: list[str],
+    offered: list[sqlite3.Row],
+    by_keyword: list[int],
+    config: Config,
+    client: OllamaClient,
+) -> list[int]:
+    """The offered notes worth reading for the question, best first."""
+    if not offered:
+        return []
+    lines = []
+    for number, row in enumerate(offered, start=1):
+        note = store.note_from_row(row, config.vault.path)
+        start = context.clip(row["summary"] or note.raw_text or "", BACKGROUND_NOTE_CHARS)
+        lines.append(f"{number}. {note.rel_path or note.kind}, {note.title}: {start or '(empty)'}")
+    try:
+        picks = client.chat_structured(
+            model=config.ollama.fast_model,
+            messages=[
+                {"role": "system", "content": _PICK_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question: {question}\nSubjects: {', '.join(subjects)}\n\n"
+                        "Notes:\n" + "\n".join(lines)
+                    ),
+                },
+            ],
+            schema=NotePicks,
+        )
+    except StructuredOutputError:
+        # the ones with the subjects' own words in them, at least
+        words = set(by_keyword)
+        return [r["id"] for r in offered if r["id"] in words][:BACKGROUND_NOTES_K]
+    chosen = dict.fromkeys(
+        offered[n - 1]["id"] for n in picks.numbers if 1 <= n <= len(offered)
+    )
+    return list(chosen)[:BACKGROUND_NOTES_K]
+
+
+def _current_notes(
+    question: str,
+    plan: QueryPlan,
+    config: Config,
+    conn: sqlite3.Connection,
+    client: OllamaClient,
+    about: list[int],
+    candidates: list[sqlite3.Row],
+) -> list[sqlite3.Row]:
+    """The notes a question about now reads: the ones it names, the ones about
+    the router's subjects (goals and plans, when it gave none), then the
+    people and places the latest entries link most."""
+    subjects = [s for s in plan.background if s.strip()] or _CURRENT_BACKGROUND
+    vector = _embed_question(", ".join(subjects), config, conn, client)
+    terms = _word_forms(search_keywords(" ".join(subjects)))
+    ordered = dict.fromkeys(about)
+    by_meaning = store.notes_vec_search(conn, vector, BACKGROUND_NOTE_POOL)
+    by_keyword = store.notes_fts_search(conn, terms, BACKGROUND_NOTE_POOL)
+    pool = [
+        i for i in _rrf_merge([by_keyword, by_meaning], BACKGROUND_NOTE_POOL) if i not in ordered
+    ]
+    offered = store.notes_by_ids(conn, pool)
+    for note_id in _pick_notes(question, subjects, offered, by_keyword, config, client):
+        ordered.setdefault(note_id, None)
+    linked = store.notes_linked_from_entries(conn, [r["id"] for r in candidates], CURRENT_LINKED_NOTES_K)
+    for row in linked:
+        ordered.setdefault(row["note_id"], None)
+    return store.notes_by_ids(conn, list(ordered)[:MAX_CONTEXT_NOTES])
+
+
+def _lead_up(
+    conn: sqlite3.Connection,
+    recent: list[sqlite3.Row],
+    since: date | None,
+    only: store.EntryFilter | None,
+) -> tuple[list[str], list[int]]:
+    """What came before the latest entries, as titled blocks for a prompt: a
+    line for each entry of the two weeks before them, then digests of the
+    weeks that ended before those. Also the ids of the entries the lines are
+    for."""
+    if not recent:
+        return [], []
+    first = date.fromisoformat(min(r["entry_date"] for r in recent))
+    start = first - timedelta(days=CURRENT_LEAD_DAYS)
+    if since is not None and since > start:
+        start = since
+    ids = store.filtered_entry_ids(conn, start, first - timedelta(days=1), only=only)
+    rows = store.entries_by_ids(conn, ids[-MAX_LEAD_ENTRIES:])
+    blocks = []
+    if rows:
+        lines = [f"- [{r['entry_date']}] {r['summary'] or '(no summary)'}" for r in rows]
+        blocks.append("The two weeks before these entries, a line each\n" + "\n".join(lines))
+    weeks = [
+        r for r in store.get_rollups_in_range(
+            conn, "week", start - timedelta(weeks=CURRENT_WEEK_DIGESTS + 1), start
+        )
+        if r["summary"] and store.period_bounds("week", r["period_key"])[1] < start
+    ]
+    if weeks:
+        lines = [f"- [week {r['period_key']}] {r['summary']}" for r in weeks[-CURRENT_WEEK_DIGESTS:]]
+        title = "The weeks before that, in brief" if rows else "The weeks before these entries, in brief"
+        blocks.append(f"{title}\n" + "\n".join(lines))
+    return blocks, [r["id"] for r in rows]
 
 
 _SEARCH_STOPWORDS = frozenset(
@@ -916,10 +1309,15 @@ def _summary_context(
     conn: sqlite3.Connection,
     about: Sequence[int] = (),
     parts: dict[int, sqlite3.Row] | None = None,
+    before: Sequence[str] = (),
 ) -> str:
-    """`parts` is the part of each entry that matched the question best, when one did."""
+    """`parts` is the part of each entry that matched the question best, when
+    one did. `before` is what _lead_up gives a question about now."""
     vault = config.vault.path
     sections: list[str] = []
+    if plan.current:
+        # they were found by date, not by how well they match, so they read in order
+        candidates = sorted(candidates, key=lambda r: (r["entry_date"], r["id"]))
     linked = store.entities_for_entries(conn, [r["id"] for r in candidates])
     metrics = store.metrics_for_entries(conn, [r["id"] for r in candidates])
     longer = context.longer_summaries(conn, candidates, ANSWER_DETAILS_CHARS)
@@ -943,7 +1341,9 @@ def _summary_context(
                 lines.append(f"  The part of that entry that matches, {where}: {text}")
     lines.extend(_digest_lines(plan, conn))
     if lines:
-        sections.append("Journal entries:\n" + "\n".join(lines))
+        heading = "The latest journal entries, oldest first:" if plan.current else "Journal entries:"
+        sections.append(f"{heading}\n" + "\n".join(lines))
+    sections.extend(block.replace("\n", ":\n", 1) for block in before)
     if notes:
         mentions = store.mention_stats(conn, [r["id"] for r in notes])
         learned = _learned_names(conn, notes)
@@ -1107,7 +1507,10 @@ def _fast_attempt(
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
     clock: _Clock | None = None,
+    today: date | None = None,
+    earlier: str = "",
 ) -> str | None:
+    """`earlier` is _earlier_block for a follow-up."""
     hold = _HoldUntilAnswer(on_text) if on_text else None
     response = _chat(
         client,
@@ -1116,19 +1519,21 @@ def _fast_attempt(
             {
                 "role": "system",
                 "content": (
-                    "Answer the question using ONLY the journal entry "
+                    "Answer the question from the journal entry "
                     "summaries and reference notes below. Reference notes "
                     "describe the people, places and topics the journal "
                     "links to, and carry no dates. Each item names the file "
                     "it comes from; folder and file names can say what it is "
-                    "about. Mention the dates or [[note names]] your answer "
-                    f"draws on. {_READER_VOICE} {_FAST_ANSWER_FORMAT} "
+                    f"about. {_RECORD} {_STRAIGHT} Mention the dates or "
+                    "[[note names]] your answer draws on. "
+                    f"{_today_line(today or date.today())} "
+                    f"{_READER_VOICE} {_FAST_ANSWER_FORMAT} "
                     "If the material does not "
                     "contain enough information to answer confidently, reply "
                     f"with exactly the single word INSUFFICIENT.{writer}"
                 ),
             },
-            {"role": "user", "content": f"Question: {question}\n\n{context}"},
+            {"role": "user", "content": f"{earlier}Question: {question}\n\n{context}"},
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         hold,
@@ -1159,7 +1564,17 @@ def _precise_reanalysis(
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
     clock: _Clock | None = None,
+    plan: QueryPlan | None = None,
+    today: date | None = None,
+    earlier: str = "",
+    before: Sequence[str] = (),
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
+    """`plan` says whether the question wants the record or a judgment, and
+    whether it's about now. `earlier` is _earlier_block for a follow-up, and
+    `before` what _lead_up gives a question about now."""
+    judging = plan is not None and plan.wants == "judgment"
+    current = plan is not None and plan.current
+    day = today or date.today()
     ranked_notes: list[tuple[sqlite3.Row, str]] = []
     note_chars = 0
     vault = config.vault.path
@@ -1191,7 +1606,7 @@ def _precise_reanalysis(
     }
     for row in candidates:  # best first
         heading = (
-            f"### Entry {row['entry_date']}\n"
+            f"### Entry {_dated(row['entry_date'], day)}\n"
             f"File: {parser.relative_path(row['file_path'], vault)}\n"
         )
         if row["id"] in recorded:
@@ -1206,26 +1621,36 @@ def _precise_reanalysis(
         (row, (heading + row["raw_text"] + photo_text.get(row["id"], ""))[:budget])
         for row, heading in used
     ]
+    if judging:
+        approach = f"{_JUDGMENT} {_ADVICE if current else ''}".rstrip()
+        missing = ""
+    else:
+        approach = _RECORD
+        missing = " If the material does not answer the question, say so."
     system = (
         "You answer questions about a personal journal from the "
         "full entry texts and reference notes provided. Reference "
         "notes describe the people, places and topics the journal "
         "links to, and carry no dates. Each one names the file it "
         "comes from; folder and file names can say what it is "
-        "about. Base the answer strictly on this material; mention "
-        f"the dates or [[note names]] it draws on. {_READER_VOICE} "
-        f"{_PRECISE_ANSWER_FORMAT} "
-        f"If it does not answer the question, say so.{writer}"
+        f"about. {approach} {_STRAIGHT} Mention "
+        "the dates or [[note names]] the answer draws on. "
+        f"{_today_line(day)} {_READER_VOICE} "
+        f"{_PRECISE_ANSWER_FORMAT}{missing}{writer}"
     )
+    lead_up = [f"### {block}" for block in before]
 
     def prompt(
         kept_notes: list[tuple[sqlite3.Row, str]], kept_entries: list[tuple[sqlite3.Row, str]]
     ) -> list[dict[str, str]]:
         by_date = sorted(kept_entries, key=lambda pair: pair[0]["entry_date"])
-        blocks = [b for _, b in kept_notes] + [b for _, b in by_date]
+        blocks = [b for _, b in kept_notes] + lead_up + [b for _, b in by_date]
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": f"Question: {question}\n\n" + "\n\n".join(blocks)},
+            {
+                "role": "user",
+                "content": f"{earlier}Question: {question}\n\n" + "\n\n".join(blocks),
+            },
         ]
 
     kept_notes, kept_entries = _make_room(
@@ -1276,16 +1701,19 @@ def answer(
     only: store.EntryFilter | None = None,
     on_text: TextSink | None = None,
     on_thinking: TextSink | None = None,
+    earlier: Sequence[tuple[str, str]] = (),
 ) -> Answer:
     """`since`, `until` and `only` are what the person asked for, so they
     override whatever the router reads into the question. With `on_text`, the
     answer is handed over piece by piece as the model writes it, and with
     `on_thinking` so is the model's reasoning, if [ollama] show_thinking is on.
+    `earlier` is the conversation a follow-up follows, as (question, answer)
+    pairs, so the answer adds to the last one instead of saying it again.
     The answer's timings say how long each step took."""
     clock = _Clock()
     result = _answer(
         question, config, conn, client, today, on_stage, since, until, only, on_text,
-        on_thinking, clock,
+        on_thinking, clock, _earlier_block(earlier),
     )
     writer = {
         "fast_summary": config.ollama.fast_model,
@@ -1308,6 +1736,7 @@ def _answer(
     on_text: TextSink | None,
     on_thinking: TextSink | None,
     clock: _Clock,
+    earlier: str,
 ) -> Answer:
     today = today or date.today()
     if not config.ollama.show_thinking:
@@ -1315,35 +1744,50 @@ def _answer(
     writer = profile.context(conn, config)
     on_stage("Working out what you're asking...")
     clock.start("working out the question")
-    plan = _plan(question, config, client, today, profile.names(conn, config))
+    plan = _settle(
+        _plan(question, config, client, today, profile.names(conn, config)), question, today
+    )
     if since is not None or until is not None:
         plan = plan.model_copy(update={"date_from": since, "date_to": until})
     named = notes_named_in(question, conn)
     if only and only.note_ids:
         named = list(dict.fromkeys([*only.note_ids, *named]))
 
-    if plan.intent == "aggregate":
+    # what to do next is never a matter of counting, whatever the router made of it
+    if plan.intent == "aggregate" and not (plan.current and plan.wants == "judgment"):
         on_stage("Putting the numbers into words...")
         return _answer_aggregate(
             question, plan, config, conn, client, named, only, on_text, writer,
-            on_stage, on_thinking, clock,
+            on_stage, on_thinking, clock, earlier,
         )
 
-    on_stage("Searching entries and notes...")
-    clock.start("searching")
     about = _named_notes(conn, plan, named)
-    query_vector = _embed_question(question, config, conn, client)
     found_parts: dict[int, sqlite3.Row] = {}
-    candidates = _retrieve(
-        question, plan, config, conn, client,
-        query_vector=query_vector, boost_note_ids=named, only=only, parts=found_parts,
-    )
-    explicit_day = _explicit_day(question, today)
-    if explicit_day is not None and (since is None or since <= explicit_day) and (
-        until is None or explicit_day <= until
-    ):
-        candidates = _ensure_day_included(conn, explicit_day, candidates, only)
-    notes = _retrieve_notes(plan, conn, query_vector, about, candidates)
+    before: list[str] = []
+    lead_ids: list[int] = []
+
+    def with_named_day(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+        day = _explicit_day(question, today)
+        if day is None or (since is not None and day < since) or (until is not None and day > until):
+            return rows
+        return _ensure_day_included(conn, day, rows, only)
+
+    if plan.current:
+        on_stage("Gathering your latest entries and notes...")
+        clock.start("searching")
+        recent, linked = _current_entries(conn, today, since, until, only, about)
+        before, lead_ids = _lead_up(conn, recent, since, only)
+        candidates = with_named_day(recent + linked)
+        notes = _current_notes(question, plan, config, conn, client, about, candidates)
+    else:
+        on_stage("Searching entries and notes...")
+        clock.start("searching")
+        query_vector = _embed_question(question, config, conn, client)
+        candidates = with_named_day(_retrieve(
+            question, plan, config, conn, client,
+            query_vector=query_vector, boost_note_ids=named, only=only, parts=found_parts,
+        ))
+        notes = _retrieve_notes(plan, conn, query_vector, about, candidates)
     if not candidates and not notes:
         return Answer(
             text="No journal entries or reference notes matched the question.",
@@ -1353,11 +1797,15 @@ def _answer(
         [*search_keywords(question), *search_keywords(" ".join(plan.keywords + plan.entities))]
     )
 
-    if not plan.needs_raw_text:
+    # a judgment needs the facts themselves, and a model that thinks
+    if not plan.needs_raw_text and plan.wants != "judgment":
         on_stage("Answering from summaries...")
-        context = _summary_context(candidates, notes, plan, config, conn, about, found_parts)
+        context = _summary_context(
+            candidates, notes, plan, config, conn, about, found_parts, before
+        )
         fast_answer = _fast_attempt(
-            question, context, config, client, on_text, writer, on_stage, on_thinking, clock
+            question, context, config, client, on_text, writer, on_stage, on_thinking, clock,
+            today, earlier,
         )
         if fast_answer is not None:
             return _finalize(
@@ -1365,7 +1813,7 @@ def _answer(
                 "fast_summary",
                 cited_dates=[date.fromisoformat(r["entry_date"]) for r in candidates],
                 cited_notes=_notes_used(fast_answer, notes, about, _learned_names(conn, notes)),
-                read_entries=[r["id"] for r in candidates],
+                read_entries=[*(r["id"] for r in candidates), *lead_ids],
                 read_notes=[r["id"] for r in notes],
                 cited_parts=_cited_parts(candidates, found_parts),
                 quoted=quotes.for_days(candidates, wanted, found_parts),
@@ -1380,13 +1828,17 @@ def _answer(
         on_stage=on_stage,
         on_thinking=on_thinking,
         clock=clock,
+        plan=plan,
+        today=today,
+        earlier=earlier,
+        before=before,
     )
     return _finalize(
         text,
         "precise_raw",
         cited_dates=[date.fromisoformat(r["entry_date"]) for r in used],
         cited_notes=_notes_used(text, used_notes, about, _learned_names(conn, used_notes)),
-        read_entries=[r["id"] for r in used],
+        read_entries=[*(r["id"] for r in used), *lead_ids],
         read_notes=[r["id"] for r in used_notes],
         cited_parts=_cited_parts(used, found_parts),
         quoted=quotes.for_days(used, wanted, found_parts),

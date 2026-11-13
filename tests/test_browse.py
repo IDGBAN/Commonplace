@@ -13,6 +13,7 @@ from journal_analyzer import browse, db, nicknames, parser, photos, query, store
 from journal_analyzer.models import (
     DatabaseError,
     Extraction,
+    FollowUp,
     OllamaUnavailableError,
     ParsedEntry,
     QueryPlan,
@@ -626,16 +627,24 @@ def test_ask_streams_its_steps_then_the_answer(browser, journal, fake_client):
 def test_ask_follow_ups_are_rewritten_first(browser, fake_client):
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
 
+    def follow_up(model, messages):
+        assert messages[0]["content"] == query._CONTEXTUALIZE_SYSTEM
+        assert "User: How was January?" in messages[-1]["content"]
+        return FollowUp(reasoning="They ask about the next month.", question="How was February 2024?")
+
+    answered = []
+
     def chat(model, messages):
-        if messages[0]["content"] == query._CONTEXTUALIZE_SYSTEM:
-            assert "User: How was January?" in messages[-1]["content"]
-            return "How was February 2024?"
+        answered.append(messages[-1]["content"])
         return "Quiet."
 
+    fake_client.structured["FollowUp"] = follow_up
     fake_client.chat_response = chat
     events = _events(browser.ask("and Feb?", history=[["How was January?", "Calm."]]))
     assert ("rewritten", {"question": "How was February 2024?"}) in events
     assert events[-1][1]["question"] == "How was February 2024?"
+    # the answer is written knowing what was said before, so it doesn't say it again
+    assert "You answered: Calm." in answered[0]
 
 
 def test_ask_reports_problems_inside_the_stream(browser, fake_client):

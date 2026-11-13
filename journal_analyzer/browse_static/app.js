@@ -2223,9 +2223,10 @@ const STAGE_LABELS = {
   precise_raw: "from the full text of the entries",
   retrieval_empty: "nothing matched",
 };
-// matches query.CHAT_HISTORY_TURNS and the part of each answer it keeps
+// matches query.CHAT_HISTORY_TURNS and query.LAST_ANSWER_CHARS, the most of an
+// answer a follow-up is read against; the server cuts the older ones shorter
 const HISTORY_TURNS = 6;
-const HISTORY_ANSWER_CHARS = 400;
+const HISTORY_ANSWER_CHARS = 4000;
 
 // what an answer can be kept to, as /api/ask and the entries page name them
 const SCOPE_KEYS = ["note", "tag", "group", "from", "to"];
