@@ -132,14 +132,27 @@ _PRECISE_ANSWER_FORMAT = (
 
 # The journal is good evidence of what happened and of what its writer
 # thought. It isn't evidence that what they thought is so, and neither is the
-# way a question is put.
+# way a question is put. Told only that, a model takes disagreeing for the
+# job: it piles on, and brings up troubles from entries that have nothing to
+# do with the question. Told it may agree, it agrees with whichever way the
+# question leans. So the verdict comes from the facts before the writer's
+# view is looked at, and only how it's delivered is kept in proportion.
 _STRAIGHT = (
-    "Be blunt and accurate. The journal is a reliable record of what happened "
-    "and of what its writer thought at the time, but an opinion, belief or "
-    "excuse isn't true because it's written there, and neither is anything "
-    "the question takes for granted. When the facts or what you know say "
-    "otherwise, say so plainly and say why. Don't soften it, flatter, or "
-    "agree to be agreeable."
+    "Be straight and even-handed. The journal is a reliable record of what "
+    "happened and of what its writer thought at the time. Settle what is "
+    "true or right from the facts and what you know, as you would for a "
+    "stranger, before you look at which way the writer or the question "
+    "leans. A view isn't true because it's written there or because the "
+    'question expects a yes ("..., didn\'t I?" is still a question), and it '
+    "isn't wrong because it's theirs. Then say what you found. If it "
+    "matches their view, say it holds and leave it there. If it doesn't, "
+    "say so plainly and say why, once, as firmly as it matters and no more. "
+    "If reasonable people would differ, say that. Don't flatter or agree to "
+    "be agreeable, and don't hunt for faults, pile on, or disagree to show "
+    "independence. Answer the question that was asked. The material covers "
+    "more than it does: use the parts that are about it, keep who did and "
+    "said what exactly as written, and leave out other troubles, advice and "
+    "next steps nobody asked for unless they change the answer."
 )
 
 # For questions that want the journal's own words. The router gets some
@@ -159,13 +172,14 @@ _JUDGMENT = (
     "The asker wants this thought through, not looked up. Use the material "
     "for the facts of their situation: what happened, when, who was "
     "involved, what was done and what came of it. Their own opinions, "
-    "feelings and conclusions in it are what they thought, not evidence, so "
-    "don't hand them back as the answer; mention one only where it bears on "
-    "the reasoning. Work it out: pick the facts that matter, connect facts "
-    "from different days and notes that bear on each other (causes, "
+    "feelings and conclusions in it are what they thought, not evidence "
+    "either way: don't hand one back as the answer, and don't set out to "
+    "overturn it. Work it out: pick the facts that matter, connect facts "
+    "from different days and notes where they bear on each other (causes, "
     "patterns, contradictions, consequences), bring in what you know about "
-    "the world, and reach your own conclusion. Lead with a direct answer, "
-    "then give the reasoning with the facts and dates it rests on. If the "
+    "the world, and reach your own conclusion. Lead with a direct "
+    "answer, as sure as the facts allow and no surer, then give the "
+    "reasoning with the facts and dates it rests on. If the "
     "material lacks a fact the answer turns on, say what's missing and "
     "answer as far as general knowledge goes rather than guessing about "
     "their life."
@@ -732,8 +746,9 @@ def _answer_aggregate(
                 "content": (
                     "Answer the question about the asker's own journal using "
                     "ONLY the statistics provided. Do not invent numbers. Be "
-                    "concise and blunt: if the question assumes a trend or a "
-                    "cause the numbers don't show, say so plainly. "
+                    "concise and straight: if the question assumes a trend or a "
+                    "cause the numbers don't show, say so plainly, and if "
+                    "they do show it, just answer. "
                     f"{_READER_VOICE} {_FAST_ANSWER_FORMAT}{writer}"
                 ),
             },

@@ -50,15 +50,30 @@ def test_a_question_about_the_record_is_still_answered_from_it(config, conn, fak
     assert "does not answer the question, say so" in precise
 
 
+def test_the_writers_view_is_weighed_not_taken_and_not_picked_at():
+    straight = " ".join(query._STRAIGHT.split())
+    # the verdict first, from the facts, whichever way the question leans
+    assert "before you look at which way the writer or the question leans" in straight
+    assert "isn't true because it's written there or because the question expects a yes" in straight
+    assert "Don't flatter or agree to be agreeable" in straight
+    # and then no more disagreement than the facts call for
+    assert "it isn't wrong because it's theirs" in straight
+    assert "say it holds and leave it there" in straight
+    assert "once, as firmly as it matters and no more" in straight
+    assert "don't hunt for faults, pile on, or disagree to show independence" in straight
+    assert "advice and next steps nobody asked for" in straight
+    judgment = " ".join(query._JUDGMENT.split())
+    assert "not evidence either way" in judgment and "don't set out to overturn it" in judgment
+
+
 def test_every_answer_is_told_not_to_take_the_writers_word_for_it(config, conn, fake_client):
-    assert "isn't true because it's written there" in query._STRAIGHT
-    assert "anything the question takes for granted" in query._STRAIGHT
     fake_client.structured["QueryPlan"] = QueryPlan(intent="aggregate")
     add_entry(conn, date(2024, 5, 20))
     seen = []
     fake_client.chat_response = lambda model, messages: seen.append(messages[0]["content"]) or "No."
     query.answer("Why has my mood got so much worse?", config, conn, fake_client, today=TODAY)
     assert "if the question assumes a trend or a cause the numbers don't show, say so" in seen[0]
+    assert "if they do show it, just answer" in seen[0]
 
 
 @pytest.mark.parametrize("question", [
