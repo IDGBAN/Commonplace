@@ -340,23 +340,18 @@ def test_answers_stream_from_whichever_stage_answers(conn, config, fake_client):
     assert fake_client.streamed_calls == [config.ollama.fast_model, config.ollama.precise_model]
 
 
-def test_reasoning_reaches_the_answer_only_when_it_is_turned_on(conn, config, fake_client):
+def test_reasoning_reaches_whoever_asks_for_it(conn, config, fake_client):
+    # show_thinking is for the terminal; the Ask page always shows it
     add_entry(conn, date(2024, 1, 15), summary="Hiked")
     fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
     fake_client.chat_response = "You hiked."
     fake_client.thinking_response = "Looking at January."
     thought, stages = [], []
-
-    def ask():
-        query.answer("q", config, conn, fake_client, today=date(2024, 6, 1), on_text=lambda _t: None,
-                     on_thinking=thought.append, on_stage=stages.append)
-
-    ask()
-    assert thought == []
-    assert stages[-1] == "Thinking before it answers..."
-    config.ollama.show_thinking = True
-    ask()
+    assert config.ollama.show_thinking is False
+    query.answer("q", config, conn, fake_client, today=date(2024, 6, 1), on_text=lambda _t: None,
+                 on_thinking=thought.append, on_stage=stages.append)
     assert thought == ["Looking at January."]
+    assert "Thinking before it answers..." in stages
 
 
 def test_ask_prints_reasoning_dimmed_before_the_answer():
@@ -458,6 +453,20 @@ def test_ask_says_how_long_it_took(tmp_path, config, conn, fake_client, monkeypa
     assert result.exit_code == 0, result.output
     assert "Took " in result.output
     assert f"by {config.ollama.fast_model}" in result.output
+
+
+def test_ask_keeps_the_thinking_to_itself_unless_it_is_turned_on(
+    tmp_path, config, conn, fake_client, monkeypatch
+):
+    add_entry(conn, date(2024, 1, 15), summary="Hiked", path="/vault/2024-01-15.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    fake_client.chat_response = "You hiked."
+    fake_client.thinking_response = "Looking at January."
+    monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
+    result = invoke_cli(tmp_path, config, "ask", "When?")
+    assert result.exit_code == 0, result.output
+    assert "You hiked." in result.output
+    assert "Looking at January." not in result.output
 
 
 def test_ask_prints_the_streamed_answer_once(tmp_path, config, conn, fake_client, monkeypatch):

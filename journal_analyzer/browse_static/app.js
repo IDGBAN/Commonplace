@@ -2584,7 +2584,7 @@ function timingsView(timings, holder = {}) {
         h("td", { class: "num" }, duration(t.seconds)))))));
 }
 
-// what a thinking model reasoned before answering, with [ollama] show_thinking on
+// what a thinking model reasoned before answering
 function thinkingView(turn) {
   if (!turn.thinking) return null;
   const open = turn.thinkingOpen ?? (turn.status === "running" && !turn.partial);

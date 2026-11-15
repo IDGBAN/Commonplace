@@ -1721,7 +1721,7 @@ def answer(
     """`since`, `until` and `only` are what the person asked for, so they
     override whatever the router reads into the question. With `on_text`, the
     answer is handed over piece by piece as the model writes it, and with
-    `on_thinking` so is the model's reasoning, if [ollama] show_thinking is on.
+    `on_thinking` so is the model's reasoning.
     `earlier` is the conversation a follow-up follows, as (question, answer)
     pairs, so the answer adds to the last one instead of saying it again.
     The answer's timings say how long each step took."""
@@ -1754,8 +1754,6 @@ def _answer(
     earlier: str,
 ) -> Answer:
     today = today or date.today()
-    if not config.ollama.show_thinking:
-        on_thinking = None
     writer = profile.context(conn, config)
     on_stage("Working out what you're asking...")
     clock.start("working out the question")

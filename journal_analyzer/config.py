@@ -75,7 +75,8 @@ class OllamaConfig(BaseModel):
     # not much benefit, so it's off for the fast model.
     fast_model_think: bool | None = False
     precise_model_think: bool | None = None
-    # print a thinking model's reasoning as it streams, before the answer
+    # print a thinking model's reasoning in journal ask as it streams, before
+    # the answer; the Ask page always shows it, folded away once the answer starts
     show_thinking: bool = False
     # Tokens a thinking model may think for before an answer or a JSON reply.
     # Past it the model is stopped and asked again without thinking.

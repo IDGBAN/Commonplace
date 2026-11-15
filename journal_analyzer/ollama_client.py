@@ -386,6 +386,19 @@ class OllamaClient:
             )
         return self._can_think[model]
 
+    def _stream_think(self, model: str, think: bool | None) -> bool | None:
+        """What a streamed call asks for. Left to the model, Ollama lets one
+        that thinks do it without sending any of it, so nothing came until the
+        answer: the wait was timed as reading, ran far past the estimate, and
+        the thinking couldn't be shown. Asked for, it comes as it's written."""
+        if think is not None:
+            return think
+        capabilities = None
+        with contextlib.suppress(JournalError):
+            capabilities = getattr(self._show(model), "capabilities", None)
+        # True is refused by a model that can't think, so only when Ollama says it can
+        return True if isinstance(capabilities, list) and "thinking" in capabilities else None
+
     def _show(self, model: str) -> Any:
         if model not in self._shown:
             self._shown[model] = self._call(model, partial(self._client.show, model))
@@ -456,7 +469,7 @@ class OllamaClient:
         hears every second how long it has been reading and how long the same
         amount took before, when this model has been timed.
         """
-        think = self._think(model)
+        think = self._stream_think(model, self._think(model))
         thinking = self._thinking(model, think)
         opts = self._sized(model, messages, options, self._room(REPLY_TOKENS, thinking))
         phase = on_phase or (lambda _phase: None)

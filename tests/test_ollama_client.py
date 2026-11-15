@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -170,6 +171,29 @@ def test_models_outside_the_two_roles_are_left_alone(tmp_path, monkeypatch):
     inner = MagicMock()
     inner.chat.return_value = _reply("ok")
     _client(tmp_path, monkeypatch, inner).chat("some-other-model", [])
+    assert inner.chat.call_args.kwargs["think"] is None
+
+
+def test_a_stream_left_to_a_thinking_model_asks_for_its_thinking(tmp_path, monkeypatch):
+    # unasked, Ollama keeps a model's thinking back and the wait looks like reading
+    inner = MagicMock()
+    inner.ps.return_value = SimpleNamespace(models=[])
+    inner.show.return_value.capabilities = ["completion", "thinking"]
+    inner.chat.side_effect = lambda **_kw: iter([{"message": {"content": "ok"}}])
+    client = _client(tmp_path, monkeypatch, inner)
+    client.chat_stream("fake-precise", [], lambda _t: None)
+    assert inner.chat.call_args.kwargs["think"] is True
+    # what the config says still wins
+    client.chat_stream("fake-fast", [], lambda _t: None)
+    assert inner.chat.call_args.kwargs["think"] is False
+
+
+def test_a_stream_to_a_model_that_cannot_think_leaves_it_unasked(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.ps.return_value = SimpleNamespace(models=[])
+    inner.show.return_value.capabilities = ["completion"]
+    inner.chat.return_value = iter([{"message": {"content": "ok"}}])
+    _client(tmp_path, monkeypatch, inner).chat_stream("fake-precise", [], lambda _t: None)
     assert inner.chat.call_args.kwargs["think"] is None
 
 
