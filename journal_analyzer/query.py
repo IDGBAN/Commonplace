@@ -230,53 +230,81 @@ Classify the question and extract constraints:
 CHAT_HISTORY_TURNS = 6
 # the start of an old answer is enough to resolve "that" or "she"
 _HISTORY_ANSWER_CHARS = 400
-# The answer being followed up is read nearly whole. Cut to its start, the
-# rewrite lost what the follow-up was about and the next answer said the same
-# things again.
+# and most of the answer being followed up, to tell what the message is about
 LAST_ANSWER_CHARS = 4000
-# how much of it the answering model sees, so it adds to it instead
-_EARLIER_ANSWER_CHARS = 1500
+# The model that answers a follow-up gets the conversation itself: the
+# messages as they were typed and its own answers, the latest whole and older
+# ones for as long as this lasts. A summary of the follow-up, however careful,
+# drops most of a long message, and it only ever saw the start of the answer
+# being replied to.
+CONVERSATION_CHARS = 24_000
 _SOURCES_LINE_RE = re.compile(r"\n+Sources: .*\Z", re.DOTALL)
 
+# The rewrite is only what the journal is searched with, and what the router
+# reads. It isn't shown to the model that answers in place of the message.
 _CONTEXTUALIZE_SYSTEM = (
     "You read the latest message in a conversation about someone's journal "
-    "and write out in full what they are asking now, so that someone who "
-    "hasn't seen the conversation could answer it.\n\n"
-    "First reason it through in `reasoning`: what the conversation has "
-    "established so far; what the latest message responds to (a claim in the "
-    "last answer they doubt, a detail they want more of, a correction, a new "
-    "angle, or a new subject altogether); and so what they want to be told "
-    "that they haven't been told already.\n\n"
-    "Then write `question`, in their own voice (I, my). It must:\n"
-    '- name the people, dates, events and subjects that words like "that", '
-    '"she", "the same period" or "the month after" stand for;\n'
-    "- carry over what an answer needs from earlier turns: the point of the "
-    "last answer they are reacting to, and anything they have added or "
-    "corrected;\n"
-    "- say exactly what is wanted now, and when the last answer already "
-    "covered part of it, say what was covered so it isn't gone over again.\n"
-    "It can run to several sentences. Don't answer it, and don't add facts "
-    "that aren't in the conversation. If the latest message starts a new "
-    "subject that owes nothing to the conversation, give it back unchanged."
+    "and write the question to search the journal with, so the right entries "
+    "and notes are found for answering it. Whoever answers has the whole "
+    "conversation and the message as it was typed, so nothing has to be "
+    "carried over for them: this is only for finding material.\n\n"
+    "First reason it through in `reasoning`: what the conversation is about "
+    "so far, and what in it the latest message responds to or asks next (a "
+    "claim in the last answer they doubt, a detail they want more of, a "
+    "correction, a new angle, or a new subject altogether).\n\n"
+    "Then write `question`, in their own voice (I, my): one self-contained "
+    "question that names the people, dates, events and subjects that words "
+    'like "that", "she", "the same period" or "the month after" stand for, '
+    "and that asks for the same kind of answer the message does (what "
+    "happened, a judgment on it, or what to do next). Keep every name, date "
+    "and particular the latest message itself gives. Don't answer it, and "
+    "don't add facts that aren't in the conversation. If the latest message "
+    "starts a new subject that owes nothing to the conversation, give it "
+    "back unchanged."
 )
+
+# added to an answer's instructions when it follows earlier turns
+_FOLLOW_UP = (
+    "This is a conversation. Your earlier answers are above, written from "
+    "journal material you no longer have in front of you; the material with "
+    "their latest message was looked up for that message. Answer the "
+    "message as they wrote it, every point of it. Don't say again what you "
+    "already said: build on it. Where they push back, take their point on "
+    "its merits, and change your answer if they're right and only then. "
+    "Something they tell you in a message that the material doesn't show is "
+    "their account: reason with it as that, and don't say the journal "
+    "confirms it."
+)
+
+# (the message as typed, the answer), then how it was searched for if it was rewritten
+Turn = Sequence[str]
+
+
+def _turn(turn: Turn) -> tuple[str, str, str]:
+    asked, answer, *rest = turn
+    return asked, answer, rest[0] if rest else ""
 
 
 def contextualize_question(
     question: str,
-    history: list[tuple[str, str]],
+    history: Sequence[Turn],
     config: Config,
     client: OllamaClient,
     names: str = "",
 ) -> str:
-    """`names` is profile.names: who the writer and the people they mention are."""
+    """The question to search the journal with for a follow-up. `names` is
+    profile.names: who the writer and the people they mention are."""
     if not history:
         return question
-    turns = history[-CHAT_HISTORY_TURNS:]
+    turns = [_turn(t) for t in history[-CHAT_HISTORY_TURNS:]]
     lines = []
-    for i, (user_q, assistant_a) in enumerate(turns):
+    for i, (asked, answer, searched) in enumerate(turns):
         room = LAST_ANSWER_CHARS if i == len(turns) - 1 else _HISTORY_ANSWER_CHARS
-        lines.append(f"User: {user_q}")
-        lines.append(f"Assistant: {assistant_a[:room]}")
+        lines.append(f"User: {asked}")
+        if searched and searched != asked:
+            # "and April?" two turns back is easier to follow with this
+            lines.append(f"(searched for as: {searched})")
+        lines.append(f"Assistant: {answer[:room]}")
     transcript = "\n".join(lines)
     try:
         read = client.chat_structured(
@@ -297,20 +325,37 @@ def contextualize_question(
     return " ".join(read.question.split()) or question
 
 
-def _earlier_block(earlier: Sequence[tuple[str, str]]) -> str:
-    """The exchange a follow-up follows, for the model that answers it."""
-    if not earlier:
-        return ""
-    asked, answered = earlier[-1]
-    said = context.clip(_SOURCES_LINE_RE.sub("", answered), _EARLIER_ANSWER_CHARS)
-    if not said:
-        return ""
-    return (
-        "Earlier in this conversation they asked: "
-        f"{context.clip(asked, _HISTORY_ANSWER_CHARS)}\nYou answered: {said}\n"
-        "Don't repeat that answer. Answer what is asked now, add to what was "
-        "said, and correct it if it was wrong.\n\n"
-    )
+def _conversation(earlier: Sequence[Turn]) -> list[dict[str, str]]:
+    """Earlier turns as chat messages for the model that answers, oldest
+    first. The latest turn always goes in; older ones while there's room."""
+    kept: list[dict[str, str]] = []
+    room = CONVERSATION_CHARS
+    for turn in reversed(earlier[-CHAT_HISTORY_TURNS:]):
+        asked, answer, _searched = _turn(turn)
+        # it would start writing Sources lines of its own
+        answer = _SOURCES_LINE_RE.sub("", answer).strip()
+        if not asked.strip() or not answer:
+            continue
+        cost = len(asked) + len(answer)
+        if cost > room:
+            if kept:
+                break
+            asked, answer = asked[:room], answer[: max(room - len(asked), 0)]
+        room -= cost
+        kept[:0] = [
+            {"role": "user", "content": asked},
+            {"role": "assistant", "content": answer},
+        ]
+    return kept
+
+
+def _asked(question: str, asked: str, material: str, following: bool) -> str:
+    """The last message an answering model gets. A follow-up goes in as it
+    was typed, with what the journal was searched for beside the material."""
+    if not following:
+        return f"Question: {question}\n\n{material}"
+    searched = f" (searched for: {question})" if question != asked else ""
+    return f"{asked}\n\nFrom the journal, looked up for this message{searched}:\n\n{material}"
 
 
 def _dated(entry_date: str, today: date) -> str:
@@ -708,7 +753,8 @@ def _answer_aggregate(
     on_stage: Callable[[str], None] = _no_progress,
     on_thinking: TextSink | None = None,
     clock: _Clock | None = None,
-    earlier: str = "",
+    convo: Sequence[dict[str, str]] = (),
+    asked: str = "",
 ) -> Answer:
     mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
     tag_rows = store.top_tags(
@@ -749,12 +795,14 @@ def _answer_aggregate(
                     "concise and straight: if the question assumes a trend or a "
                     "cause the numbers don't show, say so plainly, and if "
                     "they do show it, just answer. "
+                    f"{_FOLLOW_UP + ' ' if convo else ''}"
                     f"{_READER_VOICE} {_FAST_ANSWER_FORMAT}{writer}"
                 ),
             },
+            *convo,
             {
                 "role": "user",
-                "content": f"{earlier}Question: {question}\n\nStatistics:\n{fact_block}",
+                "content": _asked(question, asked, f"Statistics:\n{fact_block}", bool(convo)),
             },
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
@@ -1523,9 +1571,10 @@ def _fast_attempt(
     on_thinking: TextSink | None = None,
     clock: _Clock | None = None,
     today: date | None = None,
-    earlier: str = "",
+    convo: Sequence[dict[str, str]] = (),
+    asked: str = "",
 ) -> str | None:
-    """`earlier` is _earlier_block for a follow-up."""
+    """`convo` is _conversation for a follow-up, and `asked` the message as typed."""
     hold = _HoldUntilAnswer(on_text) if on_text else None
     response = _chat(
         client,
@@ -1539,7 +1588,8 @@ def _fast_attempt(
                     "describe the people, places and topics the journal "
                     "links to, and carry no dates. Each item names the file "
                     "it comes from; folder and file names can say what it is "
-                    f"about. {_RECORD} {_STRAIGHT} Mention the dates or "
+                    f"about. {_RECORD} {_STRAIGHT} "
+                    f"{_FOLLOW_UP + ' ' if convo else ''}Mention the dates or "
                     "[[note names]] your answer draws on. "
                     f"{_today_line(today or date.today())} "
                     f"{_READER_VOICE} {_FAST_ANSWER_FORMAT} "
@@ -1548,7 +1598,8 @@ def _fast_attempt(
                     f"with exactly the single word INSUFFICIENT.{writer}"
                 ),
             },
-            {"role": "user", "content": f"{earlier}Question: {question}\n\n{context}"},
+            *convo,
+            {"role": "user", "content": _asked(question, asked, context, bool(convo))},
         ],
         {"temperature": SYNTHESIS_TEMPERATURE},
         hold,
@@ -1581,12 +1632,14 @@ def _precise_reanalysis(
     clock: _Clock | None = None,
     plan: QueryPlan | None = None,
     today: date | None = None,
-    earlier: str = "",
+    convo: Sequence[dict[str, str]] = (),
+    asked: str = "",
     before: Sequence[str] = (),
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     """`plan` says whether the question wants the record or a judgment, and
-    whether it's about now. `earlier` is _earlier_block for a follow-up, and
-    `before` what _lead_up gives a question about now."""
+    whether it's about now. `convo` is _conversation for a follow-up and
+    `asked` the message as typed, and `before` what _lead_up gives a question
+    about now."""
     judging = plan is not None and plan.wants == "judgment"
     current = plan is not None and plan.current
     day = today or date.today()
@@ -1648,7 +1701,7 @@ def _precise_reanalysis(
         "notes describe the people, places and topics the journal "
         "links to, and carry no dates. Each one names the file it "
         "comes from; folder and file names can say what it is "
-        f"about. {approach} {_STRAIGHT} Mention "
+        f"about. {approach} {_STRAIGHT} {_FOLLOW_UP + ' ' if convo else ''}Mention "
         "the dates or [[note names]] the answer draws on. "
         f"{_today_line(day)} {_READER_VOICE} "
         f"{_PRECISE_ANSWER_FORMAT}{missing}{writer}"
@@ -1662,9 +1715,10 @@ def _precise_reanalysis(
         blocks = [b for _, b in kept_notes] + lead_up + [b for _, b in by_date]
         return [
             {"role": "system", "content": system},
+            *convo,
             {
                 "role": "user",
-                "content": f"{earlier}Question: {question}\n\n" + "\n\n".join(blocks),
+                "content": _asked(question, asked, "\n\n".join(blocks), bool(convo)),
             },
         ]
 
@@ -1716,19 +1770,22 @@ def answer(
     only: store.EntryFilter | None = None,
     on_text: TextSink | None = None,
     on_thinking: TextSink | None = None,
-    earlier: Sequence[tuple[str, str]] = (),
+    earlier: Sequence[Turn] = (),
+    asked: str | None = None,
 ) -> Answer:
     """`since`, `until` and `only` are what the person asked for, so they
     override whatever the router reads into the question. With `on_text`, the
     answer is handed over piece by piece as the model writes it, and with
     `on_thinking` so is the model's reasoning.
-    `earlier` is the conversation a follow-up follows, as (question, answer)
-    pairs, so the answer adds to the last one instead of saying it again.
+    For a follow-up, `question` is what the journal is searched for, `asked`
+    the message as it was typed, and `earlier` the turns before it as
+    (message, answer) or (message, answer, what was searched for). The model
+    that answers gets those turns and the message itself, not the rewrite.
     The answer's timings say how long each step took."""
     clock = _Clock()
     result = _answer(
         question, config, conn, client, today, on_stage, since, until, only, on_text,
-        on_thinking, clock, _earlier_block(earlier),
+        on_thinking, clock, _conversation(earlier), asked or question,
     )
     writer = {
         "fast_summary": config.ollama.fast_model,
@@ -1751,7 +1808,8 @@ def _answer(
     on_text: TextSink | None,
     on_thinking: TextSink | None,
     clock: _Clock,
-    earlier: str,
+    convo: list[dict[str, str]],
+    asked: str,
 ) -> Answer:
     today = today or date.today()
     writer = profile.context(conn, config)
@@ -1771,7 +1829,7 @@ def _answer(
         on_stage("Putting the numbers into words...")
         return _answer_aggregate(
             question, plan, config, conn, client, named, only, on_text, writer,
-            on_stage, on_thinking, clock, earlier,
+            on_stage, on_thinking, clock, convo, asked,
         )
 
     about = _named_notes(conn, plan, named)
@@ -1818,7 +1876,7 @@ def _answer(
         )
         fast_answer = _fast_attempt(
             question, context, config, client, on_text, writer, on_stage, on_thinking, clock,
-            today, earlier,
+            today, convo, asked,
         )
         if fast_answer is not None:
             return _finalize(
@@ -1843,7 +1901,8 @@ def _answer(
         clock=clock,
         plan=plan,
         today=today,
-        earlier=earlier,
+        convo=convo,
+        asked=asked,
         before=before,
     )
     return _finalize(

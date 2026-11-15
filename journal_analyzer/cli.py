@@ -643,7 +643,7 @@ def ask(
         assert stream is not None
         _print_answer(conn, result, "answered by stage", streamed=stream.started)
         if standalone != question:
-            console.print(f"[dim]Read as: {escape(standalone)}[/dim]")
+            console.print(f"[dim]Searched for: {escape(standalone)}[/dim]")
         if sources:
             _print_reading(conn, result)
 
@@ -672,8 +672,9 @@ def _earlier_turns(cfg: Config, after: str) -> list[history.Kept]:
     return earlier
 
 
-def _turns(earlier: list[history.Kept]) -> list[tuple[str, str]]:
-    turns = [(k.standalone or k.question, k.answer) for k in earlier]
+def _turns(earlier: list[history.Kept]) -> list[tuple[str, str, str]]:
+    # as typed, with how a follow-up was searched for beside it
+    turns = [(k.question, k.answer, k.standalone or "") for k in earlier]
     return turns[-query.CHAT_HISTORY_TURNS:]
 
 
@@ -682,15 +683,16 @@ def _answer_turn(
     conn: sqlite3.Connection,
     client: OllamaClient,
     question: str,
-    turns: list[tuple[str, str]],
+    turns: list[tuple[str, str, str]],
     since: date | None,
     until: date | None,
     only: store.EntryFilter | None,
     status: Status,
     stream: _Streamed | None,
 ) -> tuple[Answer, str]:
-    """The answer, and the question as it was read once earlier turns were
-    taken into account."""
+    """The answer, and what the journal was searched for once earlier turns
+    were taken into account. The answer itself is written from the question
+    as typed and those turns."""
     started = time.monotonic()
     standalone = query.contextualize_question(question, turns, cfg, client, profile.names(conn, cfg))
     rewriting = time.monotonic() - started
@@ -700,7 +702,7 @@ def _answer_turn(
         since=since, until=until, only=only, on_text=stream,
         # the page folds it away, but printed it can run to pages
         on_thinking=stream.think if stream is not None and cfg.ollama.show_thinking else None,
-        earlier=turns,
+        earlier=turns, asked=question,
     )
     if turns:
         result = query.with_step(result, "reading your follow-up", rewriting)
@@ -2298,7 +2300,7 @@ def history_cmd(
                 details.append(f"only {found.scope}")
             console.print(f"[dim]{escape('; '.join(details))}[/dim]")
             if found.standalone:
-                console.print(f"[dim]read as: {escape(found.standalone)}[/dim]")
+                console.print(f"[dim]searched for: {escape(found.standalone)}[/dim]")
             console.print()
             console.print(escape(found.answer))
             by = f", by {found.model}" if found.model else ""
@@ -2416,8 +2418,8 @@ def _ask_loop(
         _print_answer(conn, result, "stage", streamed=stream.started)
         last = result
         history.record(cfg, question, result, "ask", conversation, standalone, scope)
-        # keep the rewritten question so the next follow-up can build on it
-        turns.append((standalone, result.text))
+        # as typed, and how it was searched for so the next follow-up can build on it
+        turns.append((question, result.text, standalone if standalone != question else ""))
         del turns[: -query.CHAT_HISTORY_TURNS]
 
 

@@ -145,7 +145,7 @@ def test_stats_points_out_entries_dated_in_the_future(tmp_path, config, conn):
     assert "2024-01-15.md" not in output
 
 
-def test_chat_follow_ups_build_on_the_rewritten_questions(
+def test_chat_follow_ups_build_on_how_earlier_ones_were_searched_for(
     tmp_path, config, conn, fake_client, monkeypatch
 ):
     rewrites = {"and April?": "How was April 2024?", "and May?": "How was May 2024?"}
@@ -166,8 +166,8 @@ def test_chat_follow_ups_build_on_the_rewritten_questions(
     )
     assert result.exit_code == 0, result.output
     assert len(transcripts) == 2
-    assert "User: How was April 2024?" in transcripts[-1]
-    assert "User: and April?" not in transcripts[-1]
+    # the turn as typed, with what it was searched for so "and May?" can be placed
+    assert "User: and April?\n(searched for as: How was April 2024?)\n" in transcripts[-1]
 
 
 def test_ask_lists_what_the_answer_read(tmp_path, config, conn, fake_client, monkeypatch):

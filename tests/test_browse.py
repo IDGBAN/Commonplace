@@ -635,7 +635,7 @@ def test_ask_follow_ups_are_rewritten_first(browser, fake_client):
     answered = []
 
     def chat(model, messages):
-        answered.append(messages[-1]["content"])
+        answered.append(messages)
         return "Quiet."
 
     fake_client.structured["FollowUp"] = follow_up
@@ -643,8 +643,30 @@ def test_ask_follow_ups_are_rewritten_first(browser, fake_client):
     events = _events(browser.ask("and Feb?", history=[["How was January?", "Calm."]]))
     assert ("rewritten", {"question": "How was February 2024?"}) in events
     assert events[-1][1]["question"] == "How was February 2024?"
-    # the answer is written knowing what was said before, so it doesn't say it again
-    assert "You answered: Calm." in answered[0]
+    # the rewrite is what's searched for; the answer is written from the
+    # conversation and the follow-up as it was typed
+    _system, *turns, last = answered[0]
+    assert turns == [
+        {"role": "user", "content": "How was January?"},
+        {"role": "assistant", "content": "Calm."},
+    ]
+    assert last["content"].startswith(
+        "and Feb?\n\nFrom the journal, looked up for this message "
+        "(searched for: How was February 2024?):"
+    )
+
+
+def test_ask_takes_turns_with_what_they_were_searched_for(browser, fake_client):
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    seen = []
+    fake_client.structured["FollowUp"] = lambda model, messages: seen.append(messages[-1]["content"]) or FollowUp()
+    events = _events(browser.ask("and March?", history=[
+        ["How was January?", "Calm."], ["and Feb?", "Quiet.", "How was February 2024?"],
+    ]))
+    assert events[-1][0] == "answer"
+    assert "User: and Feb?\n(searched for as: How was February 2024?)\nAssistant: Quiet." in seen[0]
+    body = browser.post("/api/ask", {"q": "and?", "history": [["a", "b", "c", "d"]]}, status=400)
+    assert "couldn't be read" in body["error"]
 
 
 def test_ask_reports_problems_inside_the_stream(browser, fake_client):

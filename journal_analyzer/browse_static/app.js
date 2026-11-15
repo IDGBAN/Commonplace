@@ -2223,10 +2223,11 @@ const STAGE_LABELS = {
   precise_raw: "from the full text of the entries",
   retrieval_empty: "nothing matched",
 };
-// matches query.CHAT_HISTORY_TURNS and query.LAST_ANSWER_CHARS, the most of an
-// answer a follow-up is read against; the server cuts the older ones shorter
+// matches query.CHAT_HISTORY_TURNS. Answers go back nearly whole, since the
+// model that answers a follow-up reads the conversation itself; the server
+// decides how much of the older ones there's room for.
 const HISTORY_TURNS = 6;
-const HISTORY_ANSWER_CHARS = 4000;
+const HISTORY_ANSWER_CHARS = 12000;
 
 // what an answer can be kept to, as /api/ask and the entries page name them
 const SCOPE_KEYS = ["note", "tag", "group", "from", "to"];
@@ -2371,7 +2372,7 @@ async function runTurn(turn, resume = false) {
   const history = ask.turns
     .filter((t) => t.status === "done")
     .slice(-HISTORY_TURNS)
-    .map((t) => [t.rewritten || t.question, t.answer.text.slice(0, HISTORY_ANSWER_CHARS)]);
+    .map((t) => [t.question, t.answer.text.slice(0, HISTORY_ANSWER_CHARS), t.rewritten || ""]);
   Object.assign(turn, { status: "running", stage: resume ? "Picking the answer up again…" : "Starting…" });
   const question = turn.question;
   const controller = new AbortController();
@@ -2599,7 +2600,7 @@ function thinkingView(turn) {
 function turnView(turn, scale, index) {
   const parts = [h("p", { class: "turn-q" }, turn.question)];
   if (turn.scope) parts.push(h("p", { class: "turn-rewrite" }, `${turn.scope.label}.`));
-  if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, turn.rewritten)));
+  if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Searched for: ", h("q", {}, turn.rewritten)));
   if (turn.status !== "failed") parts.push(thinkingView(turn));
   if (turn.status === "queued") {
     const ahead = ask.turns.slice(0, index).filter((t) => t.status === "running" || t.status === "queued").length;
@@ -2850,7 +2851,7 @@ function keptTurn(k) {
 
 function keptAnswer(k) {
   return [
-    k.standalone ? h("p", { class: "turn-rewrite" }, "Read as: ", h("q", {}, k.standalone)) : null,
+    k.standalone ? h("p", { class: "turn-rewrite" }, "Searched for: ", h("q", {}, k.standalone)) : null,
     h("div", { class: "turn-answer md" }, md(answerBody(k.answer))),
     sourceChips(k),
     h("p", { class: "turn-meta" }, `Answered ${STAGE_LABELS[k.stage] || k.stage}${byText(k.model)}${tookText(k.timings)}.`),

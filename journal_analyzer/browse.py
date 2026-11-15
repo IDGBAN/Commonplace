@@ -818,7 +818,7 @@ def search(req: Request) -> Json:
     }
 
 
-def _ask_params(body: Json) -> tuple[str, list[tuple[str, str]]]:
+def _ask_params(body: Json) -> tuple[str, list[tuple[str, ...]]]:
     asked = body.get("q")
     question = asked.strip() if isinstance(asked, str) else ""
     if not question:
@@ -830,11 +830,12 @@ def _ask_params(body: Json) -> tuple[str, list[tuple[str, str]]]:
         )
     raw = body.get("history") or []
     if not isinstance(raw, list) or not all(
-        isinstance(turn, list) and len(turn) == 2 and all(isinstance(x, str) for x in turn)
+        # the question as typed and its answer, then what a follow-up was searched for
+        isinstance(turn, list) and len(turn) in (2, 3) and all(isinstance(x, str) for x in turn)
         for turn in raw
     ):
         raise ApiError(HTTPStatus.BAD_REQUEST, "The conversation so far couldn't be read.")
-    history = [(q, a) for q, a in raw][-query.CHAT_HISTORY_TURNS:]
+    history = [tuple(turn) for turn in raw][-query.CHAT_HISTORY_TURNS:]
     return question, history
 
 
@@ -1277,7 +1278,7 @@ class _Handler(BaseHTTPRequestHandler):
                         since=since, until=until, only=only,
                         on_text=lambda text: send("text", {"text": text}),
                         on_thinking=lambda text: send("thinking", {"text": text}),
-                        earlier=turns,
+                        earlier=turns, asked=question,
                     )
                     if turns:
                         result = query.with_step(result, "reading your follow-up", rewriting)
