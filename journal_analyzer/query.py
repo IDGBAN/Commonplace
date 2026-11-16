@@ -10,6 +10,10 @@ precise model, which is told to reason from the facts in the journal rather
 than report what the writer said about it. One about how things stand now or
 what to do next reads the latest days and the notes about goals and plans,
 since a search for its words would find nothing to the point.
+
+The precise model thinks before a judgment, a count or sum, and a follow-up,
+and answers a plain lookup without it. A judgment reads more days than a
+lookup, and a count over a stretch of days reads all of them.
 """
 
 from __future__ import annotations
@@ -41,6 +45,12 @@ from .ollama_client import REPLY_TOKENS, SYNTHESIS_TEMPERATURE, OllamaClient, pr
 console = Console(stderr=True)
 
 TOP_K = 8
+# A verdict or a "why does this keep happening" rests on days spread across
+# the journal, and the eight nearest the question's words left most of them
+# out. A count or a sum over a stretch of days needs every one of them.
+JUDGMENT_TOP_K = 16
+COUNTED_RANGE_DAYS = 45
+COUNTED_TOP_K = 45
 # characters in the reading bar
 PROGRESS_WIDTH = 12
 # shown when the model ends without writing anything
@@ -127,7 +137,15 @@ _FAST_ANSWER_FORMAT = f"{_ANSWER_FORMAT} No headings or tables."
 _PRECISE_ANSWER_FORMAT = (
     f"{_ANSWER_FORMAT} Only a long answer with several distinct parts gets "
     "headings, and only a comparison of the same things across periods gets a "
-    "table."
+    "table. Stop when the question is answered: no summary at the end that "
+    "says it again."
+)
+# Left to itself it wrote [[Entry 2026-10-01]] and [[Luke (people)]], which
+# link to nothing.
+_CITING = (
+    "Where the answer rests on a day, give its date in the sentence, as a "
+    "plain date, and name a note by its title alone in double brackets, "
+    "like [[Ana]]."
 )
 
 # The journal is good evidence of what happened and of what its writer
@@ -144,15 +162,28 @@ _STRAIGHT = (
     "stranger, before you look at which way the writer or the question "
     "leans. A view isn't true because it's written there or because the "
     'question expects a yes ("..., didn\'t I?" is still a question), and it '
-    "isn't wrong because it's theirs. Then say what you found. If it "
-    "matches their view, say it holds and leave it there. If it doesn't, "
-    "say so plainly and say why, once, as firmly as it matters and no more. "
-    "If reasonable people would differ, say that. Don't flatter or agree to "
-    "be agreeable, and don't hunt for faults, pile on, or disagree to show "
-    "independence. Answer the question that was asked. The material covers "
-    "more than it does: use the parts that are about it, keep who did and "
-    "said what exactly as written, and leave out other troubles, advice and "
-    "next steps nobody asked for unless they change the answer."
+    "isn't wrong because it's theirs. What they say about themselves in "
+    'general ("I\'ve been consistent", "I\'m just a bad sleeper") is a view '
+    "too: check it against what the days show before you repeat it. Then "
+    "say what you found. If it matches their view, say it holds and leave "
+    "it there: the reason in a few sentences, no list of what to do next. "
+    "If it doesn't, say so plainly and say why, once, as firmly as it "
+    "matters and no more. If they were partly right, say where they are "
+    "right and where they aren't rather than picking a side. If reasonable "
+    "people would differ, say that. Where they got something wrong that "
+    "can still be put right, or are dealing with a problem, finish with "
+    "what would fix it: the one or two things most worth doing, about this "
+    "matter only, and where someone was wronged, undoing the harm itself "
+    "(setting the record straight with whoever was misled) as well as "
+    "saying sorry. Don't flatter or agree to be agreeable, and don't hunt "
+    "for faults, pile on, or disagree to show independence. Answer the "
+    "question that was asked. The material covers more than it does: use "
+    "the parts that are about it, don't explain a feeling or an event by a "
+    "cause the material doesn't show, keep who did and said what, and "
+    "every number, time and date, exactly as written, work out any count, "
+    "sum or rate step by step and check it before you state it, and leave out other "
+    "troubles, and advice and next steps about anything else, unless they "
+    "change the answer."
 )
 
 # For questions that want the journal's own words. The router gets some
@@ -177,28 +208,70 @@ _JUDGMENT = (
     "overturn it. Work it out: pick the facts that matter, connect facts "
     "from different days and notes where they bear on each other (causes, "
     "patterns, contradictions, consequences), bring in what you know about "
-    "the world, and reach your own conclusion. Lead with a direct "
-    "answer, as sure as the facts allow and no surer, then give the "
-    "reasoning with the facts and dates it rests on. If the "
-    "material lacks a fact the answer turns on, say what's missing and "
-    "answer as far as general knowledge goes rather than guessing about "
-    "their life."
+    "the world, and reach your own conclusion. When the question is who "
+    "was right or whose fault something was, first work through, to "
+    "yourself, what each person did and failed to do, the asker included: "
+    "what they knew, what they said, and what they could have said or done "
+    "and didn't. A thing left unsaid or undone that would have changed the "
+    "outcome is part of the cause. Then check the verdict by asking "
+    "whether you would give the same one had the other person written "
+    "these entries. None of that working goes in the answer, only the "
+    "verdict and the facts it turns on. Open with the verdict itself in a "
+    "few words (yes, no, partly, or what it is), as sure as the facts "
+    "allow and no surer, then give the reasoning with the facts and dates "
+    "it rests on. If the material lacks a fact the answer turns on, say "
+    "what's missing and answer as far as general knowledge goes rather "
+    "than guessing about their life. When they ask how to fix or get better at something, look "
+    "in their own days for the cause: what was different on the days it "
+    "went well and the days it didn't, what they did or left undone. If "
+    "the days show one, say it and build the advice on it. If they don't, "
+    "don't supply one: say in a line that the entries don't show why, and "
+    "go to the plan. Either way give a few concrete steps that fit their "
+    "situation, the one that matters most first, rather than a list anyone "
+    "could be given, and use only what the material says about that "
+    "situation. No invented particulars (who holds what, what a task "
+    "needs, what must have got in the way); a step that depends on "
+    "something the material doesn't say is put as an if."
+)
+
+# Goes after the material, where it's the last thing read. A week of entries
+# holds a sore leg, a bad night and a row with a colleague, and told only in
+# the instructions above to leave them out, the model still made each one a
+# cause of whatever was asked about.
+_LAST_WORD = (
+    "Now answer what was asked, with what would fix it if it's a problem "
+    "they can do something about, and only that. Something else going on in "
+    "the same days is a cause of it only when the days show that (the one "
+    "comes with the other time after time, or an entry says so), not "
+    "because it happened in the same week. Being tired, hurt, busy or on "
+    "bad terms with someone is not why a thing went wrong unless an entry "
+    "says it was. Otherwise leave it out. Give "
+    "nobody a part in it that the entries don't give them."
 )
 
 # on top of _JUDGMENT, when the question is what to do next
 _ADVICE = (
-    "If the question is what to do, be specific: name concrete things for "
-    "the day or period asked about, drawn from what the latest entries show "
-    "is unfinished, coming up, slipping or going well, and from the goals "
-    "and plans in the notes. Say which matters most and why."
+    "If the question is what to do, be specific. An open one (what to do "
+    "tomorrow, what to focus on) gets concrete things for the day or period "
+    "asked about, drawn from what the latest entries show is unfinished, "
+    "coming up, slipping or going well, and from the goals and plans in the "
+    "notes: a handful at most, each said once in a line or two with its "
+    "reason, the one that matters most first, and a line on what can wait. "
+    "It should read in under a minute. One about a single matter (a sore "
+    "leg, a loan) gets advice on that matter only, not on the rest of the "
+    "week."
 )
 
 _ROUTER_SYSTEM = """You are a query router for a personal journal search tool.
 Today's date is {today}. The journal has nothing written after today.
 Classify the question and extract constraints:
-- intent: "aggregate" for statistics over time (mood trends, tag frequencies,
-  counts); "factual" for specific facts/events; "narrative" for open-ended
-  summaries or stories about a period.
+- intent: "aggregate" only for statistics the index already holds: mood over
+  time, how often a tag, person or place comes up, averages of numbers the
+  entries record. "factual" for specific facts/events, and for counting or
+  adding up things that happened ("how many times did I run in May", "how far
+  in total", "how much did I spend"): no statistic holds those, the entries
+  have to be read. "narrative" for open-ended summaries or stories about a
+  period.
 - date_from / date_to: absolute ISO dates of the entries to read. Convert
   relative expressions ("last March", "this winter", "two weeks ago") to
   absolute dates using today's date. Never give a date after today. Use null
@@ -210,7 +283,8 @@ Classify the question and extract constraints:
   full-text search. Exclude generic stop words.
 - needs_raw_text: true only if answering will likely require reading full
   entries rather than one-line summaries (e.g. asking for exact details,
-  quotes, or specifics unlikely to survive summarization).
+  quotes, counts or sums of things that happened, or specifics unlikely to
+  survive summarization).
 - wants: "record" when the journal's own words are the answer: what happened,
   when, with whom, or what the writer themselves thought, felt or said ("how
   do I feel about X", "what did I write about Y"). "judgment" when the writer
@@ -220,7 +294,14 @@ Classify the question and extract constraints:
 - current: true when the question is about how things stand now or what to do
   next ("what should I do tomorrow", "what should I focus on this week", "how
   am I doing lately", "what am I neglecting"), and not about a subject or a
-  past period to search for. The latest entries are read for these.
+  past period to search for. The latest entries are read for these, and
+  nothing older, so a question about why something keeps happening, or about
+  a habit or pattern ("why do I keep sleeping badly", "do I always argue with
+  Sam"), is not current: its evidence is spread over the whole journal. Nor
+  is a question about one subject, even when it asks what to do ("what can I
+  do to sleep better", "how do I fix things with Sam", "should I worry about
+  my knee", "was I right to skip the run"): that is searched for by its
+  subject. Current is for the open ones, about everything at once.
 - background: for a judgment or current question, up to five subjects whose
   notes would help beyond the question's own words, such as goals, plans,
   habits and things to improve for "what should I do tomorrow". Empty
@@ -272,8 +353,10 @@ _FOLLOW_UP = (
     "already said: build on it. Where they push back, take their point on "
     "its merits, and change your answer if they're right and only then. "
     "Something they tell you in a message that the material doesn't show is "
-    "their account: reason with it as that, and don't say the journal "
-    "confirms it."
+    "their account: take it as given unless the material contradicts it, "
+    "and work out what it changes and what it leaves as it was. Don't wave "
+    "it away for not being written down, and don't say the journal confirms "
+    "it."
 )
 
 # (the message as typed, the answer), then how it was searched for if it was rewritten
@@ -349,6 +432,30 @@ def _conversation(earlier: Sequence[Turn]) -> list[dict[str, str]]:
     return kept
 
 
+# the days the last answer's Sources line links, most of which a search for
+# the follow-up's own words won't find again
+CARRIED_DAYS = 8
+_SOURCE_DAY_RE = re.compile(r"\[\[(\d{4}-\d{2}-\d{2})(?:#[^\]]*)?\]\]")
+
+
+def _days_cited(earlier: Sequence[Turn]) -> list[date]:
+    """The days the latest answer cited, so a follow-up is answered with
+    them in front of the model again."""
+    if not earlier:
+        return []
+    _asked_then, answer, _searched = _turn(earlier[-1])
+    line = _SOURCES_LINE_RE.search(answer)
+    if line is None:
+        return []
+    days: dict[date, None] = {}
+    for found in _SOURCE_DAY_RE.findall(line.group(0)):
+        try:
+            days.setdefault(date.fromisoformat(found), None)
+        except ValueError:
+            continue
+    return list(days)[:CARRIED_DAYS]
+
+
 def _asked(question: str, asked: str, material: str, following: bool) -> str:
     """The last message an answering model gets. A follow-up goes in as it
     was typed, with what the journal was searched for beside the material."""
@@ -368,8 +475,21 @@ def _dated(entry_date: str, today: date) -> str:
 def _today_line(today: date) -> str:
     # an entry's "tomorrow" is the day after it was written, which a model
     # otherwise reads as the day after today
+    # spelled out, since a model asked about "tomorrow" on a Monday has
+    # answered for the Monday
+    ahead = today + timedelta(days=1)
+    # and the days after it, since "due Wednesday the 18th" was read as tomorrow
+    after = ", ".join(
+        f"{day:%A} {day.day}" for day in (today + timedelta(days=n) for n in range(2, 8))
+    )
+    # and the days just gone, for "he paid me on Saturday" in a message
+    gone = ", ".join(
+        f"{day:%A} {day.day}" for day in (today - timedelta(days=n) for n in range(1, 7))
+    )
     return (
-        f"Today is {today:%A}, {today.isoformat()}. Each entry was written on "
+        f"Today is {today:%A}, {today.isoformat()}, so tomorrow is {ahead:%A}, "
+        f"{ahead.isoformat()}, and then come {after}. The days just gone, latest "
+        f"first, were {gone}. Each entry was written on "
         'its own date, so words in it like "today" and "tomorrow" count from '
         "that date, not from today."
     )
@@ -409,8 +529,33 @@ _JUDGMENT_RE = re.compile(
     r"\b(?:what|how)\s+do\s+you\s+(?:think|reckon|make\s+of)\b|\bdo\s+you\s+think\b"
     r"|\bin\s+your\s+(?:opinion|view)\b|\bwhat\s+would\s+you\b"
     r"|\b(?:should|shouldn't|ought)\s+i\b"
+    # how to fix something is worked out, not looked up
+    r"|\b(?:how|what)\s+(?:do|can|could|should|would)\s+i\b(?!\s+(?:feel|think|say|write)\b)"
     r"|\b(?:is|was|were|are|am)\s+(?:it|that|this|i|we|he|she|they)\s+(?:\w+\s+)?"
-    r"(?:ethical|unethical|moral|immoral|right|wrong|fair|unfair|okay|ok|justified|reasonable)\b",
+    r"(?:ethical|unethical|moral|immoral|right|wrong|fair|unfair|okay|ok|justified|reasonable|fine|rude)\b"
+    # whose fault it was, or whether anyone at all was right, is a verdict too
+    r"|\b(?:fault|to\s+blame|blamed?|responsible|selfish|overreact\w*)\b"
+    r"|\b(?:is|was|were|are|am)\s+[^?.,]{1,60}?\s(?:right(?!\s+(?:by|next|beside|behind|there|here|now|after|before|away|at|on|in)\b)"
+    r"|wrong|fair|unfair|justified|reasonable|rude)\b"
+    # and so is checking something they claimed
+    r"|\b(?:like|as)\s+i\s+(?:said|thought|think|told|claimed|wrote)\b"
+    # "..., wasn't I?" and "so it's fine, right?"
+    r"|,\s*(?:right|no|is(?:n't)?\s+it|(?:was|did|do|am|are|have)(?:n't)?\s+i)\s*\?"
+    r"|\bso\s+(?:it's|it\s+is|that's|i'm|i\s+was)\s+(?:fine|ok|okay|alright|all\s+right)\b",
+    re.IGNORECASE,
+)
+# Counting and adding up are worked out too. Without thinking, ten runs
+# scattered through a month of entries came back as eight.
+_COUNTED_RE = re.compile(
+    r"\bhow\s+(?:many|much|far|long|often)\b|\b(?:in\s+total|total|altogether|add\s+up|sum|average)\b",
+    re.IGNORECASE,
+)
+# what the advice instructions are for
+_WHAT_TO_DO_RE = re.compile(
+    r"\b(?:should|shall|ought)\s+i\b|\bi\s+(?:should|ought)\b"
+    r"|\bwhat\s+(?:do|can|could|would)\s+i\s+do\b"
+    r"|\bwhat\s+to\s+(?:do|focus|work)\b|\b(?:focus|prioriti[sz]e|priorit(?:y|ies)|plan)\b"
+    r"|\bwhat(?:'s|\s+is)\s+next\b|\bnext\s+steps?\b",
     re.IGNORECASE,
 )
 
@@ -718,6 +863,7 @@ def _make_room(
     prompt: Callable[[Kept, Kept], list[dict[str, str]]],
     notes: Kept,
     entries: Kept,
+    role: str = "",
 ) -> tuple[Kept, Kept]:
     """Leaves out the least relevant notes, then the least relevant entries,
     until the prompt leaves the model room to think in the window it would
@@ -725,7 +871,7 @@ def _make_room(
     note it can do without costs the answer less than that. The most relevant
     note and entry always stay; when they alone don't leave room, nothing is
     left out and the window grows instead."""
-    think = client.think_room(model)
+    think = client.think_room(model, role)
     if not think:
         return notes, entries
     window = client.planned_window(model, prompt_tokens(prompt(notes, entries)) + REPLY_TOKENS)
@@ -876,6 +1022,14 @@ def _rerank(
             )
         return rows[:top_k]
     return [rows[item["id"]] for item in reranked[:top_k]]
+
+
+def _how_many(plan: QueryPlan) -> int:
+    """How many entries a search hands on for this question."""
+    lo, hi = plan.date_from, plan.date_to
+    if plan.needs_raw_text and lo and hi and (hi - lo).days <= COUNTED_RANGE_DAYS:
+        return COUNTED_TOP_K
+    return JUDGMENT_TOP_K if plan.wants == "judgment" else TOP_K
 
 
 def _embed_question(
@@ -1489,12 +1643,14 @@ def _chat(
     on_reading: Callable[[float, float], None] | None = None,
     clock: _Clock | None = None,
     role: str = "",
+    think: bool | None = None,
 ) -> str:
+    """`think` False answers without thinking whatever the config says."""
     if on_text is None:
         # a streamed call's phases split it into steps; this one is a single step
         if clock is not None:
             clock.start(f"{role} model")
-        return client.chat(model=model, messages=messages, options=options)
+        return client.chat(model=model, messages=messages, options=options, role=role, think=think)
     sink = on_text
 
     def written(text: str) -> None:
@@ -1504,7 +1660,8 @@ def _chat(
 
     return client.chat_stream(
         model, messages, _TrimStart(written), options=options,
-        on_phase=on_phase, on_thinking=on_thinking, on_reading=on_reading,
+        on_phase=on_phase, on_thinking=on_thinking, on_reading=on_reading, role=role,
+        think=think,
     )
 
 
@@ -1589,8 +1746,7 @@ def _fast_attempt(
                     "links to, and carry no dates. Each item names the file "
                     "it comes from; folder and file names can say what it is "
                     f"about. {_RECORD} {_STRAIGHT} "
-                    f"{_FOLLOW_UP + ' ' if convo else ''}Mention the dates or "
-                    "[[note names]] your answer draws on. "
+                    f"{_FOLLOW_UP + ' ' if convo else ''}{_CITING} "
                     f"{_today_line(today or date.today())} "
                     f"{_READER_VOICE} {_FAST_ANSWER_FORMAT} "
                     "If the material does not "
@@ -1690,7 +1846,10 @@ def _precise_reanalysis(
         for row, heading in used
     ]
     if judging:
-        approach = f"{_JUDGMENT} {_ADVICE if current else ''}".rstrip()
+        # only when it's asked for: given it anyway, "why do I sleep badly"
+        # came back with a to-do list for the week
+        advising = current and bool(_WHAT_TO_DO_RE.search(asked or question))
+        approach = f"{_JUDGMENT} {_ADVICE if advising else ''}".rstrip()
         missing = ""
     else:
         approach = _RECORD
@@ -1701,8 +1860,7 @@ def _precise_reanalysis(
         "notes describe the people, places and topics the journal "
         "links to, and carry no dates. Each one names the file it "
         "comes from; folder and file names can say what it is "
-        f"about. {approach} {_STRAIGHT} {_FOLLOW_UP + ' ' if convo else ''}Mention "
-        "the dates or [[note names]] the answer draws on. "
+        f"about. {approach} {_STRAIGHT} {_FOLLOW_UP + ' ' if convo else ''}{_CITING} "
         f"{_today_line(day)} {_READER_VOICE} "
         f"{_PRECISE_ANSWER_FORMAT}{missing}{writer}"
     )
@@ -1713,6 +1871,11 @@ def _precise_reanalysis(
     ) -> list[dict[str, str]]:
         by_date = sorted(kept_entries, key=lambda pair: pair[0]["entry_date"])
         blocks = [b for _, b in kept_notes] + lead_up + [b for _, b in by_date]
+        if judging:
+            # the date again, which by here is a long way back
+            blocks.append(
+                f"{_LAST_WORD} Today is {day:%A}, {day.isoformat()}.\n\nAsked: {asked or question}"
+            )
         return [
             {"role": "system", "content": system},
             *convo,
@@ -1722,9 +1885,15 @@ def _precise_reanalysis(
             },
         ]
 
-    kept_notes, kept_entries = _make_room(
-        client, config.ollama.precise_model, prompt, ranked_notes, ranked_entries
-    )
+    # Thinking is for what has to be worked out. Looking something up in the
+    # full text came out the same without it, in a fraction of the time.
+    kept_notes, kept_entries = ranked_notes, ranked_entries
+    # A follow-up thinks too: it has an earlier answer to square with.
+    thinking = judging or bool(convo) or bool(_COUNTED_RE.search(asked or question))
+    if thinking:
+        kept_notes, kept_entries = _make_room(
+            client, config.ollama.precise_model, prompt, ranked_notes, ranked_entries, "precise"
+        )
     used_notes = [row for row, _ in kept_notes]
     read_rows = [row for row, _ in kept_entries]
     messages = prompt(kept_notes, kept_entries)
@@ -1752,6 +1921,7 @@ def _precise_reanalysis(
         _reading_bar(on_stage, reading),
         clock,
         "precise",
+        None if thinking else False,
     ).strip() + omitted
     if on_text and omitted:
         on_text(omitted)
@@ -1785,7 +1955,7 @@ def answer(
     clock = _Clock()
     result = _answer(
         question, config, conn, client, today, on_stage, since, until, only, on_text,
-        on_thinking, clock, _conversation(earlier), asked or question,
+        on_thinking, clock, _conversation(earlier), asked or question, _days_cited(earlier),
     )
     writer = {
         "fast_summary": config.ollama.fast_model,
@@ -1810,14 +1980,23 @@ def _answer(
     clock: _Clock,
     convo: list[dict[str, str]],
     asked: str,
+    carried: Sequence[date] = (),
 ) -> Answer:
     today = today or date.today()
     writer = profile.context(conn, config)
     on_stage("Working out what you're asking...")
     clock.start("working out the question")
+    # A follow-up is rewritten for searching, and the rewrite can turn "so
+    # it's fine, right?" into a lookup, so the message as typed is read too.
+    wording = question if asked == question else f"{asked}\n{question}"
     plan = _settle(
-        _plan(question, config, client, today, profile.names(conn, config)), question, today
+        _plan(question, config, client, today, profile.names(conn, config)), wording, today
     )
+    if convo and "?" not in asked:
+        # A follow-up that tells rather than asks (a correction, something the
+        # journal doesn't have) is a point to reason with. Read as a lookup,
+        # it was answered "the journal doesn't record that".
+        plan = plan.model_copy(update={"wants": "judgment"})
     if since is not None or until is not None:
         plan = plan.model_copy(update={"date_from": since, "date_to": until})
     named = notes_named_in(question, conn)
@@ -1855,10 +2034,16 @@ def _answer(
         clock.start("searching")
         query_vector = _embed_question(question, config, conn, client)
         candidates = with_named_day(_retrieve(
-            question, plan, config, conn, client,
+            question, plan, config, conn, client, top_k=_how_many(plan),
             query_vector=query_vector, boost_note_ids=named, only=only, parts=found_parts,
         ))
         notes = _retrieve_notes(plan, conn, query_vector, about, candidates)
+    for day in carried:
+        if (since is None or day >= since) and (until is None or day <= until):
+            have = {r["id"] for r in candidates}
+            ids = [i for i in store.filtered_entry_ids(conn, day, day, only=only) if i not in have]
+            # after what was found for this message, which still comes first
+            candidates = candidates + store.entries_by_ids(conn, ids)
     if not candidates and not notes:
         return Answer(
             text="No journal entries or reference notes matched the question.",
@@ -1905,16 +2090,45 @@ def _answer(
         asked=asked,
         before=before,
     )
+    drawn = _days_drawn_on(text, used)
     return _finalize(
         text,
         "precise_raw",
-        cited_dates=[date.fromisoformat(r["entry_date"]) for r in used],
+        cited_dates=[date.fromisoformat(r["entry_date"]) for r in drawn],
         cited_notes=_notes_used(text, used_notes, about, _learned_names(conn, used_notes)),
         read_entries=[*(r["id"] for r in used), *lead_ids],
         read_notes=[r["id"] for r in used_notes],
         cited_parts=_cited_parts(used, found_parts),
         quoted=quotes.for_days(used, wanted, found_parts),
     )
+
+
+_MONTH_NAMES = "|".join(f"{name[:3]}(?:{name[3:]})?" for name in _MONTHS)
+_DAY_MENTION_RE = re.compile(
+    rf"\b(\d{{4}})-(\d{{2}})-(\d{{2}})\b"
+    rf"|\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_NAMES})\b"
+    rf"|\b({_MONTH_NAMES})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b",
+    re.IGNORECASE,
+)
+_MONTH_NUMBERS = {name[:3]: number for name, number in _MONTHS.items()}
+
+
+def _days_drawn_on(text: str, rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    """The entries whose dates the answer gives. A verdict reads sixteen days
+    and rests on three, and citing all sixteen buried those. An answer that
+    names no day cites what it read, as before."""
+    said: set[tuple[int, int]] = set()
+    for iso_year, iso_month, iso_day, day_a, month_a, month_b, day_b in _DAY_MENTION_RE.findall(text):
+        if iso_year:
+            said.add((int(iso_month), int(iso_day)))
+        elif (month_a or month_b) != "may":  # "I may 1 day"
+            month = _MONTH_NUMBERS[(month_a or month_b)[:3].lower()]
+            said.add((month, int(day_a or day_b)))
+    named = [
+        r for r in rows
+        if (int(r["entry_date"][5:7]), int(r["entry_date"][8:10])) in said
+    ]
+    return named or rows
 
 
 def _cited_parts(rows: list[sqlite3.Row], parts: dict[int, sqlite3.Row]) -> dict[str, str]:

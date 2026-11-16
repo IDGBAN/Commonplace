@@ -72,7 +72,7 @@ HELP: dict[str, tuple[str, str]] = {
     "ollama.fast_model": ("now", "Reads entries, summarizes notes and answers from summaries. Entries already read keep what the old model said."),
     "ollama.precise_model": ("now", "Writes digests, the profile and answers from full text."),
     "ollama.fast_model_think": ("now", "Whether the fast model thinks first. It makes reading entries a lot slower."),
-    "ollama.precise_model_think": ("now", "Whether the precise model thinks before answers and digests."),
+    "ollama.precise_model_think": ("now", "Whether the precise model thinks before digests and before answers that are a judgment, a count or a follow-up. Plain lookups never do."),
     "ollama.show_thinking": ("now", "Print a model's thinking in journal ask as it comes, before the answer. The Ask page always shows it."),
     "ollama.think_tokens": ("now", "How long a model may think, in tokens, before it's stopped and asked again without thinking."),
     "ollama.fast_num_ctx": ("now", "The fast model's context window. 0 means 4096, raised only when a prompt needs more."),

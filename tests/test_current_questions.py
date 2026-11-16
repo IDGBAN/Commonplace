@@ -86,7 +86,7 @@ def test_tomorrow_reads_the_past_week_in_order_not_whatever_matches(config, conn
     days = [f"### Entry 2024-06-{d:02d}" for d in range(6, 13)]
     assert [content.index(d) for d in days] == sorted(content.index(d) for d in days)
     assert query._JUDGMENT in system and query._ADVICE in system
-    assert "Today is Wednesday, 2024-06-12." in system
+    assert "Today is Wednesday, 2024-06-12, so tomorrow is Thursday, 2024-06-13, and then come Friday 14," in system
     # the question isn't searched for by meaning; only the background subjects are embedded
     assert fake_client.embed_calls[embeds:] == [", ".join(query._CURRENT_BACKGROUND)]
 

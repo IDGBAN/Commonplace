@@ -27,7 +27,9 @@ host = "http://localhost:11434"
 fast_model = "llama3.2:3b"
 precise_model = "qwen3:14b"
 # Thinking before answering. On a CPU it makes answers and digests several
-# times slower. The profile is always written without it.
+# times slower. The profile is always written without it, and so is a plain
+# lookup: in answers the precise model thinks before a judgment, a count or
+# sum, and a follow-up.
 fast_model_think = false
 precise_model_think = true
 # Print what a thinking model reasons before its answer in journal ask. It can
