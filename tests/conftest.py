@@ -62,6 +62,8 @@ class FakeOllamaClient:
             "NotePicks": NotePicks(numbers=[1, 2, 3, 4, 5]),
         }
         self.chat_calls: list[tuple[str, list[dict]]] = []
+        # the role and think override each chat was sent with
+        self.chat_asked: list[tuple[str, bool | None]] = []
         self.streamed_calls: list[str] = []
         self.structured_calls: list[tuple[str, str]] = []
         # the reply_tokens each schema was last asked for with
@@ -75,16 +77,17 @@ class FakeOllamaClient:
         self.vision_response = "Two people on a sandy beach at sunset."
         self.vision_calls: list[tuple[str, bytes]] = []
 
-    def chat(self, model, messages, options=None):
+    def chat(self, model, messages, options=None, role="", think=None):
         self.chat_calls.append((model, messages))
+        self.chat_asked.append((role, think))
         if callable(self.chat_response):
             return self.chat_response(model, messages)
         return self.chat_response
 
     def chat_stream(self, model, messages, on_text, options=None, on_phase=None, on_thinking=None,
-                    on_reading=None):
+                    on_reading=None, role="", think=None):
         # the same reply as chat, handed over a word at a time
-        full = self.chat(model, messages, options)
+        full = self.chat(model, messages, options, role, think)
         self.streamed_calls.append(model)
         if on_phase:
             on_phase("reading")
@@ -128,7 +131,7 @@ class FakeOllamaClient:
     def context_length(self, model):
         return self.context_lengths.get(model)
 
-    def think_room(self, model):
+    def think_room(self, model, role=""):
         return self.think_tokens
 
     def planned_window(self, model, tokens):

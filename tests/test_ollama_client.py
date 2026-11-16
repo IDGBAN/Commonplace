@@ -426,3 +426,26 @@ def test_model_names_match_across_case_and_the_latest_tag():
     assert ollama_client.same_model("Qwen3:14B", "qwen3:14b")
     # a bare name means llama3.2:latest, which isn't the :3b
     assert not ollama_client.same_model("llama3.2", "llama3.2:3b")
+
+
+def test_one_model_in_both_roles_thinks_for_the_precise_job(tmp_path, monkeypatch):
+    # going by the model's name gave the precise job the fast setting
+    inner = MagicMock()
+    inner.chat.return_value = _reply("ok")
+    client = _client_with(
+        tmp_path, monkeypatch, inner, precise_model="fake-fast", precise_model_think=True
+    )
+    client.chat("fake-fast", [], role="precise")
+    assert inner.chat.call_args.kwargs["think"] is True
+    assert client.think_room("fake-fast", "precise") == client._config.ollama.think_tokens
+    client.chat("fake-fast", [], role="fast")
+    assert inner.chat.call_args.kwargs["think"] is False
+    assert client.think_room("fake-fast", "fast") == 0
+
+
+def test_a_chat_can_turn_thinking_off_for_itself(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.return_value = _reply("ok")
+    client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
+    client.chat("fake-precise", [], role="precise", think=False)
+    assert inner.chat.call_args.kwargs["think"] is False

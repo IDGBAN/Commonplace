@@ -314,9 +314,10 @@ class OllamaClient:
             window *= 2
         return window
 
-    def think_room(self, model: str) -> int:
+    def think_room(self, model: str, role: str = "") -> int:
         """The tokens a call to this model keeps for thinking, 0 if it won't think."""
-        return self._config.ollama.think_tokens if self._thinking(model, self._think(model)) else 0
+        thinking = self._thinking(model, self._think(model, role))
+        return self._config.ollama.think_tokens if thinking else 0
 
     def _room(self, reply_tokens: int, thinking: bool) -> int:
         return reply_tokens + (self._config.ollama.think_tokens if thinking else 0)
@@ -363,8 +364,15 @@ class OllamaClient:
         chars = sum(len(m.get("content", "")) for m in messages)
         return chars / speed[0] / speed[1]
 
-    def _think(self, model: str) -> bool | None:
+    def _think(self, model: str, role: str = "") -> bool | None:
+        """`role` is "fast" or "precise" when the caller knows which job the
+        call is. One model can be set for both, and going by its name alone
+        then gave the precise job the fast setting, so it never thought."""
         roles = self._config.ollama
+        if role == "precise":
+            return roles.precise_model_think
+        if role == "fast":
+            return roles.fast_model_think
         if model == roles.fast_model:
             return roles.fast_model_think
         if model == roles.precise_model:
@@ -409,8 +417,12 @@ class OllamaClient:
         model: str,
         messages: list[dict[str, str]],
         options: dict[str, Any] | None = None,
+        role: str = "",
+        think: bool | None = None,
     ) -> str:
-        think = self._think(model)
+        """`think`, when given, overrides the *_model_think setting for this call."""
+        if think is None:
+            think = self._think(model, role)
         opts = self._sized(
             model, messages, options, self._room(REPLY_TOKENS, self._thinking(model, think))
         )
@@ -457,6 +469,8 @@ class OllamaClient:
         on_phase: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
         on_reading: Callable[[float, float], None] | None = None,
+        role: str = "",
+        think: bool | None = None,
     ) -> str:
         """Like chat, handing each piece of the reply to on_text as it arrives.
 
@@ -467,9 +481,11 @@ class OllamaClient:
         think_tokens is stopped and asked again without thinking, and on_phase
         hears "answering" when that happens. While the model reads, on_reading
         hears every second how long it has been reading and how long the same
-        amount took before, when this model has been timed.
+        amount took before, when this model has been timed. `think`, when
+        given, overrides the *_model_think setting for this call.
         """
-        think = self._stream_think(model, self._think(model))
+        if think is None:
+            think = self._stream_think(model, self._think(model, role))
         thinking = self._thinking(model, think)
         opts = self._sized(model, messages, options, self._room(REPLY_TOKENS, thinking))
         phase = on_phase or (lambda _phase: None)
