@@ -28,6 +28,9 @@ htmlcov/
 *.sqlite-wal
 *.sqlite-shm
 
+# What python -m evals keeps
+evals/.work/
+
 # Editors and OS
 .vscode/
 .idea/

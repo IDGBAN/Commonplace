@@ -433,6 +433,8 @@ python -m mypy
 
 Every Ollama call in the tests is mocked and nothing touches the network, so they run offline. pytest, ruff and mypy all come with the `dev` extra (`pip install -e ".[dev]"`).
 
+The tests can say a prompt was sent, not whether the answer it gets is any good. For that there's `python -m evals`: a made-up journal with facts planted in it and questions whose right answers are known (was I right, whose fault was it, how do I fix this, how many times did I run in October), put to the models in your config. Run it before and after changing a prompt, the router or the model, and read the answers side by side. It needs Ollama and takes minutes an answer, so pytest doesn't run it. Your own journal is never opened. See [evals/README.md](evals/README.md).
+
 ## Good to know
 
 - The vault is only ever opened for reading. Nothing gets written back to your notes.
