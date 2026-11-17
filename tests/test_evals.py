@@ -86,7 +86,7 @@ def test_a_run_keeps_each_answer_and_a_follow_up_gets_its_first_turn(work, eval_
     _system, asked_before, answered_before, _last = seen[-1]
     assert asked_before["content"] == BY_ID["owes"].question
     assert answered_before["content"] == "He owes £200."
-    assert said == ["owes_correction [0] precise_raw 0s, no tripwire"]
+    assert len(said) == 1 and re.fullmatch(r"owes_correction \[0\] precise_raw \d+s, no tripwire", said[0])
     shown = report.show(["try"], work=work)
     assert BY_ID["owes_correction"].want in shown and "He owes £150." in shown
     assert "owes_correction" in report.summary(["try"], work)

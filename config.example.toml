@@ -39,6 +39,14 @@ show_thinking = false
 # How long a thinking model may think before an answer, in tokens (256 and up).
 # More can mean better answers; on a CPU, 1000 tokens is several minutes.
 think_tokens = 2048
+# How much of the journal a judgment reads (was I right, why does this keep
+# happening, how do I fix it), in tokens of entry text. The most relevant
+# entries are taken until it's reached, at least 16 and at most 80, so short
+# entries mean more of them. A CPU reads 30 to 60 tokens a second, so 12000
+# is three to six minutes before the answer starts; raise it if you write
+# about the same things across many days. 0 reads 16 entries whatever their
+# length.
+read_tokens = 12000
 # The fast model always gets this window, so Ollama loads it once at that size
 # and there's room for the notes an entry links to. 0 means 4096, raised only
 # for prompts that need more; the context length set in the Ollama app isn't

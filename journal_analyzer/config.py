@@ -81,6 +81,10 @@ class OllamaConfig(BaseModel):
     # Tokens a thinking model may think for before an answer or a JSON reply.
     # Past it the model is stopped and asked again without thinking.
     think_tokens: int = Field(default=2048, ge=256)
+    # How much of the journal a judgment reads, in tokens of entry text. The
+    # most relevant entries are taken until it's reached, so short entries
+    # mean more of them. 0 goes by a count alone.
+    read_tokens: int = Field(default=12000, ge=0)
     # A fixed window means Ollama loads the model once at that size instead
     # of reloading whenever a prompt needs more room. 0 means 4096, raised
     # only for prompts that need it.

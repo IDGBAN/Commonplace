@@ -255,3 +255,59 @@ def test_a_follow_up_rereads_the_days_the_last_answer_cited(config, conn, fake_c
     assert quiet in result.read_entry_ids
     assert query._days_cited(earlier) == [date(2024, 3, 2), date(2024, 5, 20)]
     assert query._days_cited([("q", "No sources here.")]) == []
+
+
+def _row(text):
+    return {"raw_text": text}
+
+
+def test_a_judgment_reads_until_the_size_asked_for_not_a_count():
+    short = [_row("x" * 100) for _ in range(40)]
+    # the fewest first, then whatever still fits
+    assert len(query._within(short, 16, 3000)) == 30
+    assert len(query._within(short, 16, 500)) == 16
+    # one too long is passed over for the shorter ones after it
+    mixed = [_row("a" * 100), _row("b" * 5000), _row("c" * 100)]
+    assert query._within(mixed, 1, 300) == [mixed[0], mixed[2]]
+
+
+def test_read_tokens_only_sizes_a_judgment(config):
+    config.ollama.read_tokens = 1000
+    assert query._read_room(QueryPlan(intent="factual", wants="judgment"), config) == 3500
+    assert query._read_room(QueryPlan(intent="factual"), config) == 0
+    counted = QueryPlan(
+        intent="factual", wants="judgment", needs_raw_text=True,
+        date_from=date(2024, 10, 1), date_to=date(2024, 10, 31),
+    )
+    assert query._read_room(counted, config) == 0
+    config.ollama.read_tokens = 0
+    assert query._read_room(QueryPlan(intent="factual", wants="judgment"), config) == 0
+
+
+def test_a_judgment_on_short_entries_reads_more_of_them(config, conn, fake_client):
+    config.reranking.enabled = False
+    for n in range(30):
+        add_entry(conn, date(2024, 4, 1 + n), text=f"Argued with Ana again, day {n}.", summary="Argued", path=f"/vault/{n}.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual", wants="judgment", keywords=["Ana"])
+    fake_client.chat_response = "It's the handovers."
+    config.ollama.read_tokens = 0
+    by_count = query.answer("Why do I keep arguing with Ana?", config, conn, fake_client, today=TODAY)
+    assert len(by_count.read_entry_ids) == query.JUDGMENT_TOP_K
+    config.ollama.read_tokens = 12000
+    by_size = query.answer("Why do I keep arguing with Ana?", config, conn, fake_client, today=TODAY)
+    assert len(by_size.read_entry_ids) == 30
+
+
+def test_thinking_room_does_not_cut_back_what_read_tokens_asked_for(config, fake_client):
+    fake_client.think_tokens = 4000
+    notes = [({"id": 1}, "n" * 300)]
+    entries = [({"id": n}, "e" * 3000) for n in range(12)]
+
+    def prompt(kept_notes, kept_entries):
+        return [{"role": "user", "content": "".join(b for _, b in [*kept_notes, *kept_entries])}]
+
+    # about 12,100 tokens of prompt: a 16k window holds it and a reply, not the thinking too
+    _cut_notes, cut_entries = query._make_room(fake_client, "m", prompt, notes, entries)
+    assert len(cut_entries) < 12
+    kept_notes, kept_entries = query._make_room(fake_client, "m", prompt, notes, entries, keep=13000)
+    assert len(kept_entries) == 12 and kept_notes == notes

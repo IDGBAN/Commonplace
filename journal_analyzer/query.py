@@ -13,7 +13,8 @@ since a search for its words would find nothing to the point.
 
 The precise model thinks before a judgment, a count or sum, and a follow-up,
 and answers a plain lookup without it. A judgment reads more days than a
-lookup, and a count over a stretch of days reads all of them.
+lookup, as many as fit in [ollama] read_tokens, and a count over a stretch
+of days reads all of them.
 """
 
 from __future__ import annotations
@@ -40,7 +41,14 @@ from .models import (
     StructuredOutputError,
     Timing,
 )
-from .ollama_client import REPLY_TOKENS, SYNTHESIS_TEMPERATURE, OllamaClient, prompt_tokens
+from .ollama_client import (
+    CHARS_PER_TOKEN_ESTIMATE,
+    DEFAULT_CHARS_PER_TOKEN,
+    REPLY_TOKENS,
+    SYNTHESIS_TEMPERATURE,
+    OllamaClient,
+    prompt_tokens,
+)
 
 console = Console(stderr=True)
 
@@ -49,6 +57,11 @@ TOP_K = 8
 # the journal, and the eight nearest the question's words left most of them
 # out. A count or a sum over a stretch of days needs every one of them.
 JUDGMENT_TOP_K = 16
+# A count of entries says nothing about how much there is to read: sixteen
+# short ones are a page, and a subject written about on a hundred days has
+# barely been opened. So a judgment keeps taking the next most relevant entry
+# until [ollama] read_tokens of text is reached, from at most this many.
+READ_POOL = 80
 COUNTED_RANGE_DAYS = 45
 COUNTED_TOP_K = 45
 # characters in the reading bar
@@ -864,17 +877,23 @@ def _make_room(
     notes: Kept,
     entries: Kept,
     role: str = "",
+    keep: int = 0,
 ) -> tuple[Kept, Kept]:
     """Leaves out the least relevant notes, then the least relevant entries,
     until the prompt leaves the model room to think in the window it would
-    get anyway. Thinking gets cut off when the window runs out, and a whole
+    get anyway. `keep` is how many tokens of prompt were asked for with
+    [ollama] read_tokens: the window grows to think beside that much, since
+    cutting it back here would undo the setting. Thinking gets cut off when the window runs out, and a whole
     note it can do without costs the answer less than that. The most relevant
     note and entry always stay; when they alone don't leave room, nothing is
     left out and the window grows instead."""
     think = client.think_room(model, role)
     if not think:
         return notes, entries
-    window = client.planned_window(model, prompt_tokens(prompt(notes, entries)) + REPLY_TOKENS)
+    whole = prompt_tokens(prompt(notes, entries))
+    window = client.planned_window(
+        model, max(whole + REPLY_TOKENS, min(whole, keep) + REPLY_TOKENS + think)
+    )
     kept_notes, kept_entries = list(notes), list(entries)
     while prompt_tokens(prompt(kept_notes, kept_entries)) + REPLY_TOKENS + think > window:
         if len(kept_notes) > 1:
@@ -1024,12 +1043,37 @@ def _rerank(
     return [rows[item["id"]] for item in reranked[:top_k]]
 
 
-def _how_many(plan: QueryPlan) -> int:
-    """How many entries a search hands on for this question."""
+def _counted(plan: QueryPlan) -> bool:
     lo, hi = plan.date_from, plan.date_to
-    if plan.needs_raw_text and lo and hi and (hi - lo).days <= COUNTED_RANGE_DAYS:
+    return bool(plan.needs_raw_text and lo and hi and (hi - lo).days <= COUNTED_RANGE_DAYS)
+
+
+def _how_many(plan: QueryPlan) -> int:
+    """How many entries a search hands on for this question, at the least."""
+    if _counted(plan):
         return COUNTED_TOP_K
     return JUDGMENT_TOP_K if plan.wants == "judgment" else TOP_K
+
+
+def _read_room(plan: QueryPlan, config: Config) -> int:
+    """The characters of entries a judgment reads up to, 0 when it goes by count."""
+    if plan.wants != "judgment" or _counted(plan):
+        return 0
+    return int(config.ollama.read_tokens * DEFAULT_CHARS_PER_TOKEN)
+
+
+def _within(rows: list[sqlite3.Row], least: int, room: int) -> list[sqlite3.Row]:
+    """The first `least` rows, then each later one that still fits in `room`
+    characters of full text. One too long to fit is passed over for the
+    shorter ones after it."""
+    kept = rows[:least]
+    used = sum(len(r["raw_text"]) for r in kept)
+    for row in rows[least:]:
+        size = len(row["raw_text"])
+        if used + size <= room:
+            kept.append(row)
+            used += size
+    return kept
 
 
 def _embed_question(
@@ -1052,13 +1096,18 @@ def _retrieve(
     boost_note_ids: list[int] | None = None,
     only: store.EntryFilter | None = None,
     parts: dict[int, sqlite3.Row] | None = None,
+    room: int = 0,
 ) -> list[sqlite3.Row]:
-    """`parts`, when given, collects the part of each entry found that matched best."""
+    """`parts`, when given, collects the part of each entry found that matched
+    best. With `room`, `top_k` is the fewest entries handed on, and more follow
+    in order of relevance until that many characters of them are read."""
     allowed = store.filtered_entry_ids(conn, plan.date_from, plan.date_to, plan.entities, only)
     if not allowed:
         return []
 
     fetch_k = max(RERANK_CANDIDATE_POOL, top_k) if config.reranking.enabled else top_k
+    if room:
+        fetch_k = max(fetch_k, READ_POOL)
 
     if query_vector is None:
         query_vector = _embed_question(question, config, conn, client)
@@ -1087,8 +1136,10 @@ def _retrieve(
     ranked = sorted(rows, key=lambda r: order.get(r["id"], len(order)))
 
     if config.reranking.enabled and len(ranked) > 1:
-        ranked = _rerank(question, ranked, config.reranking.model, top_k, best)
-    ranked = ranked[:top_k]
+        ranked = _rerank(
+            question, ranked, config.reranking.model, len(ranked) if room else top_k, best
+        )
+    ranked = _within(ranked, top_k, room) if room else ranked[:top_k]
     if parts is not None:
         parts.update({r["id"]: best[r["id"]] for r in ranked if r["id"] in best})
     return ranked
@@ -1892,7 +1943,11 @@ def _precise_reanalysis(
     thinking = judging or bool(convo) or bool(_COUNTED_RE.search(asked or question))
     if thinking:
         kept_notes, kept_entries = _make_room(
-            client, config.ollama.precise_model, prompt, ranked_notes, ranked_entries, "precise"
+            client, config.ollama.precise_model, prompt, ranked_notes, ranked_entries, "precise",
+            # in the units prompt_tokens counts in
+            keep=int(
+                config.ollama.read_tokens * DEFAULT_CHARS_PER_TOKEN / CHARS_PER_TOKEN_ESTIMATE
+            ) if judging else 0,
         )
     used_notes = [row for row, _ in kept_notes]
     read_rows = [row for row, _ in kept_entries]
@@ -2036,6 +2091,7 @@ def _answer(
         candidates = with_named_day(_retrieve(
             question, plan, config, conn, client, top_k=_how_many(plan),
             query_vector=query_vector, boost_note_ids=named, only=only, parts=found_parts,
+            room=_read_room(plan, config),
         ))
         notes = _retrieve_notes(plan, conn, query_vector, about, candidates)
     for day in carried:
