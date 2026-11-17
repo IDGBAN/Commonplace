@@ -240,6 +240,8 @@ def catalog(req: Request) -> Json:
     learned = serialize.learned_names(conn, [r["id"] for r in notes])
     return {
         "mood_scale": req.config.indexing.mood_scale_max,
+        # what the Ask page's effort and answer pickers start on
+        "answers": {"effort": req.config.answers.effort, "style": req.config.answers.style},
         "entries": [
             {"id": r["id"], "date": r["entry_date"], "mood": r["mood_score"],
              "words": r["word_count"], "summary": r["summary"]}
@@ -839,6 +841,21 @@ def _ask_params(body: Json) -> tuple[str, list[tuple[str, ...]]]:
     return question, history
 
 
+def _ask_manner(body: Json) -> tuple[str | None, str | None]:
+    """The effort and kind of answer picked for this question, None for the
+    config's own."""
+    picked: list[str | None] = []
+    for key, choices in (("effort", query.EFFORTS), ("style", query.STYLES)):
+        value = body.get(key)
+        if value in (None, ""):
+            picked.append(None)
+        elif isinstance(value, str) and value in choices:
+            picked.append(value)
+        else:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} is one of {', '.join(choices)}.")
+    return picked[0], picked[1]
+
+
 def _ask_scope(req: Request) -> tuple[store.EntryFilter | None, date | None, date | None]:
     """?note=, ?tag=, ?group= and ?from=/?to= keep an answer to some entries,
     like --about, --tag, --group, --since and --until on `journal ask`."""
@@ -1243,6 +1260,7 @@ class _Handler(BaseHTTPRequestHandler):
         config = self.server.config
         try:
             question, turns = _ask_params(body)
+            effort, style = _ask_manner(body)
             with closing(db.connect_readonly(config)) as conn:
                 only, since, until = _ask_scope(Request(config, conn, params, self.server.make_client))
                 scope = history.scope_text(conn, only, since, until)
@@ -1278,7 +1296,7 @@ class _Handler(BaseHTTPRequestHandler):
                         since=since, until=until, only=only,
                         on_text=lambda text: send("text", {"text": text}),
                         on_thinking=lambda text: send("thinking", {"text": text}),
-                        earlier=turns, asked=question,
+                        earlier=turns, asked=question, effort=effort, style=style,
                     )
                     if turns:
                         result = query.with_step(result, "reading your follow-up", rewriting)

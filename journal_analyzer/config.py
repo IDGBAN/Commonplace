@@ -265,6 +265,16 @@ class NotesConfig(BaseModel):
         return [name for name in (" ".join(n.casefold().split()) for n in v) if name]
 
 
+class AnswersConfig(BaseModel):
+    # How much work an answer gets unless the question says otherwise. quick
+    # reads eight entries and never thinks first; thorough reads twice
+    # [ollama] read_tokens, from the full text, and always thinks.
+    effort: Literal["quick", "balanced", "thorough"] = "balanced"
+    # What kind of answer is wanted. auto reads it from the question; record
+    # is what the journal says, verdict a judgment on it, advice what to do.
+    style: Literal["auto", "record", "verdict", "advice"] = "auto"
+
+
 class HistoryConfig(BaseModel):
     # keep your questions and their answers; off unless you turn it on
     enabled: bool = False
@@ -326,6 +336,7 @@ class Config(BaseModel):
     mcp: McpConfig = McpConfig()
     history: HistoryConfig = HistoryConfig()
     themes: ThemesConfig = ThemesConfig()
+    answers: AnswersConfig = AnswersConfig()
 
     @model_validator(mode="after")
     def _history_outside_vault(self) -> Config:

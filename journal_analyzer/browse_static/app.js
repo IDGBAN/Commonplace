@@ -2351,10 +2351,62 @@ async function readEvents(response, onEvent) {
   }
 }
 
+// How much work an answer gets and what kind of answer it is, picked under the
+// question box. Kept in this browser; unpicked, the config's own are used.
+const EFFORTS = [["quick", "Quick"], ["balanced", "Balanced"], ["thorough", "Thorough"]];
+const STYLES = [["auto", "Auto"], ["record", "What the journal says"], ["verdict", "A verdict"], ["advice", "What to do"]];
+const EFFORT_HINTS = {
+  quick: "Reads eight entries and answers without thinking first.",
+  balanced: "Thinks before a verdict, a count or a follow-up.",
+  thorough: "Reads twice as much, from the full text, and always thinks. Slow.",
+};
+
+function picked(key, choices) {
+  try {
+    const kept = localStorage.getItem(key);
+    return choices.some(([value]) => value === kept) ? kept : "";
+  } catch { return ""; }
+}
+
+function mannerPickers(defaults) {
+  const pick = (key, label, choices, fallback, hints) => {
+    const now = picked(key, choices) || fallback;
+    const select = h("select", { "aria-label": label },
+      choices.map(([value, text]) => h("option", { value, selected: value === now }, text)));
+    const said = () => { select.title = hints ? hints[select.value] : ""; };
+    said();
+    select.addEventListener("change", () => {
+      said();
+      // the config's own choice isn't kept, so changing the config still shows here
+      try {
+        if (select.value === fallback) localStorage.removeItem(key);
+        else localStorage.setItem(key, select.value);
+      } catch { /* not kept, then */ }
+    });
+    return h("label", { class: "manner-pick" }, h("span", {}, label), select);
+  };
+  return h("div", { class: "ask-manner" },
+    pick("ask-effort", "Effort", EFFORTS, defaults.effort, EFFORT_HINTS),
+    pick("ask-style", "Answer", STYLES, defaults.style));
+}
+
+// what a turn was asked with, when it wasn't the usual
+function mannerText(turn) {
+  const said = [];
+  const effort = EFFORTS.find(([value]) => value === turn.effort);
+  const style = STYLES.find(([value]) => value === turn.style);
+  if (effort && turn.effort !== "balanced") said.push(`${effort[1]} answer`);
+  if (style && turn.style !== "auto") said.push(`asked for: ${style[1].toLowerCase()}`);
+  return said.join(", ");
+}
+
 // A question asked while another is answering waits its turn, and goes once
 // the one before it is done, so it can follow up on that answer.
 function askQuestion(question) {
-  const turn = { question, status: "queued", scope: ask.scope };
+  const turn = {
+    question, status: "queued", scope: ask.scope,
+    effort: picked("ask-effort", EFFORTS), style: picked("ask-style", STYLES),
+  };
   ask.turns.push(turn);
   if (ask.controller) changed();
   else runTurn(turn);
@@ -2410,7 +2462,10 @@ async function runTurn(turn, resume = false) {
         response = again
           ? await fetch(`/api/ask/${turn.run}/events`, { headers: { Accept: "text/event-stream" }, signal: controller.signal })
           : await send(
-            "ask", { q: question, history, conversation: ask.conversation, ...scopeParams(turn.scope) },
+            "ask", {
+              q: question, history, conversation: ask.conversation, ...scopeParams(turn.scope),
+              ...(turn.effort ? { effort: turn.effort } : {}), ...(turn.style ? { style: turn.style } : {}),
+            },
             { signal: controller.signal, accept: "text/event-stream" },
           );
       } catch (err) {
@@ -2601,6 +2656,7 @@ function turnView(turn, scale, index) {
   const parts = [h("p", { class: "turn-q" }, turn.question)];
   if (turn.scope) parts.push(h("p", { class: "turn-rewrite" }, `${turn.scope.label}.`));
   if (turn.rewritten) parts.push(h("p", { class: "turn-rewrite" }, "Searched for: ", h("q", {}, turn.rewritten)));
+  if (mannerText(turn)) parts.push(h("p", { class: "turn-rewrite" }, `${mannerText(turn)}.`));
   if (turn.status !== "failed") parts.push(thinkingView(turn));
   if (turn.status === "queued") {
     const ahead = ask.turns.slice(0, index).filter((t) => t.status === "running" || t.status === "queued").length;
@@ -2717,7 +2773,7 @@ async function askView(_, params) {
     start, thread, earlier,
     h("div", { class: "composer" },
       scopeSlot, form,
-      h("div", { class: "ask-foot" }, hint, notifyToggle())));
+      h("div", { class: "ask-foot" }, hint, mannerPickers(cat.answers || { effort: "balanced", style: "auto" }), notifyToggle())));
 }
 
 // ---------------------------------------------------------------- earlier questions

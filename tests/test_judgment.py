@@ -311,3 +311,77 @@ def test_thinking_room_does_not_cut_back_what_read_tokens_asked_for(config, fake
     assert len(cut_entries) < 12
     kept_notes, kept_entries = query._make_room(fake_client, "m", prompt, notes, entries, keep=13000)
     assert len(kept_entries) == 12 and kept_notes == notes
+
+
+def _asked_with(config, conn, fake_client, plan, **manner):
+    """The system prompt and think override an answer was asked with."""
+    fake_client.structured["QueryPlan"] = plan
+    seen = {}
+    fake_client.chat_response = lambda model, messages: seen.setdefault("system", messages[0]["content"]) and "ok"
+    result = query.answer("What happened with Ana?", config, conn, fake_client, today=TODAY, **manner)
+    return result, seen["system"], fake_client.chat_asked[-1]
+
+
+def test_style_settles_what_kind_of_answer_whatever_the_router_said(config, conn, fake_client):
+    add_entry(conn, date(2024, 5, 20), text="Took the credit for Ana's fix.", summary="Took credit")
+    lookup = QueryPlan(intent="factual", needs_raw_text=True)
+    _result, system, _asked = _asked_with(config, conn, fake_client, lookup)
+    assert query._RECORD in system
+    _result, system, _asked = _asked_with(config, conn, fake_client, lookup, style="verdict")
+    assert query._JUDGMENT in system and query._ADVICE not in system
+    # advice is a judgment that says what to do, about now or not
+    _result, system, _asked = _asked_with(config, conn, fake_client, lookup, style="advice")
+    assert query._JUDGMENT in system and query._ADVICE in system
+    verdict = QueryPlan(intent="factual", wants="judgment")
+    _result, system, _asked = _asked_with(config, conn, fake_client, verdict, style="record")
+    assert query._JUDGMENT not in system
+    # asked for outright, the record comes with no verdict, however the question is put
+    assert query._RECORD_ONLY in system and "Give no verdict, opinion or advice" in system
+    assert query._RECORD not in system and query._STRAIGHT not in system
+
+
+def test_a_verdict_asked_for_is_not_answered_from_the_statistics(config, conn, fake_client):
+    add_entry(conn, date(2024, 5, 20), text="Low all week.", summary="Low")
+    counted = QueryPlan(intent="aggregate")
+    result, _system, _asked = _asked_with(config, conn, fake_client, counted)
+    assert result.stage_used == "aggregate"
+    result, system, _asked = _asked_with(config, conn, fake_client, counted, style="verdict")
+    assert result.stage_used == "precise_raw" and query._JUDGMENT in system
+
+
+def test_quick_never_thinks_and_keeps_it_short(config, conn, fake_client):
+    add_entry(conn, date(2024, 5, 20), text="Took the credit for Ana's fix.", summary="Took credit")
+    verdict = QueryPlan(intent="factual", wants="judgment")
+    _result, system, asked = _asked_with(config, conn, fake_client, verdict)
+    assert asked == ("precise", None) and query._BRIEF not in system
+    _result, system, asked = _asked_with(config, conn, fake_client, verdict, effort="quick")
+    assert asked == ("precise", False) and query._BRIEF in system
+    assert query._how_many(verdict, "quick") == query.TOP_K
+    assert query._read_room(verdict, config, "quick") == 0
+
+
+def test_thorough_reads_the_full_text_twice_over_and_always_thinks(config, conn, fake_client):
+    add_entry(conn, date(2024, 5, 20), text="Took the credit for Ana's fix.", summary="Took credit")
+    lookup = QueryPlan(intent="factual")
+    # a lookup is tried from the summaries first, and answered without thinking
+    result, _system, _asked = _asked_with(config, conn, fake_client, lookup)
+    assert result.stage_used == "fast_summary"
+    result, _system, asked = _asked_with(config, conn, fake_client, lookup, effort="thorough")
+    assert result.stage_used == "precise_raw" and asked == ("precise", None)
+    assert query._how_many(lookup, "thorough") == query.JUDGMENT_TOP_K
+    verdict = QueryPlan(intent="factual", wants="judgment")
+    assert query._read_room(verdict, config, "thorough") == 2 * query._read_room(verdict, config)
+
+
+def test_effort_and_style_come_from_the_config_when_a_question_names_none(config, conn, fake_client):
+    add_entry(conn, date(2024, 5, 20), text="Took the credit for Ana's fix.", summary="Took credit")
+    config.answers.effort, config.answers.style = "quick", "verdict"
+    _result, system, asked = _asked_with(config, conn, fake_client, QueryPlan(intent="factual"))
+    assert query._JUDGMENT in system and query._BRIEF in system and asked == ("precise", False)
+    # the question's own choice wins
+    _result, system, asked = _asked_with(
+        config, conn, fake_client, QueryPlan(intent="factual"), effort="balanced", style="record"
+    )
+    assert query._RECORD_ONLY in system and query._BRIEF not in system
+    with pytest.raises(ValueError, match="effort is one of"):
+        query.answer("q", config, conn, fake_client, today=TODAY, effort="heroic")

@@ -101,6 +101,26 @@ GroupOpt = Annotated[
     ),
 ]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON instead of tables.")]
+EffortOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--effort",
+        help="How much work the answer gets: quick (eight entries, no thinking first), "
+        "balanced, or thorough (twice the reading, always thinks). "
+        "Without it, [answers] effort in config.toml.",
+        show_default=False,
+    ),
+]
+StyleOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--style",
+        help="What kind of answer: auto (read from the question), record (what the journal "
+        "says), verdict (a judgment on it) or advice (what to do). "
+        "Without it, [answers] style in config.toml.",
+        show_default=False,
+    ),
+]
 NoMemoOpt = Annotated[
     bool,
     typer.Option("--no-memo", help="Ask the models again instead of reusing their kept results."),
@@ -602,6 +622,8 @@ def ask(
             show_default=False,
         ),
     ] = None,
+    effort: EffortOpt = None,
+    style: StyleOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
     """Ask a question about your journal, or leave the question out to ask several in a row.
@@ -609,10 +631,12 @@ def ask(
     In a row, follow-ups like "what about the month after?" build on the answers
     before them. --after N follows up on a question you asked earlier, kept in
     your history. --since, --until, --about, --tag and --group replace whatever
-    the question's wording suggests, and apply to every question in a row.
+    the question's wording suggests, and apply to every question in a row, as do
+    --effort and --style.
     """
     OUT.as_json = as_json
     date_from, date_to = _parse_range(since, until)
+    manner = _manner(effort, style)
     with _guard(), _open(config) as (cfg, conn):
         only = _entry_filter(conn, about, tag, group)
         earlier = _earlier_turns(cfg, after) if after is not None else []
@@ -620,14 +644,15 @@ def ask(
         if question is None:
             if as_json:
                 _fail("--json needs a question, since there's no one to ask the next one.")
-            _ask_loop(cfg, conn, client, date_from, date_to, only, earlier)
+            _ask_loop(cfg, conn, client, date_from, date_to, only, earlier, manner)
             return
         turns = _turns(earlier)
         conversation = earlier[-1].conversation if earlier else history.new_conversation()
         with _working("Resolving your follow-up..." if turns else "Thinking...") as status:
             stream = None if as_json else _Streamed(status)
             result, standalone = _answer_turn(
-                cfg, conn, client, question, turns, date_from, date_to, only, status, stream
+                cfg, conn, client, question, turns, date_from, date_to, only, status, stream,
+                manner,
             )
         kept = history.record(
             cfg, question, result, "ask", conversation, standalone,
@@ -646,6 +671,22 @@ def ask(
             console.print(f"[dim]Searched for: {escape(standalone)}[/dim]")
         if sources:
             _print_reading(conn, result)
+
+
+Manner = tuple[str | None, str | None]
+
+
+def _manner(effort: str | None, style: str | None) -> Manner:
+    """--effort and --style as given, or an error naming the choices."""
+    for flag, value, choices in (
+        ("--effort", effort, query.EFFORTS), ("--style", style, query.STYLES),
+    ):
+        if value is not None and value.strip().lower() not in choices:
+            _fail(f"{flag} is one of {', '.join(choices)}, not '{value}'.")
+    return (
+        effort.strip().lower() if effort else None,
+        style.strip().lower() if style else None,
+    )
 
 
 def _earlier_turns(cfg: Config, after: str) -> list[history.Kept]:
@@ -689,6 +730,7 @@ def _answer_turn(
     only: store.EntryFilter | None,
     status: Status,
     stream: _Streamed | None,
+    manner: Manner = (None, None),
 ) -> tuple[Answer, str]:
     """The answer, and what the journal was searched for once earlier turns
     were taken into account. The answer itself is written from the question
@@ -702,7 +744,7 @@ def _answer_turn(
         since=since, until=until, only=only, on_text=stream,
         # the page folds it away, but printed it can run to pages
         on_thinking=stream.think if stream is not None and cfg.ollama.show_thinking else None,
-        earlier=turns, asked=question,
+        earlier=turns, asked=question, effort=manner[0], style=manner[1],
     )
     if turns:
         result = query.with_step(result, "reading your follow-up", rewriting)
@@ -2365,6 +2407,7 @@ def _ask_loop(
     until: date | None = None,
     only: store.EntryFilter | None = None,
     earlier: list[history.Kept] | None = None,
+    manner: Manner = (None, None),
 ) -> None:
     console.print(
         "Ask one question after another; follow-ups like 'what about the month after "
@@ -2402,7 +2445,8 @@ def _ask_loop(
             with _working("Resolving your follow-up..." if turns else "Thinking...") as status:
                 stream = _Streamed(status)
                 result, standalone = _answer_turn(
-                    cfg, conn, client, question, turns, since, until, only, status, stream
+                    cfg, conn, client, question, turns, since, until, only, status, stream,
+                    manner,
                 )
         except JournalError as exc:
             if stream is not None and stream.started:

@@ -825,3 +825,16 @@ def test_review_pages_have_the_same_review_as_the_command(browser, journal, conf
     assert browser.get("/api/review/2024-w03")["key"] == "2024-W03"
     assert "No entries in 1999" in browser.get("/api/review/1999", status=404)["error"]
     assert "isn't a period" in browser.get("/api/review/someday", status=400)["error"]
+
+
+def test_ask_takes_an_effort_and_a_kind_of_answer(browser, fake_client):
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    seen = []
+    fake_client.chat_response = lambda model, messages: seen.append(messages[0]["content"]) or "No."
+    events = _events(browser.ask("Was that right?", style="verdict", effort="quick"))
+    assert events[-1][0] == "answer"
+    assert query._JUDGMENT in seen[-1] and query._BRIEF in seen[-1]
+    body = browser.post("/api/ask", {"q": "Was that right?", "effort": "heroic"}, status=400)
+    assert "effort is one of quick, balanced, thorough" in body["error"]
+    # what the pickers start on comes from the config
+    assert browser.get("/api/catalog")["answers"] == {"effort": "balanced", "style": "auto"}

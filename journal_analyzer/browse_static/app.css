@@ -577,7 +577,7 @@ a.cell:hover, a.cell:focus-visible { outline: 2px solid var(--ink); outline-offs
 .filters > .button { margin-left: auto; }
 .field { display: flex; flex-direction: column; gap: 0.25rem; }
 .field span { color: var(--ink-faint); font-size: 0.78rem; }
-.field input, .field select, .colour-by select {
+.field input, .field select, .colour-by select, .manner-pick select {
   min-height: 2.25rem; padding: 0.35rem 0.6rem; min-width: 0;
   background: var(--paper-raised); border: 1px solid var(--rule-strong); border-radius: var(--radius);
   transition: border-color 150ms var(--ease), box-shadow 150ms var(--ease);
@@ -733,6 +733,9 @@ table.links td:first-child { white-space: nowrap; }
 .ask-box button:disabled { opacity: 0.45; pointer-events: none; }
 .ask-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 1rem; }
 .ask-foot .section-note { margin: 0; }
+.ask-manner { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.9rem; font-size: 0.86rem; color: var(--ink-soft); }
+.manner-pick { display: inline-flex; align-items: center; gap: 0.4rem; }
+.manner-pick select { font-family: var(--ui); font-size: inherit; max-width: 100%; min-height: 1.9rem; padding: 0.2rem 0.45rem; }
 .notify-toggle { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; font-size: 0.86rem; color: var(--ink-soft); cursor: pointer; }
 .notify-toggle input { accent-color: var(--ink); width: 1rem; height: 1rem; margin: 0; }
 .notify-said { flex-basis: 100%; color: var(--alert); }

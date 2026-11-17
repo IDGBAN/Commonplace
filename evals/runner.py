@@ -107,8 +107,11 @@ def ask(
     conn: sqlite3.Connection,
     client: Any,
     earlier: Sequence[tuple[str, str]] = (),
+    effort: str | None = None,
+    style: str | None = None,
 ) -> dict[str, Any]:
-    """One scenario's answer with what went into it, as a plain dict."""
+    """One scenario's answer with what went into it, as a plain dict. `effort`
+    and `style` are query.answer's; left out, the config's are used."""
     plans: list[dict[str, Any]] = []
     thinking: list[str] = []
     sent: list[int] = []
@@ -134,13 +137,16 @@ def ask(
         result = query.answer(
             searched, config, conn, client, today=journal.TODAY,
             on_text=lambda _text: None, on_thinking=thinking.append,
-            earlier=earlier, asked=asked,
+            earlier=earlier, asked=asked, effort=effort, style=style,
         )
     finally:
         query._settle = real_settle  # type: ignore[assignment]
         client.chat_stream = real_stream
     if plans and earlier and "?" not in asked:
         plans[-1]["wants"] = "judgment"  # as query._answer reads a follow-up that tells
+    picked = style or config.answers.style
+    if plans and picked != "auto":
+        plans[-1]["wants"] = "record" if picked == "record" else "judgment"
     return {
         "id": scenario.id,
         "question": asked,
@@ -213,6 +219,8 @@ def run(
     overrides: dict[str, Any] | None = None,
     work: Path = WORK,
     say: Callable[[str], None] = print,
+    effort: str | None = None,
+    style: str | None = None,
 ) -> Path:
     """Asks each scenario `repeat` times and writes a JSON file per answer
     under <work>/runs/<label>. Returns that folder."""
@@ -228,6 +236,8 @@ def run(
         "think_tokens": config.ollama.think_tokens,
         "temperature": query.SYNTHESIS_TEMPERATURE,
         "overrides": overrides or {},
+        "effort": effort or config.answers.effort,
+        "style": style or config.answers.style,
     }
     (out / "run.json").write_text(json.dumps(about, indent=1), encoding="utf-8")
     try:
@@ -237,10 +247,12 @@ def run(
                 earlier: list[tuple[str, str]] = []
                 if scenario.after:
                     # a follow-up needs its first turn, asked in this take if it wasn't already
-                    first = answers.get(scenario.after) or ask(BY_ID[scenario.after], config, conn, client)
+                    first = answers.get(scenario.after) or ask(
+                        BY_ID[scenario.after], config, conn, client, effort=effort, style=style
+                    )
                     answers[scenario.after] = first
                     earlier = [(first["question"], first["answer"])]
-                got = ask(scenario, config, conn, client, earlier)
+                got = ask(scenario, config, conn, client, earlier, effort, style)
                 answers[scenario.id] = got
                 (out / f"{scenario.id}.{take}.json").write_text(
                     json.dumps(got, indent=1, ensure_ascii=False), encoding="utf-8"
@@ -260,7 +272,12 @@ def run_with_ollama(
     repeat: int = 1,
     settings: Sequence[str] = (),
     work: Path = WORK,
+    effort: str | None = None,
+    style: str | None = None,
 ) -> Path:
     config = make_config(config_path, work)
     overrides = override(settings)
-    return run(label, config, OllamaClient(config), chosen(only, tags), repeat, overrides, work)
+    return run(
+        label, config, OllamaClient(config), chosen(only, tags), repeat, overrides, work,
+        effort=effort, style=style,
+    )

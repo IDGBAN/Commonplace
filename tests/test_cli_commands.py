@@ -205,3 +205,20 @@ def test_sources_link_to_the_file_in_obsidian():
     assert link.plain == "[[2024-01-15]]"
     assert link.style.link == "obsidian://open?path=C%3A%2Fvault%2F2024-01-15.md"
     assert cli._source_link("[[Gone]]", None).style == ""
+
+
+def test_ask_passes_effort_and_style_on_and_names_the_choices(
+    tmp_path, config, conn, fake_client, monkeypatch
+):
+    add_entry(conn, date(2024, 1, 15), text="Took the credit.", summary="Took credit", path="/vault/2024-01-15.md")
+    fake_client.structured["QueryPlan"] = QueryPlan(intent="factual")
+    seen = []
+    fake_client.chat_response = lambda model, messages: seen.append(messages[0]["content"]) or "No."
+    monkeypatch.setattr(cli, "OllamaClient", lambda cfg: fake_client)
+    result = invoke_cli(tmp_path, config, "ask", "Was that right?", "--style", "Verdict", "--effort", "quick")
+    assert result.exit_code == 0, result.output
+    assert query._JUDGMENT in seen[-1] and query._BRIEF in seen[-1]
+    assert fake_client.chat_asked[-1] == ("precise", False)
+    bad = invoke_cli(tmp_path, config, "ask", "Was that right?", "--effort", "heroic")
+    assert bad.exit_code != 0
+    assert "--effort is one of quick, balanced, thorough" in bad.output

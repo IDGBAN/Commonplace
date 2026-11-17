@@ -75,6 +75,13 @@ python -m evals run warm --set SYNTHESIS_TEMPERATURE=0.6 --tag verdict
 python -m evals run wide --set JUDGMENT_TOP_K=24 --only sleep,shin
 ```
 
+`--effort` and `--style` ask every scenario the way the pickers on the Ask page do, to see what a quick answer loses or what happens when a question is forced to be a verdict:
+
+```sh
+python -m evals run quick --effort quick --tag verdict
+python -m evals show after quick --only credit,demo_fault
+```
+
 `show --thinking` prints the model's thinking above each answer, which is where to look when a verdict is wrong for no reason the answer gives. Each answer is also kept as JSON under `evals/.work/runs/<label>/`, with the router's plan and the prompt's size.
 
 ## Adding a scenario

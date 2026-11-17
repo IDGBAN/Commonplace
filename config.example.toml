@@ -174,6 +174,21 @@ exclude_tags = []                 # e.g. ["therapy", "health"]
 exclude_kinds = []                # kinds of note (their folder) to leave out, e.g. ["health"]
 tools = []                        # only these tools, e.g. ["search", "day", "mood"]; empty means all
 
+[answers]
+# How much work an answer gets unless you say otherwise for a question, with
+# --effort on journal ask or the picker on the Ask page.
+#   quick     reads eight entries, never thinks first, and keeps it short
+#   balanced  thinks before a verdict, a count or a follow-up
+#   thorough  reads twice [ollama] read_tokens, always from the full text,
+#             and always thinks; the slowest
+effort = "balanced"
+# What kind of answer you get, likewise --style or the picker.
+#   auto     read from the question
+#   record   what the journal says, and nothing worked out
+#   verdict  a judgment: right, wrong or partly, and how to fix it
+#   advice   what to do
+style = "auto"
+
 [history]
 # Keep your questions and their answers so you can read them again and pick a
 # chat back up. Off unless you turn it on. They go in a file of their own,

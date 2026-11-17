@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from journal_analyzer import query
 from journal_analyzer.models import JournalError
 
 from . import report, runner
@@ -34,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
                      help="a constant of journal_analyzer.query for this run, e.g. JUDGMENT_TOP_K=24")
     run.add_argument("--config", default=None, help="config file to take the models from")
+    run.add_argument("--effort", choices=query.EFFORTS, default=None, help="ask every scenario at this effort")
+    run.add_argument("--style", choices=query.STYLES, default=None,
+                     help="ask every scenario for this kind of answer, whatever its wording")
 
     show = commands.add_parser("show", help="print runs' answers beside what a right answer says")
     show.add_argument("labels", nargs="+")
@@ -55,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "run":
             folder = runner.run_with_ollama(
                 args.label, args.config, _names(args.only), _names(args.tag),
-                args.repeat, args.set, args.work,
+                args.repeat, args.set, args.work, args.effort, args.style,
             )
             print(f"\nKept in {folder}. Read them with: python -m evals show {args.label}")
         elif args.command == "show":

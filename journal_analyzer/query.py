@@ -62,6 +62,13 @@ JUDGMENT_TOP_K = 16
 # barely been opened. So a judgment keeps taking the next most relevant entry
 # until [ollama] read_tokens of text is reached, from at most this many.
 READ_POOL = 80
+# What the asker can say about an answer before it's written: how much work
+# it gets, and what kind of answer it is. "balanced" and "auto" are how a
+# question is answered when nothing is said.
+EFFORTS = ("quick", "balanced", "thorough")
+STYLES = ("auto", "record", "verdict", "advice")
+# how much of [ollama] read_tokens each effort reads; quick goes by count
+_READ_SCALE = {"quick": 0.0, "balanced": 1.0, "thorough": 2.0}
 COUNTED_RANGE_DAYS = 45
 COUNTED_TOP_K = 45
 # characters in the reading bar
@@ -210,6 +217,17 @@ _RECORD = (
     "quoting what the entries say about it."
 )
 
+# When the asker has said they want the record and nothing else. _RECORD
+# still judges a question that sounds like one, which is right when the
+# router was only guessing and wrong when they've picked.
+_RECORD_ONLY = (
+    "The asker wants only what the journal records: what happened, when, "
+    "with whom, and what they wrote about it at the time, in order. It "
+    "comes only from this material. Give no verdict, opinion or advice of "
+    "your own, even if the question is put as one: say what the entries "
+    "say that bears on it, including what they thought then, as theirs."
+)
+
 # For questions that want a conclusion. Without this the model looks for the
 # entry where the writer gave their own view and hands that back.
 _JUDGMENT = (
@@ -260,6 +278,12 @@ _LAST_WORD = (
     "bad terms with someone is not why a thing went wrong unless an entry "
     "says it was. Otherwise leave it out. Give "
     "nobody a part in it that the entries don't give them."
+)
+
+# for a quick answer
+_BRIEF = (
+    "Keep it short: the answer and the reason for it in a few sentences, and "
+    "what would fix it in one line when that's called for."
 )
 
 # on top of _JUDGMENT, when the question is what to do next
@@ -920,6 +944,7 @@ def _answer_aggregate(
     clock: _Clock | None = None,
     convo: Sequence[dict[str, str]] = (),
     asked: str = "",
+    brief: bool = False,
 ) -> Answer:
     mood_rows = store.monthly_mood(conn, plan.date_from, plan.date_to, only)
     tag_rows = store.top_tags(
@@ -961,7 +986,8 @@ def _answer_aggregate(
                     "cause the numbers don't show, say so plainly, and if "
                     "they do show it, just answer. "
                     f"{_FOLLOW_UP + ' ' if convo else ''}"
-                    f"{_READER_VOICE} {_FAST_ANSWER_FORMAT}{writer}"
+                    f"{_READER_VOICE} {_FAST_ANSWER_FORMAT}"
+                    f"{' ' + _BRIEF if brief else ''}{writer}"
                 ),
             },
             *convo,
@@ -1048,18 +1074,20 @@ def _counted(plan: QueryPlan) -> bool:
     return bool(plan.needs_raw_text and lo and hi and (hi - lo).days <= COUNTED_RANGE_DAYS)
 
 
-def _how_many(plan: QueryPlan) -> int:
+def _how_many(plan: QueryPlan, effort: str = "balanced") -> int:
     """How many entries a search hands on for this question, at the least."""
     if _counted(plan):
         return COUNTED_TOP_K
-    return JUDGMENT_TOP_K if plan.wants == "judgment" else TOP_K
+    if effort == "quick":
+        return TOP_K
+    return JUDGMENT_TOP_K if plan.wants == "judgment" or effort == "thorough" else TOP_K
 
 
-def _read_room(plan: QueryPlan, config: Config) -> int:
+def _read_room(plan: QueryPlan, config: Config, effort: str = "balanced") -> int:
     """The characters of entries a judgment reads up to, 0 when it goes by count."""
     if plan.wants != "judgment" or _counted(plan):
         return 0
-    return int(config.ollama.read_tokens * DEFAULT_CHARS_PER_TOKEN)
+    return int(config.ollama.read_tokens * DEFAULT_CHARS_PER_TOKEN * _READ_SCALE[effort])
 
 
 def _within(rows: list[sqlite3.Row], least: int, room: int) -> list[sqlite3.Row]:
@@ -1781,8 +1809,12 @@ def _fast_attempt(
     today: date | None = None,
     convo: Sequence[dict[str, str]] = (),
     asked: str = "",
+    brief: bool = False,
+    record_only: bool = False,
 ) -> str | None:
-    """`convo` is _conversation for a follow-up, and `asked` the message as typed."""
+    """`convo` is _conversation for a follow-up, and `asked` the message as
+    typed. `brief` asks for a short answer, and `record_only` for what the
+    journal says with no verdict."""
     hold = _HoldUntilAnswer(on_text) if on_text else None
     response = _chat(
         client,
@@ -1796,10 +1828,11 @@ def _fast_attempt(
                     "describe the people, places and topics the journal "
                     "links to, and carry no dates. Each item names the file "
                     "it comes from; folder and file names can say what it is "
-                    f"about. {_RECORD} {_STRAIGHT} "
+                    f"about. {_RECORD_ONLY if record_only else _RECORD + ' ' + _STRAIGHT} "
                     f"{_FOLLOW_UP + ' ' if convo else ''}{_CITING} "
                     f"{_today_line(today or date.today())} "
                     f"{_READER_VOICE} {_FAST_ANSWER_FORMAT} "
+                    f"{_BRIEF + ' ' if brief else ''}"
                     "If the material does not "
                     "contain enough information to answer confidently, reply "
                     f"with exactly the single word INSUFFICIENT.{writer}"
@@ -1842,11 +1875,16 @@ def _precise_reanalysis(
     convo: Sequence[dict[str, str]] = (),
     asked: str = "",
     before: Sequence[str] = (),
+    effort: str = "balanced",
+    advise: bool = False,
+    record_only: bool = False,
 ) -> tuple[str, list[sqlite3.Row], list[sqlite3.Row]]:
     """`plan` says whether the question wants the record or a judgment, and
     whether it's about now. `convo` is _conversation for a follow-up and
     `asked` the message as typed, and `before` what _lead_up gives a question
-    about now."""
+    about now. `effort` is one of EFFORTS, and `advise` says the asker wants
+    to be told what to do whatever the wording, `record_only` that they want
+    what the journal says and no verdict."""
     judging = plan is not None and plan.wants == "judgment"
     current = plan is not None and plan.current
     day = today or date.today()
@@ -1899,11 +1937,11 @@ def _precise_reanalysis(
     if judging:
         # only when it's asked for: given it anyway, "why do I sleep badly"
         # came back with a to-do list for the week
-        advising = current and bool(_WHAT_TO_DO_RE.search(asked or question))
+        advising = advise or (current and bool(_WHAT_TO_DO_RE.search(asked or question)))
         approach = f"{_JUDGMENT} {_ADVICE if advising else ''}".rstrip()
         missing = ""
     else:
-        approach = _RECORD
+        approach = _RECORD_ONLY if record_only else _RECORD
         missing = " If the material does not answer the question, say so."
     system = (
         "You answer questions about a personal journal from the "
@@ -1911,9 +1949,10 @@ def _precise_reanalysis(
         "notes describe the people, places and topics the journal "
         "links to, and carry no dates. Each one names the file it "
         "comes from; folder and file names can say what it is "
-        f"about. {approach} {_STRAIGHT} {_FOLLOW_UP + ' ' if convo else ''}{_CITING} "
+        f"about. {approach} {'' if record_only and not judging else _STRAIGHT + ' '}"
+        f"{_FOLLOW_UP + ' ' if convo else ''}{_CITING} "
         f"{_today_line(day)} {_READER_VOICE} "
-        f"{_PRECISE_ANSWER_FORMAT}{missing}{writer}"
+        f"{_PRECISE_ANSWER_FORMAT}{' ' + _BRIEF if effort == 'quick' else ''}{missing}{writer}"
     )
     lead_up = [f"### {block}" for block in before]
 
@@ -1941,12 +1980,15 @@ def _precise_reanalysis(
     kept_notes, kept_entries = ranked_notes, ranked_entries
     # A follow-up thinks too: it has an earlier answer to square with.
     thinking = judging or bool(convo) or bool(_COUNTED_RE.search(asked or question))
+    # a quick answer never waits on it, and a thorough one always does
+    thinking = effort == "thorough" or (thinking and effort != "quick")
     if thinking:
         kept_notes, kept_entries = _make_room(
             client, config.ollama.precise_model, prompt, ranked_notes, ranked_entries, "precise",
             # in the units prompt_tokens counts in
             keep=int(
-                config.ollama.read_tokens * DEFAULT_CHARS_PER_TOKEN / CHARS_PER_TOKEN_ESTIMATE
+                config.ollama.read_tokens * _READ_SCALE[effort]
+                * DEFAULT_CHARS_PER_TOKEN / CHARS_PER_TOKEN_ESTIMATE
             ) if judging else 0,
         )
     used_notes = [row for row, _ in kept_notes]
@@ -1997,6 +2039,8 @@ def answer(
     on_thinking: TextSink | None = None,
     earlier: Sequence[Turn] = (),
     asked: str | None = None,
+    effort: str | None = None,
+    style: str | None = None,
 ) -> Answer:
     """`since`, `until` and `only` are what the person asked for, so they
     override whatever the router reads into the question. With `on_text`, the
@@ -2006,11 +2050,20 @@ def answer(
     the message as it was typed, and `earlier` the turns before it as
     (message, answer) or (message, answer, what was searched for). The model
     that answers gets those turns and the message itself, not the rewrite.
+    `effort` (one of EFFORTS) says how much is read and whether the model
+    thinks first, and `style` (one of STYLES) what kind of answer is wanted
+    whatever the router makes of the wording; left out, they come from
+    [answers] in the config.
     The answer's timings say how long each step took."""
+    effort = effort or config.answers.effort
+    style = style or config.answers.style
+    if effort not in EFFORTS or style not in STYLES:
+        raise ValueError(f"effort is one of {EFFORTS} and style one of {STYLES}")
     clock = _Clock()
     result = _answer(
         question, config, conn, client, today, on_stage, since, until, only, on_text,
         on_thinking, clock, _conversation(earlier), asked or question, _days_cited(earlier),
+        effort, style,
     )
     writer = {
         "fast_summary": config.ollama.fast_model,
@@ -2036,6 +2089,8 @@ def _answer(
     convo: list[dict[str, str]],
     asked: str,
     carried: Sequence[date] = (),
+    effort: str = "balanced",
+    style: str = "auto",
 ) -> Answer:
     today = today or date.today()
     writer = profile.context(conn, config)
@@ -2052,6 +2107,10 @@ def _answer(
         # journal doesn't have) is a point to reason with. Read as a lookup,
         # it was answered "the journal doesn't record that".
         plan = plan.model_copy(update={"wants": "judgment"})
+    if style != "auto":
+        # the asker has said what kind of answer this is
+        wants = "record" if style == "record" else "judgment"
+        plan = plan.model_copy(update={"wants": wants})
     if since is not None or until is not None:
         plan = plan.model_copy(update={"date_from": since, "date_to": until})
     named = notes_named_in(question, conn)
@@ -2059,11 +2118,12 @@ def _answer(
         named = list(dict.fromkeys([*only.note_ids, *named]))
 
     # what to do next is never a matter of counting, whatever the router made of it
-    if plan.intent == "aggregate" and not (plan.current and plan.wants == "judgment"):
+    reasoned = plan.wants == "judgment" and (plan.current or style in ("verdict", "advice"))
+    if plan.intent == "aggregate" and not reasoned:
         on_stage("Putting the numbers into words...")
         return _answer_aggregate(
             question, plan, config, conn, client, named, only, on_text, writer,
-            on_stage, on_thinking, clock, convo, asked,
+            on_stage, on_thinking, clock, convo, asked, effort == "quick",
         )
 
     about = _named_notes(conn, plan, named)
@@ -2089,9 +2149,9 @@ def _answer(
         clock.start("searching")
         query_vector = _embed_question(question, config, conn, client)
         candidates = with_named_day(_retrieve(
-            question, plan, config, conn, client, top_k=_how_many(plan),
+            question, plan, config, conn, client, top_k=_how_many(plan, effort),
             query_vector=query_vector, boost_note_ids=named, only=only, parts=found_parts,
-            room=_read_room(plan, config),
+            room=_read_room(plan, config, effort),
         ))
         notes = _retrieve_notes(plan, conn, query_vector, about, candidates)
     for day in carried:
@@ -2110,14 +2170,15 @@ def _answer(
     )
 
     # a judgment needs the facts themselves, and a model that thinks
-    if not plan.needs_raw_text and plan.wants != "judgment":
+    # and a thorough answer is never given from summaries
+    if not plan.needs_raw_text and plan.wants != "judgment" and effort != "thorough":
         on_stage("Answering from summaries...")
         context = _summary_context(
             candidates, notes, plan, config, conn, about, found_parts, before
         )
         fast_answer = _fast_attempt(
             question, context, config, client, on_text, writer, on_stage, on_thinking, clock,
-            today, convo, asked,
+            today, convo, asked, effort == "quick", style == "record",
         )
         if fast_answer is not None:
             return _finalize(
@@ -2145,6 +2206,9 @@ def _answer(
         convo=convo,
         asked=asked,
         before=before,
+        effort=effort,
+        advise=style == "advice",
+        record_only=style == "record",
     )
     drawn = _days_drawn_on(text, used)
     return _finalize(

@@ -46,7 +46,8 @@ def show(
         if told:
             lines.append(
                 f"{label}: code {told.get('code')}, precise model {told.get('precise_model')}, "
-                f"temperature {told.get('temperature')}, overrides {told.get('overrides') or 'none'}"
+                f"temperature {told.get('temperature')}, effort {told.get('effort', 'balanced')}, "
+                f"style {told.get('style', 'auto')}, overrides {told.get('overrides') or 'none'}"
             )
     found = [g for label in labels for g in answers(label, work) if not only or g["id"] in only]
     found.sort(key=lambda g: (_ORDER.get(g["id"], len(_ORDER)), labels.index(g["label"]), g["take"]))
