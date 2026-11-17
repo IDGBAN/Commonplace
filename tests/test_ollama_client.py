@@ -449,3 +449,15 @@ def test_a_chat_can_turn_thinking_off_for_itself(tmp_path, monkeypatch):
     client = _client_with(tmp_path, monkeypatch, inner, precise_model_think=True)
     client.chat("fake-precise", [], role="precise", think=False)
     assert inner.chat.call_args.kwargs["think"] is False
+
+
+def test_num_thread_is_sent_when_set_and_kept_out_of_the_memo_key(tmp_path, monkeypatch):
+    inner = MagicMock()
+    inner.chat.return_value = _reply("ok")
+    _client(tmp_path, monkeypatch, inner).chat("fake-precise", [])
+    assert "num_thread" not in inner.chat.call_args.kwargs["options"]
+    asked = [{"role": "user", "content": "another question"}]
+    _client_with(tmp_path, monkeypatch, inner, num_thread=12).chat("fake-precise", asked)
+    assert inner.chat.call_args.kwargs["options"]["num_thread"] == 12
+    # a different thread count gives the same reply, so kept results still count
+    assert ollama_client._memo_options({"temperature": 0, "num_ctx": 8192, "num_thread": 12}) == {"temperature": 0}

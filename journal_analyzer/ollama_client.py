@@ -197,7 +197,8 @@ def _nothing() -> None:
 def _memo_options(opts: dict[str, Any]) -> dict[str, Any]:
     # the window only changes the reply when a prompt wouldn't fit, and then
     # it's raised to fit, so a different window setting still gives the same one
-    return {k: v for k, v in opts.items() if k != "num_ctx"}
+    # nor does how many threads wrote it
+    return {k: v for k, v in opts.items() if k not in ("num_ctx", "num_thread")}
 
 
 def _require_every_field(schema: type[BaseModel]) -> dict[str, Any]:
@@ -300,6 +301,8 @@ class OllamaClient:
         # the prompt it has already read. So a window only grows in a run.
         smallest = max(fixed_window(self._config, model), self._windows.get(model, 0))
         opts = _options(messages, options, smallest, reply_tokens)
+        if self._config.ollama.num_thread:
+            opts.setdefault("num_thread", self._config.ollama.num_thread)
         self._windows[model] = max(smallest, int(opts["num_ctx"]))
         return opts
 

@@ -96,6 +96,9 @@ class OllamaConfig(BaseModel):
     # capped at the model's own limit
     embed_num_ctx: int = Field(default=8192, ge=512)
     request_timeout_seconds: int = Field(default=120, ge=1)
+    # CPU threads the fast and precise models run on. 0 leaves it to Ollama,
+    # which picks about half the cores on a chip with slow and fast ones.
+    num_thread: int = Field(default=0, ge=0)
 
 
 class DbConfig(BaseModel):

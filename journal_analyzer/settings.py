@@ -76,6 +76,7 @@ HELP: dict[str, tuple[str, str]] = {
     "ollama.precise_model_think": ("now", "Whether the precise model thinks before digests and before answers that are a judgment, a count or a follow-up. Plain lookups never do."),
     "ollama.show_thinking": ("now", "Print a model's thinking in journal ask as it comes, before the answer. The Ask page always shows it."),
     "ollama.think_tokens": ("now", "How long a model may think, in tokens, before it's stopped and asked again without thinking."),
+    "ollama.num_thread": ("now", "CPU threads the models run on. 0 leaves it to Ollama. Changing it makes Ollama load the model again."),
     "answers.effort": ("now", "How much work an answer gets unless you pick another on the Ask page. Quick reads eight entries and doesn't think first; thorough reads twice as much, always from the full text, and always thinks."),
     "answers.style": ("now", "What kind of answer you get unless you pick another: auto reads it from the question, record is what the journal says, verdict a judgment on it, advice what to do."),
     "ollama.read_tokens": ("now", "How much of the journal a judgment reads, in tokens. The most relevant entries are taken until it's reached; more means slower answers that miss less."),

@@ -61,6 +61,12 @@ embed_num_ctx = 8192
 # turns it off. Each photo is described once; the memo keeps it.
 vision_model = ""
 request_timeout_seconds = 120
+# CPU threads the fast and precise models run on. 0 leaves it to Ollama, which
+# on a chip with fast and slow cores uses about half of them. More isn't always
+# quicker: on one 16-core laptop 12 threads read 10% faster than Ollama's own
+# choice and 16 read no faster than 12 and wrote a little slower. Time it on
+# yours before keeping a number.
+num_thread = 0
 
 [db]
 path = "~/.journal_analyzer/journal.db"
